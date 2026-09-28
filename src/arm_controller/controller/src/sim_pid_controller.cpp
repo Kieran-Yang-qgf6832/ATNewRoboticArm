@@ -114,7 +114,11 @@ controller_interface::return_type SimPidController::update_and_write_commands(
     return controller_interface::return_type::OK;
 }
 
-controller_interface::return_type SimPidController::update_reference_from_subscribers() {
+controller_interface::return_type SimPidController::update_reference_from_subscribers(
+    const rclcpp::Time& time,
+    const rclcpp::Duration& period) {
+    (void)time;
+    (void)period;
     return controller_interface::return_type::OK;
 }
 

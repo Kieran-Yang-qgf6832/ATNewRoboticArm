@@ -7,7 +7,8 @@
 
   <ros2_control name="arm_hw" type="system">
     <hardware>
-      <plugin>mujoco_ros2_control/MujocoSystem</plugin>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <param name="mujoco_model">$(find arm_model)/model/scene.xml</param>
     </hardware>
 
     <joint name="joint1">

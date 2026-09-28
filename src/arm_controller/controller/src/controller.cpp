@@ -219,20 +219,20 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
             command_interfaces_[i * 6 + 0].set_value(state_interfaces_[i * 3 + 0].get_value());
             command_interfaces_[i * 6 + 1].set_value(0.0);
             command_interfaces_[i * 6 + 2].set_value(0.0);
-            command_interfaces_[i * 6 + 3].set_value(default_kp[i]);
-            command_interfaces_[i * 6 + 4].set_value(default_kd[i]);
-            command_interfaces_[i * 6 + 5].set_value(0.0f);
+            command_interfaces_[i * 6 + 3].set_value(static_cast<double>(default_kp[i]));
+            command_interfaces_[i * 6 + 4].set_value(static_cast<double>(default_kd[i]));
+            command_interfaces_[i * 6 + 5].set_value(0.0);
         }
         return controller_interface::return_type::ERROR;
     }
 
     for (std::size_t i = 0; i < joints_name.size(); i++) {     // 更新状态机工场的状态值
-        command_interfaces_[i * 6 + 0].set_value(fsm_factory->command_[i].position);
-        command_interfaces_[i * 6 + 1].set_value(fsm_factory->command_[i].velocity);
-        command_interfaces_[i * 6 + 2].set_value(fsm_factory->command_[i].torque);
-        command_interfaces_[i * 6 + 3].set_value(fsm_factory->command_[i].kp);
-        command_interfaces_[i * 6 + 4].set_value(fsm_factory->command_[i].kd);
-        command_interfaces_[i * 6 + 5].set_value(fsm_factory->command_[i].ki);
+        command_interfaces_[i * 6 + 0].set_value(static_cast<double>(fsm_factory->command_[i].position));
+        command_interfaces_[i * 6 + 1].set_value(static_cast<double>(fsm_factory->command_[i].velocity));
+        command_interfaces_[i * 6 + 2].set_value(static_cast<double>(fsm_factory->command_[i].torque));
+        command_interfaces_[i * 6 + 3].set_value(static_cast<double>(fsm_factory->command_[i].kp));
+        command_interfaces_[i * 6 + 4].set_value(static_cast<double>(fsm_factory->command_[i].kd));
+        command_interfaces_[i * 6 + 5].set_value(static_cast<double>(fsm_factory->command_[i].ki));
     }
 
     return controller_interface::return_type::OK;

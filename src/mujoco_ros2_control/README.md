@@ -1,142 +1,92 @@
-# URDF Configuration (for usage with xacro2mjcf script)
+# MuJoCo ros2_control
 
-To use this package with an existing robot description (URDF or Xacro), create a **Xacro wrapper file** that merges:
+[![Rdev](https://build.ros2.org/job/Rdev__mujoco_ros2_control__ubuntu_resolute_amd64/badge/icon)](https://build.ros2.org/job/Rdev__mujoco_ros2_control__ubuntu_resolute_amd64/) [![Ldev](https://build.ros2.org/job/Ldev__mujoco_ros2_control__ubuntu_resolute_amd64/badge/icon)](https://build.ros2.org/job/Ldev__mujoco_ros2_control__ubuntu_resolute_amd64/) [![Kdev](https://build.ros2.org/job/Kdev__mujoco_ros2_control__ubuntu_noble_amd64/badge/icon)](https://build.ros2.org/job/Kdev__mujoco_ros2_control__ubuntu_noble_amd64/) [![Jdev](https://build.ros2.org/job/Jdev__mujoco_ros2_control__ubuntu_noble_amd64/badge/icon)](https://build.ros2.org/job/Jdev__mujoco_ros2_control__ubuntu_noble_amd64/) [![Hdev](https://build.ros2.org/job/Hdev__mujoco_ros2_control__ubuntu_jammy_amd64/badge/icon)](https://build.ros2.org/job/Hdev__mujoco_ros2_control__ubuntu_jammy_amd64/) [![CI](https://github.com/ros-controls/mujoco_ros2_control/actions/workflows/ci.yaml/badge.svg)](https://github.com/ros-controls/mujoco_ros2_control/actions/workflows/ci.yaml) ![License](https://img.shields.io/github/license/ros-controls/mujoco_ros2_control) [![Codecov](https://codecov.io/gh/ros-controls/mujoco_ros2_control/branch/main/graph/badge.svg)](https://codecov.io/gh/ros-controls/mujoco_ros2_control)
 
-- your existing robot description,
-- the MuJoCo configuration, and
-- the ROS 2 Control configuration.
+This repository provides a ros2_control system interface and supporting packages to run ROS 2 controllers against the MuJoCo physics simulator.
 
-For reference, see the `urdf` directories in the provided examples ([franka](https://github.com/dfki-ric/mujoco_ros2_control/blob/main/examples/franka_mujoco/urdf/franka.urdf.xacro), [unitree](https://github.com/dfki-ric/mujoco_ros2_control/blob/main/examples/unitree_h1_mujoco/urdf/unitree_h1.urdf.xacro)).
+This project wraps MuJoCo as a hardware/system interface so you can use the ros2_control stack (controller manager, controllers, controller interfaces) against simulated robots based on MJCF or generated from URDF.
 
----
+### Contents
 
-## MuJoCo-Specific Elements
+- `mujoco_ros2_control` - core system interface plugin and resources
+- `mujoco_ros2_control_msgs` - message/service definitions used by the plugin
+- `mujoco_ros2_control_plugins` - optional plugins that extend simulation capabilities
+- `mujoco_ros2_control_demos` - demo launch files, configs and example robots
+- `mujoco_ros2_control_tests` - integration / launch tests and simple examples
+- `docker/` - Dockerfiles and scripts to run CI/containers
 
-The following snippet shows how to integrate MuJoCo configuration elements into your robot description:
+### Key features
 
-```xml
-<mujoco>
-    <!-- Compiler options:
-         https://mujoco.readthedocs.io/en/stable/XMLreference.html#compiler -->
-    <compiler
-        meshdir="/tmp/mujoco/meshes"
-        discardvisual="true"
-        autolimits="false"
-        balanceinertia="true"/>
+- Full ros2_control SystemInterface plugin for MuJoCo
+- MJCF/URDF conversion utilities to auto-generate MuJoCo models
+- Optional plugin system for extending simulation with custom publishers and services
+- Example demos showing basic control, PID and transmission setups
 
-    <!-- Global simulation options:
-         https://mujoco.readthedocs.io/en/stable/XMLreference.html#option -->
-    <option
-        integrator="implicitfast"
-        gravity="0 0 -9.81"
-        impratio="10"
-        cone="elliptic"
-        solver="Newton">
-        <flag multiccd="enable"/>
-    </option>
+## Quick start
 
-    <!-- Add elements/tags to an MJCF body or any of its children -->
-    <reference name="${prefix}left_inner_finger">
-        <!-- Add per-body and per-joint configuration -->
-        <body gravcomp="1"/>            <!-- Enable gravity compensation -->
-        <joint damping="10"/>           <!-- Add damping to all child joints -->
+There are two common ways to get running: build from source (recommended)
+or install prebuilt binaries (if available for your distribution).
 
-        <!-- Modify a child geom with the given name -->
-        <geom
-            name="geom1"
-            friction="0.7"
-            mass="0"
-            priority="1"
-            solimp="0.95 0.99 0.001"
-            solref="0.004 1"/>
-    </reference>
+- Build from source (recommended)
 
-    <!-- Define an RGB-D camera:
-         https://mujoco.readthedocs.io/en/stable/XMLreference.html#body-camera -->
-    <reference name="camera_link">
-        <camera
-            name="camera"
-            mode="fixed"
-            fovy="45"
-            quat="0.5 0.5 -0.5 -0.5"/>
-    </reference>
+  1. Install required dependencies manually or from rosdep, including the `mujoco_vendor` package which provides the base MuJoCo install.
 
-    <!-- Camera pose sensors relative to the world frame -->
-    <sensor>
-        <!-- Position sensor:
-             https://mujoco.readthedocs.io/en/stable/XMLreference.html#sensor-framepos -->
-        <framepos
-            name="camera_link_pose"
-            objtype="body"
-            objname="camera_link"
-            reftype="body"
-            refname="world"/>
+  2. Build the workspace (example with a sourced ROS 2 installation):
 
-        <!-- Orientation sensor:
-             https://mujoco.readthedocs.io/en/stable/XMLreference.html#sensor-framequat -->
-        <framequat
-            name="camera_link_quat"
-            objtype="body"
-            objname="camera_link"
-            reftype="body"
-            refname="world"/>
-    </sensor>
+  ```bash
+  # from workspace root (this repository is typically inside a ROS 2 workspace)
+  colcon build --symlink-install --packages-select mujoco_ros2_control* \
+    --cmake-args -DCMAKE_BUILD_TYPE=Release
+  ```
 
-    <!-- Actuator definition:
-         https://mujoco.readthedocs.io/en/stable/XMLreference.html#actuator -->
-    <actuator>
-        <position
-            name="pos_finger_joint1"
-            joint="${arm_id}_finger_joint1"
-            kp="1000"
-            forcelimited="true"
-            forcerange="-120 120"
-            ctrllimited="true"
-            ctrlrange="0 0.04"
-            user="1"/>
-    </actuator>
-</mujoco>
-```
+  3. Source the workspace and run a demo:
 
-## ROS 2 Control Hardware Example
-Below is an example of how to declare a ROS 2 Control system using PID and torque control:
-```xml
-<ros2_control name="${prefix}${name}" type="system">
-    <hardware>
-        <plugin>mujoco_ros2_control/MujocoSystem</plugin>
-    </hardware>
+  ```bash
+  source install/setup.bash
+  ros2 launch mujoco_ros2_control_demos demo.launch.py
+  ```
 
-    <!-- Joint with position + velocity + acceleration PID control -->
-    <joint name="joint1">
-        <command_interface name="position"/>
-        <command_interface name="velocity"/>
-        <command_interface name="acceleration"/>
+- Install prebuilt binaries (if available)
 
-        <param name="kp">1000.0</param>
-        <param name="ki">0.0</param>
-        <param name="kd">0.01</param>
+  If your ROS 2 distribution or your OS package index provides prebuilt
+  packages for `mujoco_ros2_control`, you can install those instead of
+  compiling from source. Check your distribution's package repositories or
+  the project's GitHub releases for available binary artifacts.
 
-        <!-- Only required when using position + velocity control -->
-        <param name="kvff">0.01</param>
+  Example (Debian/Ubuntu with ROS packages — replace `<distro>`):
 
-        <!-- Required when using position + velocity + acceleration control -->
-        <param name="kaff">0.01</param>
+  ```bash
+  sudo apt update
+  sudo apt install ros-<distro>-mujoco-ros2-control
+  ```
 
-        <state_interface name="position"/>
-        <state_interface name="velocity"/>
-    </joint>
+  After installing binaries, source your ROS install and run a demo:
 
-    <!-- Joint with torque (effort) control -->
-    <joint name="joint2">
-        <command_interface name="effort"/>
+  ```bash
+  source /opt/ros/<distro>/setup.bash
+  ros2 launch mujoco_ros2_control_demos demo.launch.py
+  ```
 
-        <state_interface name="position">
-            <param name="initial_value">1.0</param>
-        </state_interface>
+See [mujoco_ros2_control/README.md](./mujoco_ros2_control/README.md) for detailed usage, configuration examples and mappings between MJCF actuators/sensors and ros2_control interfaces.
 
-        <state_interface name="velocity">
-            <param name="initial_value">0.0</param>
-        </state_interface>
-    </joint>
-</ros2_control>
-```
+Supported ROS 2 distributions
+- The project is developed and tested against multiple ROS 2 distributions.
+  This README includes basic notes for: `Humble`, `Jazzy`, `Kilted`, `Lyrical`, and `Rolling`.
+
+### Support matrix
+
+| Distribution | Status |
+| --- | --- |
+| Humble | Supported |
+| Jazzy | Supported |
+| Kilted | Supported |
+| Lyrical | Supported |
+| Rolling | Supported (development) |
+
+### Contributing
+
+- Contributions, bug reports and feature requests are welcome. Please follow standard ROS Controls project workflows: open issues, send PRs against the `main` branch and respect the repository code style using `pre-commit`.
+
+### License & maintainers
+
+- This repository is distributed under the terms of the LICENSE file (`LICENSE`). Maintainers and authors are listed in the Git history and package manifests (`package.xml`) inside each package.

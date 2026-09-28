@@ -2,12 +2,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit, OnProcessStart
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.parameter_descriptions import ParameterValue, ParameterFile
 
 
 def generate_launch_description():
@@ -15,27 +15,22 @@ def generate_launch_description():
     launch_pack_share = get_package_share_directory("launch_pack")
 
     urdf_path = os.path.join(arm_model_share, "model", "robotic_arm.urdf")
-    default_mjcf_path = os.path.join(arm_model_share, "model", "scene.xml")
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
 
-    with open(urdf_path, "r", encoding="utf-8") as inf:
-        robot_desc = inf.read()
+    # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开
+    robot_description_content = Command(
+        [
+            PathJoinSubstitution([FindExecutable(name="xacro")]),
+            " ",
+            urdf_path,
+        ]
+    )
+    robot_description = {
+        "robot_description": ParameterValue(robot_description_content, value_type=str)
+    }
 
     use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
-    show_gui = ParameterValue(LaunchConfiguration("show_gui"), value_type=bool)
-
-    mjcf_path_arg = DeclareLaunchArgument(
-        "mjcf_path",
-        default_value=default_mjcf_path,
-        description="Path to the robotic arm MJCF/scene XML used by MuJoCo",
-    )
-
-    show_gui_arg = DeclareLaunchArgument(
-        "show_gui",
-        default_value="true",
-        description="Whether to show the MuJoCo GUI",
-    )
 
     show_rviz_arg = DeclareLaunchArgument(
         "show_rviz",
@@ -71,30 +66,25 @@ def generate_launch_description():
         package="robot_state_publisher",
         executable="robot_state_publisher",
         parameters=[
-            {
-                "robot_description": robot_desc,
-                "use_sim_time": use_sim_time,
-            }
+            robot_description,
+            {"use_sim_time": use_sim_time},
         ],
         output="screen",
     )
 
+    # 新版 mujoco_ros2_control：MuJoCo 仿真以 SystemInterface 插件形式
+    # 运行在 controller_manager 进程内，硬件插件与 MJCF 路径在 URDF
+    # 的 <ros2_control> 标签中声明。MJCF 场景：
+    #   $(find arm_model)/model/scene.xml
     mujoco = Node(
         package="mujoco_ros2_control",
-        executable="mujoco_ros2_control",
+        executable="ros2_control_node",
+        output="both",
         parameters=[
-            {"robot_description": robot_desc},
-            controller_yaml,
-            {"simulation_frequency": 500.0},
-            {"real_time_factor": 1.0},
-            {"robot_model_path": LaunchConfiguration("mjcf_path")},
-            {"show_gui": show_gui},
             {"use_sim_time": use_sim_time},
+            ParameterFile(controller_yaml),
         ],
-        remappings=[
-            ("/controller_manager/robot_description", "/robot_description"),
-        ],
-        output="screen",
+        on_exit=Shutdown(),
     )
 
     joint_state_broadcaster = Node(
@@ -146,7 +136,7 @@ def generate_launch_description():
         OnProcessStart(
             target_action=mujoco,
             on_start=[
-                LogInfo(msg="MuJoCo started, spawning joint_state_broadcaster"),
+                LogInfo(msg="MuJoCo ros2_control node started, spawning joint_state_broadcaster"),
                 joint_state_broadcaster,
             ],
         )
@@ -164,8 +154,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
-            mjcf_path_arg,
-            show_gui_arg,
             show_rviz_arg,
             use_sim_time_arg,
             controller_manager_timeout_arg,
