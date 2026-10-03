@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -90,6 +91,8 @@ public:
      * @param name 当前任务名
      * @param next 后继任务名
      * @return true 串联成功；false 任务未注册
+     * @note 同一个任务实例只保存一个后继，因此同一任务类型在链中重复出现时，
+     *       其出口以后一次 link() 为准。
      */
     bool link(const std::string& name, const std::string& next) {
         auto task = task_map_.find(name);
@@ -128,6 +131,7 @@ public:
             }
             current_task_name_ = next_task_name_;
             switching_         = false;
+            ++switch_count_;
             return true;
         }
 
@@ -149,21 +153,19 @@ public:
     const std::string& current_task() const { return current_task_name_; }
 
     /**
-     * @brief 当前任务是否还有后继
-     * @return false 表示已到达任务链末端，可以结束整个任务链
+     * @brief 已完成的切换次数
+     * @return 调度器启动后成功完成的 exit()/enter() 次数
+     * @note 同一个任务实例在任务链中可能出现在多个位置（例如链中间的 idel），
+     *       因此调用方用「切换次数」而不是 TaskFSM::next_task() 判断是否走到链尾：
+     *       任务链长度为 N 时，切换次数达到 N-1 即表示已到达链尾任务。
      */
-    bool current_task_has_next() const {
-        auto current = task_map_.find(current_task_name_);
-        if (current == task_map_.end() || current->second == nullptr) {
-            return false;
-        }
-        return !current->second->next_task().empty();
-    }
+    std::size_t switch_count() const { return switch_count_; }
 
 private:
-    bool first_run_{true};          ///< 是否尚未调用首次 enter()
-    bool switching_{false};         ///< 是否已确定下一周期要切换
-    std::string next_task_name_;    ///< 待切换到的任务名
-    std::string current_task_name_; ///< 当前任务名
+    bool first_run_{true};            ///< 是否尚未调用首次 enter()
+    bool switching_{false};           ///< 是否已确定下一周期要切换
+    std::size_t switch_count_{0};     ///< 已完成的切换次数
+    std::string next_task_name_;      ///< 待切换到的任务名
+    std::string current_task_name_;   ///< 当前任务名
     std::unordered_map<std::string, std::unique_ptr<TaskFSM>> task_map_; ///< 任务表
 };

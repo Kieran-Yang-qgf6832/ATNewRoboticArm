@@ -1,3 +1,25 @@
+"""
+@file arm_measure_sim.launch.py
+@brief 参数辨识仿真场景（旧版链路，依赖已不存在的 parameter_measure 包）
+
+启动内容（按实际启动顺序）：
+  1. robot_state_publisher  ：发布 /robot_description 与 TF
+  2. mujoco_ros2_control    ：ros2_control_node + MuJoCo SystemInterface 插件
+  3. sim_pid_controller     ：链式 PID 控制器
+  4. arm_controller         ：机械臂状态机控制器
+  5. parameter_measure      ：独立的参数辨识节点，通过 myjoints_state / myjoints_target
+                              话题与控制器交换数据并落盘 CSV
+
+@warning 状态：当前仓库不可用。parameter_measure 包已不存在（现为 parameter_identify，
+         且只提供 identify_arm 可执行文件）；参数辨识现在由控制器内部的
+         ParamterMeasureState 完成，由 tasks 的 measure 任务触发，不再需要独立节点：
+             ros2 run tasks task_runner --ros-args -p task_sequence:="[measure]"
+         另外本文件没有 spawn joint_state_broadcaster，/joint_states 依赖旧链路的
+         parameter_measure 节点发布，与当前控制器不匹配。
+@note show_rviz / csv_file_path / trajectory_file_path 等 launch 参数在当前链路下没有消费方
+      （本文件也没有启动 rviz2）。
+"""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
 from launch.event_handlers import OnProcessExit, OnProcessStart
@@ -106,6 +128,8 @@ def generate_launch_description():
         output="screen",
     )
 
+    # 注意：parameter_measure 包已不存在（现为 parameter_identify，仅提供 identify_arm）；
+    # 参数辨识现在由控制器 ParamterMeasureState + tasks 的 measure 任务完成，本节点已废弃。
     parameter_measure = Node(
         package="parameter_measure",
         executable="parameter_measure_node",

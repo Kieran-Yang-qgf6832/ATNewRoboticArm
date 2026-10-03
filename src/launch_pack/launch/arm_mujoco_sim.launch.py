@@ -1,3 +1,24 @@
+"""
+@file arm_mujoco_sim.launch.py
+@brief MuJoCo 仿真 + 控制器链路（与 arm_controller_test_sim.launch.py 同源的早期版本）
+
+启动内容（按实际启动顺序）：
+  1. robot_state_publisher  ：发布 /robot_description 与 TF（注意：本文件没有设置 use_sim_time）
+  2. mujoco_ros2_control    ：ros2_control_node + MuJoCo SystemInterface 插件
+  3. joint_state_broadcaster：发布 /joint_states
+  4. sim_pid_controller     ：链式 PID 控制器
+  5. arm_controller         ：机械臂状态机控制器
+  6. arm_calc               ：受力/运动学计算节点
+  7. rviz2                  ：显示配置 config/display_config.rviz（由 show_rviz 控制）
+
+@warning 状态：当前仓库不可用。第 6 步引用的 arm_calc 包不在本工作区（src/）中，启动会因
+         找不到该可执行文件而失败。要跑仿真请改用 arm_controller_test_sim.launch.py；
+         若需保留本文件，请去掉 arm_calc 相关节点（或补齐该包）。
+@note 与 arm_controller_test_sim.launch.py 的其它差异：robot_state_publisher 未传
+      use_sim_time；spawner 没有超时参数；控制器逐个 spawn（而不是 --activate-as-group）；
+      RViz 没有 output="screen"。
+"""
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
 from launch.conditions import IfCondition
@@ -77,6 +98,8 @@ def generate_launch_description():
         output="screen",
     )
 
+    # 注意：arm_calc 包不在本工作区（src/）中，本节点会导致 launch 启动失败。
+    # 要让其余节点可用，删掉本节点以及返回列表里的 arm_calc 即可。
     arm_calc = Node(
         package="arm_calc",
         executable="arm_calc",

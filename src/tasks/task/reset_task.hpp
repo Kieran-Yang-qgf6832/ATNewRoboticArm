@@ -52,6 +52,12 @@ public:
     const std::string& check_switch() const override;
 
 private:
+    /**
+     * @brief 超时时打印各关节残差，便于区分「容差太紧」与「机械臂没动」
+     * @param elapsed 已等待时长（秒）
+     */
+    void log_timeout_diagnostics(double elapsed) const;
+
     TaskContext* ctx_{nullptr};             ///< 共享上下文
     std::vector<double> target_joint_pos_;  ///< 复位目标关节角（弧度）
     rclcpp::Time enter_time_;               ///< 进入任务的时刻

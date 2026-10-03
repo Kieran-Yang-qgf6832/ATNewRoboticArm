@@ -1,0 +1,50 @@
+[INFO] [launch]: All log files can be found below /home/kangy/.ros/log/2026-10-03-17-16-51-119618-kangy-ThinkBook-16-G6-IMH-157781
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [task_runner-1]: process started with pid [157786]
+[task_runner-1] [INFO] [1791019011.276946021] [task_runner]: task chain: idel -> reset -> idel
+[task_runner-1] [INFO] [1791019011.278169720] [task_runner]: exp_state -> idel
+[task_runner-1] [INFO] [1791019011.278207731] [task_runner]: current task: idel
+[task_runner-1] [INFO] [1791019011.618691894] [task_runner]: exp_state -> reset
+[task_runner-1] [INFO] [1791019013.277829002] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019015.277833044] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019017.277756166] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019019.297735178] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019021.317822791] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019023.317833741] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019025.317807022] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019027.317766051] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019029.317833315] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019031.317928471] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019033.317824135] [task_runner]: current task: reset
+[task_runner-1] [INFO] [1791019035.317795131] [task_runner]: current task: reset
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[INFO] [launch]: All log files can be found below /home/kangy/.ros/log/2026-10-03-17-18-31-956122-kangy-ThinkBook-16-G6-IMH-159517
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [task_runner-1]: process started with pid [159520]
+[task_runner-1] [INFO] [1791019112.085609122] [task_runner]: task chain: cart_traj -> idel
+[task_runner-1] [INFO] [1791019112.086717676] [task_runner]: exp_state -> cart_traj
+[task_runner-1] [INFO] [1791019112.086758390] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019112.386577057] [task_runner]: cartesian trajectory task: start [-0.020 -0.037 1.260], target [-0.020 -0.037 1.310], duration 3.00 s
+[task_runner-1] [INFO] [1791019114.086427130] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019116.086503178] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019118.086302848] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019120.086396177] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019122.086440335] [task_runner]: current task: cart_traj
+[task_runner-1] [INFO] [1791019124.086353197] [task_runner]: current task: cart_traj
+[task_runner-1] [WARN] [1791019125.386796833] [task_runner]: cartesian trajectory task finished with a residual position error of 0.0500 m (tolerance 0.0050 m)
+[task_runner-1] [INFO] [1791019125.407498717] [task_runner]: exp_state -> idel
+[task_runner-1] [INFO] [1791019125.407600225] [task_runner]: task chain finished, holding idel for 0.50 s
+[INFO] [task_runner-1]: process has finished cleanly [pid 159520]

@@ -3,11 +3,27 @@
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
 /// 任务链末端任务名，任务失败时回退到该任务。
 const std::string kIdelTaskName = "idel";
+
+/**
+ * @brief 把关节角格式化为便于日志打印的字符串
+ * @param values 关节角向量（弧度）
+ * @return 形如 "[0.000, 0.000, ...]" 的字符串
+ */
+std::string format_joints(const std::vector<double>& values) {
+    std::string text = "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        text += (i == 0 ? "" : ", ");
+        text += std::to_string(values[i]);
+    }
+    text += "]";
+    return text;
+}
 
 }  // namespace
 
@@ -74,10 +90,44 @@ bool ResetTask::run(const rclcpp::Time& time) {
     }
 
     if (elapsed > reset_timeout_) {
+        log_timeout_diagnostics(elapsed);
         ctx_->fail("reset task did not reach the target position within the timeout");
         done_ = true;
     }
     return true;
+}
+
+void ResetTask::log_timeout_diagnostics(double elapsed) const {
+    const rclcpp::Logger logger = ctx_->node()->get_logger();
+
+    if (!ctx_->have_joint_states() || ctx_->joint_positions().size() != target_joint_pos_.size()) {
+        RCLCPP_ERROR(
+            logger, "reset task timed out after %.2f s: no valid /joint_states (target %s)",
+            elapsed, format_joints(target_joint_pos_).c_str());
+        return;
+    }
+
+    const auto& joints = ctx_->joint_positions();
+    double max_error   = 0.0;
+    std::size_t worst  = 0;
+    for (std::size_t i = 0; i < joints.size(); ++i) {
+        const double error = std::abs(joints[i] - target_joint_pos_[i]);
+        if (error > max_error) {
+            max_error = error;
+            worst     = i;
+        }
+    }
+
+    RCLCPP_ERROR(
+        logger,
+        "reset task timed out after %.2f s: max joint error %.4f rad on joint%d (tolerance %.4f rad)",
+        elapsed, max_error, static_cast<int>(worst) + 1, reset_tolerance_);
+    RCLCPP_ERROR(logger, "  target (rad): %s", format_joints(target_joint_pos_).c_str());
+    RCLCPP_ERROR(logger, "  actual (rad): %s", format_joints(joints).c_str());
+    RCLCPP_ERROR(
+        logger,
+        "  the controller keeps the arm in reset until every joint is within its own reset_tolerance, "
+        "so check reset_joint_pos/reset_tolerance on both nodes and the tracking error of the sim controller");
 }
 
 const std::string& ResetTask::check_switch() const {

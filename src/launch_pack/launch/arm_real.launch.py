@@ -1,3 +1,24 @@
+"""
+@file arm_real.launch.py
+@brief 实机链路（旧版，当前仓库已不完整）
+
+启动内容：
+  1. robot_state_publisher     ：读取 arm 包的 URDF 发布 /robot_description 与 TF
+  2. arm_calc                  ：计算节点
+  3. arm_task                  ：任务节点
+  4. robot_driver              ：实机驱动（与 MCU 通信）
+  5. vision                    ：视觉节点
+  6. static_transform_publisher：link4 -> camera_link 的固定变换
+  7. rviz2                     ：显示配置 config/display_config.rviz
+
+@warning 状态：当前仓库不可用。arm / arm_calc / arm_task / robot_driver / vision 五个包都不在
+         本工作区（src/）中，启动会因找不到可执行文件而失败。当前的实机路径应由：
+             - arm_controller 的 ArmRealInterfaces（hardware_interface 插件，描述见
+               arm_real_plugin.xml）承担与下位机的通信
+             - tasks 的 task_runner 承担任务调度
+         待相关包补齐后再复用本文件。
+"""
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
@@ -21,6 +42,8 @@ def generate_launch_description():
         output="screen",
     )
 
+    # 注意：arm_calc / arm_task / robot_driver / vision 四个包都不在本工作区，
+    # 加上上面读取的 "arm" 包也不存在，因此本文件目前无法启动。
     arm_calc = Node(
         package="arm_calc",
         executable="arm_calc",

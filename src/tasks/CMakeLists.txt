@@ -27,8 +27,12 @@ add_library(tasks_core STATIC
   context/task_context.cpp
   task/idel_task.cpp
   task/reset_task.cpp
+  task/task_space_segment_task.cpp
   task/cart_traj_task.cpp
+  task/admittance_task.cpp
   task/joint_traj_task.cpp
+  task/teach_pendant_task.cpp
+  task/measure_task.cpp
 )
 
 target_include_directories(tasks_core PUBLIC

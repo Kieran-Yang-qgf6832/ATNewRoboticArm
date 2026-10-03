@@ -102,6 +102,7 @@ TaskContext::TaskContext(const rclcpp::Node::SharedPtr& node, Options options)
 
     cart_traj_pub_  = node_->create_publisher<robot_msgs::msg::CartTrajCmd>(options_.cart_traj_topic, 10);
     joint_traj_pub_ = node_->create_publisher<robot_msgs::msg::JointTrajCmd>(options_.joint_traj_topic, 10);
+    admittance_pub_ = node_->create_publisher<robot_msgs::msg::AdmittanceCmd>(options_.admittance_topic, 10);
 
     set_param_cli_ = node_->create_client<rcl_interfaces::srv::SetParameters>(
         "/" + options_.controller_node + "/set_parameters");
@@ -206,6 +207,16 @@ bool TaskContext::publish_joint_traj(const std::vector<std::vector<float>>& poin
     }
 
     joint_traj_pub_->publish(msg);
+    return true;
+}
+
+bool TaskContext::publish_admittance(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const {
+    robot_msgs::msg::AdmittanceCmd msg;
+    if (!fill_trajectory_message(points, seconds, kTaskDof, &msg)) {
+        return false;
+    }
+
+    admittance_pub_->publish(msg);
     return true;
 }
 

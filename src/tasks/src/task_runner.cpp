@@ -2,8 +2,12 @@
  * @file task_runner.cpp
  * @brief 任务层状态机运行入口
  *
- * 按 @c task_sequence 参数把任务串成任务链（自动以 "idel" 结尾），然后周期
+ * 按 @c task_sequence 参数把任务串成任务链（末尾自动补 "idel"），然后周期
  * 调度 @ref TaskFSMFactory，直到任务链走到末端或出现不可恢复错误。
+ *
+ * @c task_sequence 中可以显式写 "idel"（例如需要多次回到空闲位时）；而
+ * teach_pendant / measure 受控制器「只能 idel 进出」限制，runner 会在它们
+ * 前后自动补一个 idel，无需手写。
  *
  * 用法：
  * @code{.sh}
@@ -12,6 +16,14 @@
  * # 复位后运动到指定关节角（关节轨迹）
  * ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, joint_traj]" \
  *   -p joint_traj_target_positions:="[0.0, 0.3, -0.3, 0.0, 0.3, 0.0]"
+ * # 复位后在导纳模式下柔顺地抬升 5 cm
+ * ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, admittance]"
+ * # 复位后示教 15 s，再回到空闲位（前后自动补 idel）
+ * ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, teach_pendant]" \
+ *   -p teach_pendant_duration:=15.0
+ * # 复位后做一次参数辨识（时长要覆盖控制器侧整个辨识流程）
+ * ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, measure]" \
+ *   -p measure_duration:=20.0
  * @endcode
  *
  * 前置条件：控制器已加载并激活（例如
@@ -35,10 +47,13 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include "admittance_task.hpp"
 #include "cart_traj_task.hpp"
 #include "idel_task.hpp"
 #include "joint_traj_task.hpp"
+#include "measure_task.hpp"
 #include "reset_task.hpp"
+#include "teach_pendant_task.hpp"
 #include "task_context.hpp"
 #include "task_fsm.hpp"
 #include "task_fsm_factory.hpp"
@@ -53,7 +68,22 @@ const std::vector<std::string> kDefaultJoints = {
 const std::string kTerminalTaskName = "idel";
 
 /// 已实现的任务类型，用于错误提示。
-const std::vector<std::string> kSupportedTasks = {"idel", "reset", "cart_traj", "joint_traj"};
+const std::vector<std::string> kSupportedTasks = {
+    "idel", "reset", "cart_traj", "joint_traj", "admittance", "teach_pendant", "measure"};
+
+/// 控制器只允许从 idel 进出这些状态，runner 会自动在任务前后各补一个 idel。
+/// （ResetState / TeachPendantState / ParamterMeasureState 的 enter() 都要求
+///  last_state == "idel"，exit() 也只接受 "idel"。）
+const std::vector<std::string> kIdelGatedTasks = {"reset", "teach_pendant", "measure"};
+
+/**
+ * @brief 判断任务是否受「只能 idel 进出」约束
+ * @param type 任务类型名
+ * @return true 需要在前后补 idel 任务
+ */
+bool needs_idel_gate(const std::string& type) {
+    return std::find(kIdelGatedTasks.begin(), kIdelGatedTasks.end(), type) != kIdelGatedTasks.end();
+}
 
 /**
  * @brief 按任务类型创建任务实例
@@ -75,6 +105,15 @@ std::unique_ptr<TaskFSM> create_task(const std::string& type, const std::string&
     }
     if (type == "joint_traj") {
         return std::make_unique<JointTrajTask>(name, ctx);
+    }
+    if (type == "admittance") {
+        return std::make_unique<AdmittanceTask>(name, ctx);
+    }
+    if (type == "teach_pendant") {
+        return std::make_unique<TeachPendantTask>(name, ctx);
+    }
+    if (type == "measure") {
+        return std::make_unique<MeasureTask>(name, ctx);
     }
     return nullptr;
 }
@@ -101,12 +140,15 @@ std::string join_names(const std::vector<std::string>& values) {
  * 参数：
  * - @c controller_node：控制器节点名（默认 "arm_controller"）；
  * - @c joints：关节顺序（默认 joint1..joint6）；
- * - @c cart_traj_topic / @c joint_traj_topic：轨迹话题（默认 "arm_cart_traj" / "arm_joint_traj"）；
+ * - @c cart_traj_topic / @c joint_traj_topic / @c admittance_topic：轨迹话题
+ *   （默认 "arm_cart_traj" / "arm_joint_traj" / "arm_admittance"）；
  * - @c base_frame / @c ee_frame：末端位姿参考系与末端坐标系（默认 "base_link" / "link6"）；
- * - @c task_sequence：任务链（默认 {"reset", "cart_traj"}）；
+ * - @c task_sequence：任务链（默认 {"reset", "cart_traj"}），可含 "idel"；
  * - @c step_period：调度周期（秒，默认 0.02）；
  * - @c task_timeout：整条任务链超时（秒，默认 120）；
- * - @c exit_settle：任务链结束后保持 idel 的时长（秒，默认 0.5）。
+ * - @c exit_settle：任务链结束后保持 idel 的时长（秒，默认 0.5）；
+ * - @c startup_timeout：等待控制器与 /joint_states 就绪的超时（秒，默认 10；
+ *   冷启动仿真时建议调大，launch 里默认给 60）。
  */
 class TaskRunner : public rclcpp::Node {
 public:
@@ -116,6 +158,7 @@ public:
         joints_          = declare_parameter<std::vector<std::string>>("joints", kDefaultJoints);
         cart_traj_topic_  = declare_parameter<std::string>("cart_traj_topic", "arm_cart_traj");
         joint_traj_topic_ = declare_parameter<std::string>("joint_traj_topic", "arm_joint_traj");
+        admittance_topic_ = declare_parameter<std::string>("admittance_topic", "arm_admittance");
         base_frame_       = declare_parameter<std::string>("base_frame", "base_link");
         ee_frame_         = declare_parameter<std::string>("ee_frame", "link6");
         task_sequence_ =
@@ -123,6 +166,7 @@ public:
         step_period_  = declare_parameter<double>("step_period", 0.02);
         task_timeout_ = declare_parameter<double>("task_timeout", 120.0);
         exit_settle_  = declare_parameter<double>("exit_settle", 0.5);
+        startup_timeout_ = declare_parameter<double>("startup_timeout", 10.0);
     }
 
     /**
@@ -136,6 +180,7 @@ public:
         options.joints          = joints_;
         options.cart_traj_topic  = cart_traj_topic_;
         options.joint_traj_topic = joint_traj_topic_;
+        options.admittance_topic = admittance_topic_;
         options.base_frame       = base_frame_;
         options.ee_frame         = ee_frame_;
         auto ctx                = std::make_unique<TaskContext>(shared_from_this(), options);
@@ -145,17 +190,10 @@ public:
         TaskFSMFactory factory;
         const std::any task_ctx(ctx.get());
 
-        if (!factory.register_task(create_task(kTerminalTaskName, kTerminalTaskName, task_ctx))) {
-            RCLCPP_ERROR(get_logger(), "failed to register the terminal task %s", kTerminalTaskName.c_str());
-            return false;
-        }
-
-        std::vector<std::string> chain;
-        chain.reserve(task_sequence_.size() + 1);
-        for (const auto& type : task_sequence_) {
-            if (type == kTerminalTaskName) {
-                RCLCPP_WARN(get_logger(), "%s is appended automatically, skipping it in task_sequence", type.c_str());
-                continue;
+        // 同一类型只注册一次（任务名可重复出现在任务链中，例如链中间的 idel）。
+        auto register_type = [&](const std::string& type) {
+            if (factory.has_task(type)) {
+                return true;
             }
             auto task = create_task(type, type, task_ctx);
             if (task == nullptr) {
@@ -165,12 +203,33 @@ public:
                 return false;
             }
             if (!factory.register_task(std::move(task))) {
-                RCLCPP_ERROR(get_logger(), "duplicated task in task_sequence: %s", type.c_str());
+                RCLCPP_ERROR(get_logger(), "failed to register task %s", type.c_str());
                 return false;
             }
+            return true;
+        };
+
+        std::vector<std::string> chain;
+        for (const auto& type : task_sequence_) {
+            if (!register_type(type)) {
+                return false;
+            }
+            // teach_pendant / measure 只能 idel 进出，自动在前后各补一个 idel。
+            const bool gated = needs_idel_gate(type);
+            if (gated && (chain.empty() || chain.back() != kTerminalTaskName)) {
+                chain.push_back(kTerminalTaskName);
+            }
             chain.push_back(type);
+            if (gated) {
+                chain.push_back(kTerminalTaskName);
+            }
         }
-        chain.push_back(kTerminalTaskName);
+        if (chain.empty() || chain.back() != kTerminalTaskName) {
+            chain.push_back(kTerminalTaskName);
+        }
+        if (!register_type(kTerminalTaskName)) {
+            return false;
+        }
 
         for (std::size_t i = 0; i + 1 < chain.size(); ++i) {
             if (!factory.link(chain[i], chain[i + 1])) {
@@ -186,15 +245,16 @@ public:
         RCLCPP_INFO(get_logger(), "task chain: %s", join_names(chain).c_str());
 
         // 3. 等待控制器与关节反馈就绪。
-        if (!ctx->wait_for_controller(10.0)) {
+        if (!ctx->wait_for_controller(startup_timeout_)) {
             return false;
         }
-        if (!ctx->wait_for_joint_states(10.0)) {
+        if (!ctx->wait_for_joint_states(startup_timeout_)) {
             return false;
         }
 
-        // 4. 周期调度，直到到达任务链末端（末端的 next 为空）。
-        bool ok                    = true;
+        // 4. 周期调度，直到走完整条任务链（切换次数达到链长 - 1）。
+        bool ok               = true;
+        bool reached_terminal = false;
         const auto loop_start_time = std::chrono::steady_clock::now();
         rclcpp::WallRate rate(1.0 / std::max(step_period_, 1e-3));
         while (rclcpp::ok()) {
@@ -214,7 +274,8 @@ public:
 
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "current task: %s", factory.current_task().c_str());
 
-            if (!factory.current_task_has_next()) {
+            if (factory.switch_count() + 1 >= chain.size()) {
+                reached_terminal = true;
                 break;
             }
 
@@ -229,6 +290,10 @@ public:
         }
 
         if (!ok) {
+            return false;
+        }
+        if (!reached_terminal) {
+            RCLCPP_WARN(get_logger(), "task chain interrupted before reaching the terminal task");
             return false;
         }
 
@@ -248,12 +313,14 @@ private:
     std::vector<std::string> joints_;          ///< 关节顺序
     std::string cart_traj_topic_;              ///< 笛卡尔轨迹话题
     std::string joint_traj_topic_;             ///< 关节轨迹话题
+    std::string admittance_topic_;             ///< 导纳期望轨迹话题
     std::string base_frame_;                   ///< 末端位姿参考系
     std::string ee_frame_;                     ///< 末端坐标系
     std::vector<std::string> task_sequence_;   ///< 任务链
     double step_period_{0.02};                 ///< 调度周期（秒）
     double task_timeout_{120.0};               ///< 任务链超时（秒）
     double exit_settle_{0.5};                  ///< 结束前保持 idel 的时长（秒）
+    double startup_timeout_{10.0};             ///< 等待控制器/关节反馈就绪的超时（秒）
 };
 
 /**

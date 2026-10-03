@@ -6,7 +6,8 @@
  * - 通过 @c exp_state 参数服务请求控制器切换控制模式（idel/reset/cart_traj/...）；
  * - 订阅 @c /joint_states 获取当前关节角；
  * - 通过 TF 查询末端位姿（base_frame -> ee_frame），作为笛卡尔轨迹起点；
- * - 向 @c /arm_cart_traj 发布笛卡尔轨迹指令，向 @c /arm_joint_traj 发布关节轨迹指令；
+ * - 向 @c /arm_cart_traj、@c /arm_joint_traj 分别发布笛卡尔/关节轨迹指令，
+ *   向 @c /arm_admittance 发布导纳期望轨迹指令；
  * - 记录任务链的运行失败信息（共享黑板）。
  *
  * @see TaskFSM
@@ -28,6 +29,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include <robot_msgs/msg/admittance_cmd.hpp>
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
 #include <robot_msgs/msg/joint_traj_cmd.hpp>
 
@@ -48,6 +50,7 @@ public:
             "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
         std::string cart_traj_topic{"arm_cart_traj"};                  ///< 笛卡尔轨迹话题
         std::string joint_traj_topic{"arm_joint_traj"};                ///< 关节轨迹话题
+        std::string admittance_topic{"arm_admittance"};                ///< 导纳期望轨迹话题
         std::string base_frame{"base_link"};                           ///< 末端位姿参考系
         std::string ee_frame{"link6"};                                 ///< 末端执行器坐标系
     };
@@ -119,6 +122,16 @@ public:
     bool publish_joint_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const;
 
     /**
+     * @brief 发布导纳控制的期望轨迹指令
+     * @param points  轨迹点，每个点为 6 维任务空间向量
+     * @param seconds 与 @p points 一一对应的时刻（相对轨迹起点，秒）
+     * @return true 发布成功；false 参数非法
+     * @note 只填充 @c seconds 与 @c position；@c AdmittanceCmd.force 当前控制器未使用
+     *       （外部力由控制器用实测力矩与模型力矩之差自行估计）。
+     */
+    bool publish_admittance(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const;
+
+    /**
      * @brief 记录任务链不可恢复错误
      * @param message 错误描述
      */
@@ -150,6 +163,7 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_; ///< /joint_states 订阅
     rclcpp::Publisher<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_pub_;       ///< 笛卡尔轨迹发布
     rclcpp::Publisher<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_traj_pub_;     ///< 关节轨迹发布
+    rclcpp::Publisher<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_pub_;    ///< 导纳期望轨迹发布
     rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr set_param_cli_;    ///< exp_state 参数服务客户端
 
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;                 ///< TF 缓冲
