@@ -1,0 +1,148 @@
+[INFO] [launch]: All log files can be found below /home/kangy/.ros/log/2026-10-03-19-48-08-544671-kangy-ThinkBook-16-G6-IMH-71069
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: [提示] 本 launch 会启动 MuJoCo + 控制器；若已有仿真/控制器在运行，请改用 start_sim:=false 只跑任务，否则两个 /clock 与 /joint_states 发布者会造成时间戳回退刷屏。
+[INFO] [robot_state_publisher-1]: process started with pid [71078]
+[INFO] [ros2_control_node-2]: process started with pid [71079]
+[INFO] [rviz2-3]: process started with pid [71080]
+[INFO] [launch.user]: MuJoCo ros2_control node started, spawning joint_state_broadcaster
+[INFO] [spawner-4]: process started with pid [71081]
+[robot_state_publisher-1] [INFO] [1791028088.886972018] [robot_state_publisher]: Robot initialized
+[ros2_control_node-2] [INFO] [1791028088.891699859] [controller_manager]: Using ROS clock for triggering controller manager cycles.
+[ros2_control_node-2] [INFO] [1791028088.895143155] [controller_manager]: Subscribing to '/robot_description' topic for robot description.
+[ros2_control_node-2] [INFO] [1791028088.896839626] [controller_manager]: update rate is 500 Hz
+[ros2_control_node-2] [INFO] [1791028088.896883768] [controller_manager]: Overruns handling is : enabled
+[ros2_control_node-2] [INFO] [1791028088.896894127] [controller_manager]: Spawning controller_manager RT thread with scheduler priority: 50
+[ros2_control_node-2] [WARN] [1791028088.896974981] [controller_manager]: Could not enable FIFO RT scheduling policy: with error number <1>(Operation not permitted). See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details on how to enable realtime scheduling.
+[ros2_control_node-2] [INFO] [1791028088.897778615] [controller_manager]: Received robot description from topic.
+[ros2_control_node-2] [INFO] [1791028088.897806410] [controller_manager]: Enforcing command limits is disabled. Command limits from URDF will be ignored.
+[ros2_control_node-2] [INFO] [1791028088.900285928] [controller_manager]: Loading hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1791028088.907687016] [controller_manager]: Loaded hardware 'arm_hw' from plugin 'mujoco_ros2_control/MujocoSystemInterface'
+[ros2_control_node-2] [INFO] [1791028088.907848991] [controller_manager]: Initialize hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1791028088.911945955] [MujocoSystemInterface]: Loading 'mujoco_model' from: '/home/kangy/MyProjects/ATNewRoboticArm/install/arm_model/share/arm_model/model/scene.xml'
+[ros2_control_node-2] [INFO] [1791028088.912033552] [MujocoSystemInterface]: Constructing node and executor...
+[ros2_control_node-2] [INFO] [1791028088.915316003] [MujocoSystemInterface]: Executor thread started.
+[ros2_control_node-2] [INFO] [1791028088.915383343] [MujocoSimulation]: No sim_speed set, using the setting from the UI
+[ros2_control_node-2] [INFO] [1791028088.915388830] [MujocoSimulation]: Scanning plugin libraries...
+[ros2_control_node-2] [INFO] [1791028088.916314578] [MujocoSimulation]: Initializing simulation...
+[ros2_control_node-2] [INFO] [1791028089.150505438] [MujocoSimulation]: Starting the MuJoCo rendering thread...
+[ros2_control_node-2] [INFO] [1791028089.150515119] [MujocoSimulation]: Sim ready, continuing initialization...
+[ros2_control_node-2] [INFO] [1791028089.150594058] [MujocoSimulation]: Constructing clock publisher.
+[ros2_control_node-2] [INFO] [1791028089.154148805] [MujocoSimulation]: Created reset_world service at: /mujoco_ros2_control_node/reset_world
+[ros2_control_node-2] [INFO] [1791028089.154509115] [MujocoSimulation]: Created set_pause service at: /mujoco_ros2_control_node/set_pause
+[ros2_control_node-2] [INFO] [1791028089.154823231] [MujocoSimulation]: Created step_simulation service at: /mujoco_ros2_control_node/step_simulation
+[ros2_control_node-2] [INFO] [1791028089.155424732] [MujocoSimulation]: Created set_free_joint_state service at: /mujoco_ros2_control_node/set_free_joint_state
+[ros2_control_node-2] [INFO] [1791028089.155445328] [MujocoSimulation]: Loading model...
+[rviz2-3] [INFO] [1791028089.337700753] [rviz2]: Stereo is NOT SUPPORTED
+[rviz2-3] [INFO] [1791028089.337859234] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[rviz2-3] [INFO] [1791028089.370321830] [rviz2]: Stereo is NOT SUPPORTED
+[spawner-4] [INFO] [1791028089.530811821] [spawner_joint_state_broadcaster]: waiting for service /controller_manager/list_controllers to become available...
+[ros2_control_node-2] [INFO] [1791028089.683284265] [MujocoSystemInterface]: Constructing publishers.
+[ros2_control_node-2] [INFO] [1791028089.685161356] [MujocoSystemInterface]: Registering actuators.
+[ros2_control_node-2] [INFO] [1791028089.685255967] [MujocoSystemInterface]: override_start_position_file not passed. Loading initial positions from ros2_control xacro.
+[ros2_control_node-2] [INFO] [1791028089.685279611] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint1' for joint 'joint1'
+[ros2_control_node-2] [WARN] [1791028089.686640752] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Loading MuJoCo plugins from package 'mujoco_3d_lidar': /home/kangy/MyProjects/ATNewRoboticArm/install/mujoco_3d_lidar/lib/mujoco_3d_lidar/mujoco_plugin
+[ros2_control_node-2] Plugins registered by library 'libmujoco_3d_lidar.so':
+[ros2_control_node-2]     mujoco.plugin.lidar
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.687622433] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.687711314] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint2' for joint 'joint2'
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.688644447] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.689675276] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.689721116] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint3' for joint 'joint3'
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.690557666] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.691571929] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.691606191] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint4' for joint 'joint4'
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.692416250] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.693478364] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.693532296] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint5' for joint 'joint5'
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.694486217] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.695498299] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.695539285] [MujocoSystemInterface]: Registering MuJoCo actuator 'joint6' for joint 'joint6'
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.696484172] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [WARN] [1791028089.697457500] [mujoco_ros2_control_node]: Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] Using the legacy anti-windup technique is deprecated. This option will be removed by the ROS 2 Kilted Kaiju release.
+[ros2_control_node-2] [INFO] [1791028089.697571081] [MujocoSystemInterface]: Registering joints and sensors.
+[ros2_control_node-2] [INFO] [1791028089.697590004] [MujocoSystemInterface]: Registering joints...
+[ros2_control_node-2] [INFO] [1791028089.697635097] [MujocoSystemInterface]: Found the actuator 'joint1' for joint 'joint1'
+[ros2_control_node-2] [INFO] [1791028089.697700904] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor1'
+[ros2_control_node-2] [INFO] [1791028089.697721381] [MujocoSystemInterface]: Found the actuator 'joint2' for joint 'joint2'
+[ros2_control_node-2] [INFO] [1791028089.697736462] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor2'
+[ros2_control_node-2] [INFO] [1791028089.697741451] [MujocoSystemInterface]: Found the actuator 'joint3' for joint 'joint3'
+[ros2_control_node-2] [INFO] [1791028089.697753119] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor3'
+[ros2_control_node-2] [INFO] [1791028089.697758810] [MujocoSystemInterface]: Found the actuator 'joint4' for joint 'joint4'
+[ros2_control_node-2] [INFO] [1791028089.697770918] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor4'
+[ros2_control_node-2] [INFO] [1791028089.697775834] [MujocoSystemInterface]: Found the actuator 'joint5' for joint 'joint5'
+[ros2_control_node-2] [INFO] [1791028089.697781109] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor5'
+[ros2_control_node-2] [INFO] [1791028089.697785507] [MujocoSystemInterface]: Found the actuator 'joint6' for joint 'joint6'
+[ros2_control_node-2] [INFO] [1791028089.697794962] [MujocoSystemInterface]: Using MuJoCo motor or custom actuator for the joint : 'motor6'
+[ros2_control_node-2] [INFO] [1791028089.699542699] [MujocoSimulation]: Starting the MuJoCo physics thread...
+[ros2_control_node-2] [INFO] [1791028089.700604648] [MujocoSystemInterface]: No 'mujoco_plugins' parameter found!
+[ros2_control_node-2] [INFO] [1791028089.700641648] [MujocoSystemInterface]: on_init complete.
+[ros2_control_node-2] [INFO] [1791028089.700685504] [controller_manager]: Successful initialization of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1791028089.701111363] [controller_manager]: Activating component 'arm_hw'.
+[ros2_control_node-2] [INFO] [1791028089.701138518] [resource_manager]: 'configure' hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1791028089.701146116] [resource_manager]: Successful 'configure' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1791028089.701157388] [resource_manager]: 'activate' hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1791028089.701165840] [MujocoSystemInterface]: Activating MuJoCo hardware interface and starting Simulate threads...
+[ros2_control_node-2] [INFO] [1791028089.701174567] [resource_manager]: Successful 'activate' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1791028089.701294649] [controller_manager]: Registering statistics for : arm_hw
+[ros2_control_node-2] [INFO] [1791028089.701397633] [controller_manager]: Resource Manager has been successfully initialized. Starting Controller Manager services...
+[ros2_control_node-2] [INFO] [1791028089.783588368] [controller_manager]: Loading controller : 'joint_state_broadcaster' of type 'joint_state_broadcaster/JointStateBroadcaster'
+[ros2_control_node-2] [INFO] [1791028089.783687067] [controller_manager]: Loading controller 'joint_state_broadcaster'
+[ros2_control_node-2] [INFO] [1791028089.786594080] [controller_manager]: Controller 'joint_state_broadcaster' node arguments: --ros-args --params-file /tmp/launch_params_k3f4osdl --params-file /home/kangy/MyProjects/ATNewRoboticArm/install/launch_pack/share/launch_pack/config/ros2_controller.yaml --param use_sim_time:=true 
+[spawner-4] [INFO] [1791028089.801364646] [spawner_joint_state_broadcaster]: Loaded joint_state_broadcaster
+[ros2_control_node-2] [INFO] [1791028089.803964672] [controller_manager]: Configuring controller: 'joint_state_broadcaster'
+[ros2_control_node-2] [INFO] [1791028089.804247078] [joint_state_broadcaster]: 'joints' or 'interfaces' parameter is empty. All available state interfaces will be published
+[ros2_control_node-2] [INFO] [1791028089.813585198] [controller_manager]: Activating controllers: [ joint_state_broadcaster ]
+[ros2_control_node-2] [INFO] [1791028089.982975047] [controller_manager]: Successfully switched controllers!
+[spawner-4] [INFO] [1791028089.987875683] [spawner_joint_state_broadcaster]: Configured and activated joint_state_broadcaster
+[INFO] [spawner-4]: process has finished cleanly [pid 71081]
+[INFO] [launch.user]: joint_state_broadcaster spawned, spawning arm controller chain
+[INFO] [spawner-5]: process started with pid [71242]
+[ros2_control_node-2] [INFO] [1791028090.805968782] [controller_manager]: Loading controller : 'sim_pid_controller' of type 'arm_controller/SimPidController'
+[ros2_control_node-2] [INFO] [1791028090.806076409] [controller_manager]: Loading controller 'sim_pid_controller'
+[ros2_control_node-2] [INFO] [1791028090.830360481] [controller_manager]: Controller 'sim_pid_controller' node arguments: --ros-args --params-file /tmp/launch_params_k3f4osdl --params-file /home/kangy/MyProjects/ATNewRoboticArm/install/launch_pack/share/launch_pack/config/ros2_controller.yaml --param use_sim_time:=true 
+[spawner-5] [INFO] [1791028090.853588936] [spawner_sim_pid_controller]: Loaded sim_pid_controller
+[ros2_control_node-2] [INFO] [1791028090.854832077] [controller_manager]: Configuring controller: 'sim_pid_controller'
+[ros2_control_node-2] [INFO] [1791028090.855373183] [sim_pid_controller]: Configured SimPidController for 6 joints.
+[ros2_control_node-2] [INFO] [1791028090.859747253] [controller_manager]: Loading controller : 'arm_controller' of type 'arm_controller/ArmController'
+[ros2_control_node-2] [INFO] [1791028090.859801275] [controller_manager]: Loading controller 'arm_controller'
+[ros2_control_node-2] [INFO] [1791028090.860208757] [controller_manager]: Controller 'arm_controller' node arguments: --ros-args --params-file /tmp/launch_params_k3f4osdl --params-file /home/kangy/MyProjects/ATNewRoboticArm/install/launch_pack/share/launch_pack/config/ros2_controller.yaml --param use_sim_time:=true 
+[spawner-5] [INFO] [1791028090.890374294] [spawner_sim_pid_controller]: Loaded arm_controller
+[ros2_control_node-2] [INFO] [1791028090.890696054] [controller_manager]: Configuring controller: 'arm_controller'
+[ros2_control_node-2] [INFO] [1791028090.893605064] [controller_manager]: Activating controllers: [ sim_pid_controller arm_controller ]
+[ros2_control_node-2] [INFO] [1791028090.896778592] [MujocoSystemInterface]: Joint joint1: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.896831134] [MujocoSystemInterface]: Joint joint2: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.896837553] [MujocoSystemInterface]: Joint joint3: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.896842098] [MujocoSystemInterface]: Joint joint4: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.896846186] [MujocoSystemInterface]: Joint joint5: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.896850200] [MujocoSystemInterface]: Joint joint6: effort control enabled (position, velocity disabled)
+[ros2_control_node-2] [INFO] [1791028090.897311183] [controller_manager]: Successfully switched controllers!
+[spawner-5] [INFO] [1791028090.900370618] [spawner_sim_pid_controller]: Configured and activated all the parsed controllers list : ['sim_pid_controller', 'arm_controller']!
+[INFO] [spawner-5]: process has finished cleanly [pid 71242]
+[INFO] [task_runner-6]: process started with pid [71519]
+[task_runner-6] [INFO] [1791028094.900808346] [task_runner]: task chain: cart_traj -> idel
+[task_runner-6] [INFO] [1791028094.902248963] [task_runner]: exp_state -> cart_traj
+[task_runner-6] [INFO] [1791028094.902287007] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028095.201618793] [task_runner]: cartesian trajectory task: start [-0.022 -0.037 1.260], target [-0.022 -0.037 1.310], duration 3.00 s
+[task_runner-6] [INFO] [1791028096.901580086] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028098.901624564] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028100.901654276] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028102.901543611] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028104.901494304] [task_runner]: current task: cart_traj
+[task_runner-6] [INFO] [1791028106.901738854] [task_runner]: current task: cart_traj
+[task_runner-6] [WARN] [1791028108.201500168] [task_runner]: cartesian trajectory task finished with a residual position error of 0.0500 m (tolerance 0.0050 m)
+[task_runner-6] [INFO] [1791028108.222120415] [task_runner]: exp_state -> idel
+[task_runner-6] [INFO] [1791028108.222182621] [task_runner]: task chain finished, holding idel for 0.50 s
+[INFO] [task_runner-6]: process has finished cleanly [pid 71519]

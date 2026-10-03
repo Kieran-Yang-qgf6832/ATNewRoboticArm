@@ -35,7 +35,10 @@ bool ArmSolve::inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd*
     if (joint_pos->size() != joint_count) {
         return false;
     }
-    joint_pos->setZero();
+    // 以调用方传入的关节角作为迭代初值（不在此处清零）：调用方应传入当前实测关节角，
+    // 让迭代从离目标最近的位形出发。若从零位形起步，当目标位姿远离零位形或接近奇异时，
+    // 阻尼最小二乘迭代会在迭代上限内不收敛而返回 false，进而让控制器 update() 报错。
+    // 初值的限幅（关节限位）与有限性检查由 IKSolver::solve 负责。
     return ik_solver_->solve(task_pos, *joint_pos);
 }
 

@@ -8,7 +8,10 @@ class ArmSolve {
 public:
     ArmSolve(std::shared_ptr<ModelBase> model, std::shared_ptr<TaskMapping> task_mapping);
 
-    // 任务空间目标到关节空间解。
+    // 任务空间目标到关节空间解（阻尼最小二乘迭代）。
+    // @param task_pos  任务空间目标位姿（6 维）
+    // @param joint_pos 既作输入又作输出：输入为迭代初值，应传入当前实测关节角；
+    //                  求解失败时其内容保持不变（不会清零）。
     bool inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd* joint_pos);
 
     // 关节空间状态到用户定义的任务空间状态。

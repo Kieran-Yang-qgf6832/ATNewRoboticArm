@@ -362,6 +362,12 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         return false;
     }
 
+    // 用当前实测关节角作为逆解初值：轨迹首点就是当前位姿，从这个种子出发误差近似为 0，
+    // 后续点也是局部小范围变化，避免从零位形起步导致的迭代不收敛。
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        joint_pos_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+    }
+
     try {
         if (!factory->arm_solve_->inverse_kinamic(point.pos, &joint_pos_)
             || joint_pos_.size() != static_cast<Eigen::Index>(joint_count_) || !joint_pos_.allFinite()
@@ -585,6 +591,11 @@ bool ServoState::run(const rclcpp::Time& time) {
     desired_task_position_.noalias() += desired_task_velocity_ * dt;
     if (!desired_task_position_.allFinite()) {
         return false;
+    }
+
+    // 用当前实测关节角作为逆解初值，保证迭代从离目标最近的位形出发。
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        joint_pos_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
     }
 
     try {

@@ -3,6 +3,9 @@
 @brief 一键启动：MuJoCo 仿真链路 + tasks 的 joint_traj 任务（关节空间两点轨迹）
 
 行为：
+  - 任务节点延迟 task_delay 秒（默认 6.0）后再启动，用来等控制器的上电自动复位
+    （ros2_controller.yaml 的 exp_state: reset）跑完，避免任务与复位抢状态 / 抢轨迹起点；
+    仿真已经在跑时用 task_delay:=0.0 跳过等待
   - start_sim 为 true（默认）时先拉起 arm_controller_test_sim.launch.py，再启动
     tasks/task_runner，任务链为 joint_traj -> idel
   - 任务节点等控制器与 /joint_states 就绪后切 exp_state=joint_traj，把当前关节角作起点、
@@ -21,7 +24,7 @@
 """
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -69,6 +72,15 @@ def generate_launch_description():
         }.items(),
     )
 
+    # 任务节点延迟启动：等控制器的“上电自动复位”（ros2_controller.yaml 里 exp_state: reset）
+    # 跑完再切状态/发轨迹。默认 6.0 s ≈ 控制器激活(~2.5 s) + reset_duration(3 s) + 余量；
+    # 仿真已经在运行时用 task_delay:=0.0 跳过等待。
+    task_delay_arg = DeclareLaunchArgument(
+        "task_delay",
+        default_value="6.0",
+        description="启动任务节点前的等待时间（秒），用于等控制器上电自动复位完成",
+    )
+
     task = Node(
         package="tasks",
         executable="task_runner",
@@ -102,6 +114,11 @@ def generate_launch_description():
             motion_arg,
             tolerance_arg,
             sim,
-            task,
+            task_delay_arg,
+            # 延迟启动任务节点，避免与控制器的上电自动复位抢状态 / 抢轨迹起点
+            TimerAction(
+                period=LaunchConfiguration("task_delay"),
+                actions=[task],
+            ),
         ]
     )

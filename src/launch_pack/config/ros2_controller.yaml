@@ -32,7 +32,13 @@ arm_controller:
       - joint6
     urdf_path: ""
     command_interface_prefix: sim_pid_controller
-    exp_state: idel
+    # 控制器激活后自动进入的状态。
+    # 设为 reset：上电（激活）后先自动复位到 reset_joint_pos，复位完成时 ResetState
+    # 会把内部期望状态写回 idel，于是自动回到空闲并锁定零位——即"先 reset 再 idel"。
+    # 复位起点是激活那一刻的实际关节角（仿真启动到激活之间无人保持、臂可能下垂，自动复位
+    # 正好把它拉回零位）；复位时长/目标/容差由下面的 reset_duration / reset_joint_pos /
+    # reset_tolerance 决定。若不想自动复位，改回 idel 即可。
+    exp_state: reset
     default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
     default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
     reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

@@ -131,3 +131,5 @@
 [ros2_control_node-2] [INFO] [1791018967.247950209] [controller_manager]: Successfully switched controllers!
 [spawner-5] [INFO] [1791018967.251049775] [spawner_sim_pid_controller]: Configured and activated all the parsed controllers list : ['sim_pid_controller', 'arm_controller']!
 [INFO] [spawner-5]: process has finished cleanly [pid 156993]
+[INFO] [rviz2-3]: process has finished cleanly [pid 156827]
+[ros2_control_node-2] X connection to :0 broken (explicit kill or server shutdown).
