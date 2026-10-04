@@ -4,7 +4,8 @@
  *
  * 请求控制器切换到 @c reset 控制模式；控制器会按 @c reset_joint_pos 线性插值
  * 到复位位置，完成后自行切回 @c idel。任务层通过 /joint_states 判断复位是否完成，
- * 再切换到后继任务。
+ * 再切换到后继任务；超过 @c reset_duration + @c reset_grace 仍未到位时只打印
+ * WARN 并结束本任务，任务链继续执行，不阻塞后继任务。
  *
  * @see TaskFSM
  * @see TaskContext
@@ -30,7 +31,12 @@
  * - @c reset_joint_pos：复位目标关节角（弧度），默认全 0；
  * - @c reset_duration：控制器复位时长（秒，默认 3.0），复位至少需要这么久；
  * - @c reset_tolerance：到位容差（弧度，默认 0.01）；
- * - @c reset_timeout：任务层超时（秒，默认 @c reset_duration + 12）。
+ * - @c reset_grace：复位时长结束后的宽限时长（秒，默认 3.0）。超过该时长仍未到位
+ *   就打印 WARN 并结束本任务，任务链继续执行后继任务（不阻塞）；
+ * - @c reset_timeout：任务层最终超时（秒，默认 @c reset_duration + @c reset_grace + 9）。
+ *
+ * @note 控制器侧 @c reset_settle 应小于本任务的 @c reset_grace，保证本任务结束前
+ *       控制器已经切回 @c idel，否则后继任务的 @c exp_state 请求仍会被忽略。
  */
 class ResetTask : public TaskFSM {
 public:
@@ -45,24 +51,26 @@ public:
     /// 请求控制器切换到 reset。
     bool enter(const std::string& last_task, const rclcpp::Time& time) override;
 
-    /// 轮询关节角，判断是否已到达复位位置。
+    /// 轮询关节角，判断是否已到达复位位置；超时未到位则告警并结束本任务。
     bool run(const rclcpp::Time& time) override;
 
-    /// @return 复位完成后返回后继任务名，否则留在本任务
+    /// @return 复位结束后返回后继任务名，否则留在本任务
     const std::string& check_switch() const override;
 
 private:
     /**
-     * @brief 超时时打印各关节残差，便于区分「容差太紧」与「机械臂没动」
+     * @brief 未到位时打印各关节残差，便于区分「容差太紧」与「机械臂没动」
      * @param elapsed 已等待时长（秒）
+     * @param reason  结束原因描述
      */
-    void log_timeout_diagnostics(double elapsed) const;
+    void log_not_reached(double elapsed, const std::string& reason) const;
 
     TaskContext* ctx_{nullptr};             ///< 共享上下文
     std::vector<double> target_joint_pos_;  ///< 复位目标关节角（弧度）
     rclcpp::Time enter_time_;               ///< 进入任务的时刻
     double reset_duration_{3.0};            ///< 控制器复位时长（秒）
     double reset_tolerance_{0.01};          ///< 到位容差（弧度）
-    double reset_timeout_{15.0};            ///< 任务层超时（秒）
-    bool done_{false};                      ///< 复位是否结束（成功或超时）
+    double reset_grace_{3.0};               ///< 复位时长结束后的宽限时长（秒）
+    double reset_timeout_{15.0};            ///< 任务层最终超时（秒）
+    bool done_{false};                      ///< 复位是否结束（成功、告警放行或超时）
 };

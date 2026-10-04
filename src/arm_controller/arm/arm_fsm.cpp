@@ -223,10 +223,13 @@ ResetState::ResetState(const std::string& name, std::any ctx)
     default_kd_.resize(joint_count_);
     double reset_duration_param  = 3.0;
     double reset_tolerance_param = 0.01;
+    double reset_settle_param    = 2.0;
     factory->node_->get_parameter("reset_duration", reset_duration_param);
     factory->node_->get_parameter("reset_tolerance", reset_tolerance_param);
+    factory->node_->get_parameter("reset_settle", reset_settle_param);
     reset_duration_  = reset_duration_param > 0.0 ? static_cast<float>(reset_duration_param) : 1.0f;
     reset_tolerance_ = reset_tolerance_param >= 0.0 ? static_cast<float>(reset_tolerance_param) : 0.01f;
+    reset_settle_    = reset_settle_param >= 0.0 ? static_cast<float>(reset_settle_param) : 0.0f;
     for (std::size_t i = 0; i < joint_count_; ++i) {
         reset_joint_pos_[i] = i < reset_joint_pos_param_.size() ? static_cast<float>(reset_joint_pos_param_[i]) : 0.0f;
         default_kp_[i]      = i < default_kp_param_.size() ? static_cast<float>(default_kp_param_[i]) : 0.0f;
@@ -247,6 +250,7 @@ bool ResetState::enter(const std::string& last_state, const rclcpp::Time& time) 
     reset_start_time_ = time;
     progress_         = 0.0f;
     reset_done_       = joint_count_ == 0;
+    give_up_warned_   = false;
     return true;
 }
 
@@ -273,6 +277,8 @@ bool ResetState::run(const rclcpp::Time& time) {
     progress_             = std::min(1.0f, elapsed_s / reset_duration_);
 
     bool joint_reached = true;
+    float max_error    = 0.0f;
+    std::size_t worst  = 0;
     for (std::size_t i = 0; i < joint_count_; ++i) {
         const float delta          = reset_joint_pos_[i] - start_joint_pos_[i];
         auto& command              = factory->command_[i];
@@ -284,9 +290,30 @@ bool ResetState::run(const rclcpp::Time& time) {
         command.ki                 = 0.0f;
         const float position_error = std::fabs(factory->state_[i].position - reset_joint_pos_[i]);
         joint_reached              = joint_reached && position_error <= reset_tolerance_;
+        if (position_error > max_error) {
+            max_error = position_error;
+            worst     = i;
+        }
     }
 
-    reset_done_ = progress_ >= 1.0f && joint_reached;
+    if (progress_ >= 1.0f && joint_reached) {
+        reset_done_ = true;
+        return true;
+    }
+
+    // 兜底：复位时长结束后再宽限 reset_settle_ 秒仍未全部到位（例如重力静差超过容差），
+    // 打一次 WARN 并强制切回 idel，避免 FSM 卡死在 reset 后静默吞掉所有 exp_state 请求。
+    if (!reset_done_ && !give_up_warned_ && elapsed_s >= reset_duration_ + reset_settle_) {
+        give_up_warned_ = true;
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "reset did not reach the target within %.2f s (reset_duration=%.2f s, reset_settle=%.2f s): max joint "
+            "error %.4f rad on joint%zu (tolerance %.4f rad); forcing the switch to idel, check reset_tolerance / "
+            "default_kp (gravity sag) if the offset persists",
+            elapsed_s, static_cast<double>(reset_duration_), static_cast<double>(reset_settle_),
+            static_cast<double>(max_error), worst + 1, static_cast<double>(reset_tolerance_));
+        reset_done_ = true;
+    }
     return true;
 }
 

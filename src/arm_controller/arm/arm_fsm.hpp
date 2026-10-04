@@ -110,6 +110,10 @@ private:
  * 控制机械臂从当前位置平滑移动到预设的复位位置。支持可配置的
  * 复位时长和到位容差。复位完成后自动切换到空闲状态。
  *
+ * 兜底：复位时长结束后再等待 @c reset_settle 秒仍未全部到位（例如重力静差大于
+ * 容差），会打一条 WARN 并强制切回 @c idel，避免 FSM 永久卡在复位状态、静默
+ * 吞掉后续所有 @c exp_state 请求。
+ *
  * @warning 只能从空闲状态（idel）进入复位状态
  * @note 复位过程中使用线性插值生成轨迹
  *
@@ -166,8 +170,10 @@ private:
     rclcpp::Time reset_start_time_;              ///< 复位开始时间
     float reset_duration_{3.0f};                 ///< 复位时长（秒）
     float reset_tolerance_{0.01f};               ///< 到位容差（弧度）
+    float reset_settle_{2.0f};                   ///< 复位时长结束后的宽限时长（秒）
     float progress_{0.0f};                       ///< 复位进度 [0, 1]
     bool reset_done_{false};                     ///< 复位完成标志
+    bool give_up_warned_{false};                 ///< 是否已就「超时仍未到位」告警（只告警一次）
 };
 
 /**

@@ -44,6 +44,10 @@ arm_controller:
     reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     reset_duration: 3.0
     reset_tolerance: 0.01
+    # 兜底：复位时长结束后再等这么久仍未全部到位（例如重力静差大于容差），打一条
+    # WARN 并强制切回 idel，避免 FSM 卡在 reset 静默吞掉后续 exp_state 请求。
+    # 建议小于任务层的 reset_grace，保证任务放行时控制器已经回到 idel。
+    reset_settle: 2.0
     measure_trajectory_period: 10.0
     measure_move_to_start_duration: 3.0
     measure_trajectory_repeat_cnt: 1

@@ -116,6 +116,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<std::vector<double>>("reset_joint_pos", {});
     auto_declare<double>("reset_duration", 3.0);
     auto_declare<double>("reset_tolerance", 0.01);
+    auto_declare<double>("reset_settle", 2.0);
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
@@ -172,7 +173,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
      *   以避免状态切换时重新分配内存；
      * - @c admittance_mass / @c admittance_damping / @c admittance_stiffness：
      *   维度不超过 6，质量必须为正、阻尼与刚度必须非负，且所有元素必须为有限值；
-     * - 各时长/采样率参数：必须为正；@c reset_tolerance 必须非负；
+     * - 各时长/采样率参数：必须为正；@c reset_tolerance / @c reset_settle 必须非负；
      *   重复次数必须为正整数；
      * - 末端位置上下限：不允许为 NaN（允许 ±inf 表示不约束）。
      *
@@ -235,6 +236,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 if (param.as_double() < 0.0) {
                     result.successful = false;
                     result.reason     = "reset_tolerance must be non-negative";
+                    return result;
+                }
+            } else if (name == "reset_settle") {
+                // 复位宽限时长允许为 0（到位即退），但不能为负。
+                if (param.as_double() < 0.0) {
+                    result.successful = false;
+                    result.reason     = "reset_settle must be non-negative";
                     return result;
                 }
             } else if (name == "measure_trajectory_period") {

@@ -12,15 +12,17 @@
   - 同时启动 tasks/task_runner，任务链为 idel -> reset -> idel（runner 自动为 reset
     补 idel 门控）；任务节点自身会等待控制器与 /joint_states 就绪（startup_timeout），
     因此不需要额外 sleep。
-  - 各关节进入 reset_tolerance 容差后任务节点自动退出（退出码 0）。
+  - 各关节进入 reset_tolerance 容差后任务节点自动退出（退出码 0）；超过
+    reset_duration + reset_grace 仍未到位时打 WARN 并结束 reset 任务，任务链继续
+    （控制器侧由 reset_settle 兜底强制切回 idel，不会卡在 reset 阻塞后继任务）。
 
 用法：
     # 从零一键起仿真并复位
     ros2 launch launch_pack task_reset.launch.py
     # 仿真已在跑，只跑任务（避免起第二个 controller_manager）
     ros2 launch launch_pack task_reset.launch.py start_sim:=false
-    # 仿真收敛慢时放宽容差、延长超时
-    ros2 launch launch_pack task_reset.launch.py reset_tolerance:=0.05 reset_timeout:=30.0
+    # 仿真收敛慢时放宽容差、延长宽限
+    ros2 launch launch_pack task_reset.launch.py reset_tolerance:=0.05 reset_grace:=5.0
 
 @warning 复位目标 reset_joint_pos 由控制器参数决定（config/ros2_controller.yaml，默认全 0），
          本文件只透传“容差/时长/超时”。若修改了控制器的 reset_joint_pos 或 reset_duration，
@@ -77,10 +79,18 @@ def generate_launch_description():
         default_value="0.01",
         description="到位容差（rad），控制器与任务层共用此判据",
     )
+    reset_grace_arg = DeclareLaunchArgument(
+        "reset_grace",
+        default_value="3.0",
+        description=(
+            "复位时长结束后的宽限时长（秒）；超过仍未到位就打 WARN 并结束 reset 任务，"
+            "任务链继续执行后继任务（不阻塞）。应大于控制器的 reset_settle"
+        ),
+    )
     reset_timeout_arg = DeclareLaunchArgument(
         "reset_timeout",
         default_value="30.0",
-        description="任务层复位超时（秒），超时则整条任务链中止",
+        description="任务层复位最终超时（秒），同样只告警并结束 reset 任务",
     )
 
     # 启动仿真：把 show_rviz / use_sim_time 透传给 arm_controller_test_sim.launch.py
@@ -113,6 +123,7 @@ def generate_launch_description():
                 "task_sequence": ["reset"],
                 "reset_duration": ParameterValue(LaunchConfiguration("reset_duration"), value_type=float),
                 "reset_tolerance": ParameterValue(LaunchConfiguration("reset_tolerance"), value_type=float),
+                "reset_grace": ParameterValue(LaunchConfiguration("reset_grace"), value_type=float),
                 "reset_timeout": ParameterValue(LaunchConfiguration("reset_timeout"), value_type=float),
             }
         ],
@@ -126,6 +137,7 @@ def generate_launch_description():
             startup_timeout_arg,
             reset_duration_arg,
             reset_tolerance_arg,
+            reset_grace_arg,
             reset_timeout_arg,
             sim,
             task_delay_arg,

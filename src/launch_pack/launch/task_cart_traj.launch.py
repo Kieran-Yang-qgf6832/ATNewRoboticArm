@@ -39,7 +39,7 @@ def generate_launch_description():
     sim_launch = os.path.join(launch_pack_share, "launch", "arm_controller_test_sim.launch.py")
 
     # 默认目标：相对当前末端位姿，仅 z 抬升 5 cm（改这里即可换目标）
-    cart_target_offset = [0.0, 0.0, 0.05, 0.0, 0.0, 0.0]
+    cart_target_offset = [0.0, 0.0, 0.2, 0.0, 0.0, 0.0]
 
     start_sim_arg = DeclareLaunchArgument(
         "start_sim", default_value="true", description="是否同时启动 MuJoCo 仿真（仿真已在运行时设为 false）"

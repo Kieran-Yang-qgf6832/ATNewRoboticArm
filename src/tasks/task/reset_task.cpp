@@ -39,8 +39,11 @@ ResetTask::ResetTask(const std::string& task_name, std::any ctx)
     reset_duration_   = node->declare_parameter<double>("reset_duration", 3.0);
     reset_tolerance_  = node->declare_parameter<double>("reset_tolerance", 0.01);
 
+    const double grace_param = node->declare_parameter<double>("reset_grace", 3.0);
+    reset_grace_             = grace_param >= 0.0 ? grace_param : 3.0;
+
     const double timeout_param = node->declare_parameter<double>("reset_timeout", 0.0);
-    reset_timeout_             = timeout_param > 0.0 ? timeout_param : reset_duration_ + 12.0;
+    reset_timeout_             = timeout_param > 0.0 ? timeout_param : reset_duration_ + reset_grace_ + 9.0;
 
     const std::size_t joint_count = ctx_->options().joints.size();
     if (target_joint_pos_.empty()) {
@@ -71,9 +74,10 @@ bool ResetTask::run(const rclcpp::Time& time) {
         return true;
     }
 
-    const double elapsed = (time - enter_time_).seconds();
+    const double elapsed  = (time - enter_time_).seconds();
+    const bool has_states = ctx_->have_joint_states() && ctx_->joint_positions().size() == target_joint_pos_.size();
 
-    if (ctx_->have_joint_states() && ctx_->joint_positions().size() == target_joint_pos_.size()) {
+    if (has_states) {
         const auto& joints = ctx_->joint_positions();
         bool reached       = true;
         for (std::size_t i = 0; i < joints.size(); ++i) {
@@ -89,21 +93,31 @@ bool ResetTask::run(const rclcpp::Time& time) {
         }
     }
 
+    // 保险：复位时长加宽限时间后仍未到位（例如控制器侧重力静差超过容差而卡在 reset），
+    // 只告警并结束本任务，让任务链继续往下走，不阻塞后继任务。
+    if (elapsed >= reset_duration_ + reset_grace_) {
+        log_not_reached(elapsed, "reset did not settle within reset_duration + reset_grace");
+        RCLCPP_WARN(ctx_->node()->get_logger(), "reset task skipped after %.2f s; continuing with the next task", elapsed);
+        done_ = true;
+        return true;
+    }
+
+    // 兜底：宽限时间被配得很大、或始终收不到 /joint_states 时的最终上限。
     if (elapsed > reset_timeout_) {
-        log_timeout_diagnostics(elapsed);
-        ctx_->fail("reset task did not reach the target position within the timeout");
+        log_not_reached(elapsed, "reset did not finish before reset_timeout");
+        RCLCPP_WARN(ctx_->node()->get_logger(), "reset task timed out after %.2f s; continuing with the next task", elapsed);
         done_ = true;
     }
     return true;
 }
 
-void ResetTask::log_timeout_diagnostics(double elapsed) const {
+void ResetTask::log_not_reached(double elapsed, const std::string& reason) const {
     const rclcpp::Logger logger = ctx_->node()->get_logger();
 
     if (!ctx_->have_joint_states() || ctx_->joint_positions().size() != target_joint_pos_.size()) {
-        RCLCPP_ERROR(
-            logger, "reset task timed out after %.2f s: no valid /joint_states (target %s)",
-            elapsed, format_joints(target_joint_pos_).c_str());
+        RCLCPP_WARN(
+            logger, "reset task: %s after %.2f s: no valid /joint_states (target %s)", reason.c_str(), elapsed,
+            format_joints(target_joint_pos_).c_str());
         return;
     }
 
@@ -118,16 +132,15 @@ void ResetTask::log_timeout_diagnostics(double elapsed) const {
         }
     }
 
-    RCLCPP_ERROR(
+    RCLCPP_WARN(
+        logger, "reset task: %s after %.2f s: max joint error %.4f rad on joint%d (tolerance %.4f rad)",
+        reason.c_str(), elapsed, max_error, static_cast<int>(worst) + 1, reset_tolerance_);
+    RCLCPP_WARN(logger, "  target (rad): %s", format_joints(target_joint_pos_).c_str());
+    RCLCPP_WARN(logger, "  actual (rad): %s", format_joints(joints).c_str());
+    RCLCPP_WARN(
         logger,
-        "reset task timed out after %.2f s: max joint error %.4f rad on joint%d (tolerance %.4f rad)",
-        elapsed, max_error, static_cast<int>(worst) + 1, reset_tolerance_);
-    RCLCPP_ERROR(logger, "  target (rad): %s", format_joints(target_joint_pos_).c_str());
-    RCLCPP_ERROR(logger, "  actual (rad): %s", format_joints(joints).c_str());
-    RCLCPP_ERROR(
-        logger,
-        "  the controller keeps the arm in reset until every joint is within its own reset_tolerance, "
-        "so check reset_joint_pos/reset_tolerance on both nodes and the tracking error of the sim controller");
+        "  the arm is still holding the reset target, so the following task starts from it; check reset_joint_pos / "
+        "reset_tolerance on both nodes and the sim controller tracking error");
 }
 
 const std::string& ResetTask::check_switch() const {
