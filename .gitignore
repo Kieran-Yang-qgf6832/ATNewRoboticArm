@@ -3,3 +3,5 @@
 /log/ 
 /.vscode/
 /.cache/
+# 沙箱内运行时把 ROS_HOME/ROS_LOG_DIR 指到工作区内，避免写 ~/.ros 被拒
+/.ros_home/

@@ -96,10 +96,12 @@ public:
 
     /**
      * @brief 期望切换到的目标状态名称
-     * @note 由外部指令设置，各状态的 check_switch() 读取此值决定是否切换
+     * @note 由外部指令设置，各状态的 check_switch() 读取此值决定是否切换。
+     *       该成员已上移到基类 @ref FSMFactory，以便失败路径能在工厂内直接请求切换，
+     *       不再依赖状态自身「清理 + 返回 true」来触发。此处仅作说明，不再重复声明。
+     * @see FSMFactory::exp_state_name
      * @see FSM::check_switch()
      */
-    std::string exp_state_name{"idel"};
 
     /**
      * @brief 运动学/动力学求解器共享指针

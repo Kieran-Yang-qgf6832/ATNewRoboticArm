@@ -433,27 +433,78 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
 }
 
 /**
+ * @brief 故障兜底：锁定当前实测位置并请求切回 idel
+ *
+ * 控制器内唯一的故障裁决点。状态机报告可恢复故障或结构损坏时调用，
+ * 使机械臂原地保持而不是失去力矩坠落，并把期望状态切回 @c idel。
+ *
+ * @note 下一周期由状态机自身完成 @c exit/@c enter 切换到 @c idel；本函数不直接
+ *       修改 @c current_state_name_，避免绕过状态机的进入/退出语义。
+ * @warning 运行于实时控制线程，仅做标量运算与接口写入，禁止分配与阻塞。
+ * @see ArmController::update
+ */
+void ArmController::apply_safe_hold_and_idel() {
+    // 位置锁定为当前实测值，速度/力矩/积分项清零，仅保留默认 kp/kd，避免失控运动。
+    //
+    // 同时写入状态机的命令缓存 command_：切回 idel 的那一周期，FSMFactory::run()
+    // 只做 exit/enter 而不调用状态的 run()，update() 会直接下发 command_；若这里不更新，
+    // 就会把故障前最后一次算出的陈旧指令写回硬件。
+    for (std::size_t i = 0; i < joints_name.size(); i++) {
+        const double hold_position = state_interfaces_[i * 3 + 0].get_value();
+        const double hold_kp       = static_cast<double>(default_kp[i]);
+        const double hold_kd       = static_cast<double>(default_kd[i]);
+
+        if (fsm_factory) {
+            auto& command    = fsm_factory->command_[i];
+            command.position = static_cast<float>(hold_position);
+            command.velocity = 0.0f;
+            command.torque   = 0.0f;
+            command.kp       = static_cast<float>(hold_kp);
+            command.kd       = static_cast<float>(hold_kd);
+            command.ki       = 0.0f;
+        }
+
+        command_interfaces_[i * 6 + 0].set_value(hold_position);
+        command_interfaces_[i * 6 + 1].set_value(0.0);
+        command_interfaces_[i * 6 + 2].set_value(0.0);
+        command_interfaces_[i * 6 + 3].set_value(hold_kp);
+        command_interfaces_[i * 6 + 4].set_value(hold_kd);
+        command_interfaces_[i * 6 + 5].set_value(0.0);
+    }
+
+    if (fsm_factory) {
+        fsm_factory->exp_state_name = "idel";
+    }
+
+    RCLCPP_ERROR_THROTTLE(
+        get_node()->get_logger(), *get_node()->get_clock(), 2000,
+        "state machine reported a fault; holding the current joint position and switching to idel");
+}
+
+/**
  * @brief 实时周期更新回调（核心控制环）
  *
  * 由 controller_manager 以固定周期（项目默认 500 Hz）调用，须保持实时安全：
  * 仅进行接口读写、标量运算与状态机调度，禁止读取 ROS 参数、禁止动态内存分配。
  * 处理流程：
  * -# 从 @c state_interfaces_ 读取每个关节的位置/速度/力矩，写入状态机工厂的状态缓存；
- * -# 调用 @ref FSMArmControlFactory::run() 推进状态机并取得运行结果；
- * -# 若运行失败（如轨迹求解失败、限位越界），向命令接口写入保持当前位置的安全命令，
- *    并返回 @c ERROR；
+ * -# 调用 @ref FSMArmControlFactory::run() 推进状态机并取得 @ref RunResult；
+ * -# 可恢复故障（求解失败、状态拒绝进入/离开等）：锁定当前位置、请求切回 @c idel，
+ *    并返回 @c OK —— **不停用控制器链**，否则力矩消失会导致机械臂坠落；
+ * -# 结构损坏（状态名不存在等代码缺陷）：同样先保持一拍，再返回 @c ERROR；
  * -# 否则将状态机计算出的位置/速度/力矩/kp/kd/ki 逐项写入命令接口，返回 @c OK。
  *
  * @param time   当前 ROS 时间戳，传给状态机用于轨迹/计时等时间相关逻辑。
  * @param period 距上一次更新的周期时长；本实现未使用（状态机内部自行管理时间）。
  * @return 控制器执行结果：
- * @retval OK    本周期正常，命令已成功下发；
- * @retval ERROR 状态机运行失败，已下发安全保持命令。
+ * @retval OK    本周期正常，命令已成功下发；可恢复故障也返回 @c OK；
+ * @retval ERROR 仅当状态机结构损坏时返回，此时已下发保持命令。
  *
  * @note 状态接口布局为每关节 3 个（position/velocity/effort），
  *       命令接口布局为每关节 6 个（position/velocity/effort/kp/kd/ki）。
- * @warning 本函数运行于实时控制线程，除错误日志外不得进行阻塞或分配内存的操作。
+ * @warning 本函数运行于实时控制线程，除限流日志外不得进行阻塞或分配内存的操作。
  * @see ArmController::on_activate
+ * @see ArmController::apply_safe_hold_and_idel
  * @see FSMArmControlFactory::run
  */
 controller_interface::return_type ArmController::update(const rclcpp::Time& time, const rclcpp::Duration& period) {
@@ -467,19 +518,20 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
     }
 
     // 推进状态机：内部完成状态切换、轨迹求解与控制量计算。
-    bool ret = fsm_factory->run(time);
-    if (!ret) {
-        // 状态机失败：进入安全保护——位置锁定为当前实际位置，速度/力矩/积分项清零，
-        // 仅保留默认 kp/kd，避免失控运动。
-        for (std::size_t i = 0; i < joints_name.size(); i++) {
-            command_interfaces_[i * 6 + 0].set_value(state_interfaces_[i * 3 + 0].get_value());
-            command_interfaces_[i * 6 + 1].set_value(0.0);
-            command_interfaces_[i * 6 + 2].set_value(0.0);
-            command_interfaces_[i * 6 + 3].set_value(static_cast<double>(default_kp[i]));
-            command_interfaces_[i * 6 + 4].set_value(static_cast<double>(default_kd[i]));
-            command_interfaces_[i * 6 + 5].set_value(0.0);
-        }
+    const RunResult result = fsm_factory->run(time);
+
+    if (result == RunResult::Fatal) {
+        // 状态机结构损坏（状态名不存在、指针为空）：属于代码缺陷。
+        // 停用链条前也先保持一拍，尽量避免机械臂在停用瞬间失去力矩。
+        apply_safe_hold_and_idel();
         return controller_interface::return_type::ERROR;
+    }
+
+    if (result == RunResult::Recoverable) {
+        // 可恢复故障：锁定当前位置并切回 idel，但**不停用控制器链**。
+        // 返回 ERROR 会让 controller_manager 停用整条链，力矩消失导致坠落。
+        apply_safe_hold_and_idel();
+        return controller_interface::return_type::OK;
     }
 
     // 状态机运行正常：下发每关节 6 个命令，顺序为 position/velocity/effort/kp/kd/ki。

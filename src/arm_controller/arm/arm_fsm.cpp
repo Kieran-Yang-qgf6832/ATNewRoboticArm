@@ -47,34 +47,6 @@ void hold_current_joint_position(
     }
 }
 
-/**
- * @brief 求解失败时的统一处理：保持当前关节角、限流告警并把期望状态切回 idel
- *
- * 求解失败（逆解 / 逆动力学 / 静力映射）此前一律 return false，会让
- * ArmController::update() 返回 ERROR，controller_manager 随即停用整条控制器链，
- * 机械臂失去力矩后在重力下坠落。改为在此锁定当前关节角并平滑切回 idel：
- * 既保住机械臂，也把失败暴露给任务层（残差校验）与外部观测。
- *
- * @param factory      状态机工厂
- * @param joint_count  关节数
- * @param default_kp   保持位置使用的 kp
- * @param default_kd   保持速度使用的 kd
- * @param stage        失败阶段名，仅用于日志
- */
-void fall_back_to_idel_after_solve_failure(
-    FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& default_kp,
-    const std::vector<float>& default_kd, const char* stage) {
-    if (factory == nullptr || factory->node_ == nullptr) {
-        return;
-    }
-
-    RCLCPP_ERROR_THROTTLE(
-        factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
-        "%s failed; holding the current joint position and falling back to idel", stage);
-    hold_current_joint_position(factory, joint_count, default_kp, default_kd);
-    factory->exp_state_name = kIdelStateName;
-}
-
 void load_default_gains(
     FSMArmControlFactory* factory, std::size_t joint_count, std::vector<double>* default_kp_param, std::vector<double>* default_kd_param,
     std::vector<float>* default_kp, std::vector<float>* default_kd) {
@@ -416,9 +388,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         || !point.acc.allFinite()) {
         state = TrajPhase::STOP;
         traj.stop();
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Cartesian trajectory sampling");
-        return true;
+        return false;
     }
 
     // 用当前实测关节角作为逆解初值：轨迹首点就是当前位姿，从这个种子出发误差近似为 0，
@@ -434,18 +404,14 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             || torque_.size() != static_cast<Eigen::Index>(joint_count_) || !torque_.allFinite()) {
             state = TrajPhase::STOP;
             traj.stop();
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Cartesian trajectory solve");
-            return true;
+            return false;
         }
     } catch (const std::exception& error) {
         RCLCPP_WARN_THROTTLE(
             factory->node_->get_logger(), *factory->node_->get_clock(), 1000, "Cartesian trajectory solve failed: %s", error.what());
         state = TrajPhase::STOP;
         traj.stop();
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Cartesian trajectory solve");
-        return true;
+        return false;
     }
 
     for (std::size_t i = 0; i < joint_count_; ++i) {
@@ -533,9 +499,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
             || !point.acc.allFinite()) {
             state = TrajPhase::STOP;
             traj.stop();
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Joint trajectory sampling");
-            return true;
+            return false;
         }
 
         try {
@@ -543,9 +507,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
                 || torque.size() != static_cast<Eigen::Index>(joint_count_) || !torque.allFinite()) {
                 state = TrajPhase::STOP;
                 traj.stop();
-                fall_back_to_idel_after_solve_failure(
-                    factory, joint_count_, default_kp_, default_kd_, "Joint trajectory inverse dynamics");
-                return true;
+                return false;
             }
         } catch (const std::exception& error) {
             RCLCPP_WARN_THROTTLE(
@@ -553,9 +515,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
                 error.what());
             state = TrajPhase::STOP;
             traj.stop();
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Joint trajectory inverse dynamics");
-            return true;
+            return false;
         }
 
         for (std::size_t i = 0; i < joint_count_; ++i) {
@@ -669,9 +629,7 @@ bool ServoState::run(const rclcpp::Time& time) {
 
     desired_task_position_.noalias() += desired_task_velocity_ * dt;
     if (!desired_task_position_.allFinite()) {
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Servo target integration");
-        return true;
+        return false;
     }
 
     // 用当前实测关节角作为逆解初值，保证迭代从离目标最近的位形出发。
@@ -684,14 +642,10 @@ bool ServoState::run(const rclcpp::Time& time) {
             || !factory->arm_solve_->inverse_velocity(joint_pos_, desired_task_velocity_, &joint_velocity_)
             || !factory->arm_solve_->inverse_dynamic(
                 joint_pos_, desired_task_velocity_, desired_task_acceleration_, task_force_, &torque_)) {
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Servo solve");
-            return true;
+            return false;
         }
     } catch (const std::exception&) {
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Servo solve");
-        return true;
+        return false;
     }
 
     for (std::size_t i = 0; i < joint_count_; ++i) {
@@ -790,6 +744,10 @@ bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& t
 
 bool AdmittanceState::exit(const std::string& next_state) {
     (void)next_state;
+    // 必须清理：check_switch() 的切换前提是 !trajectory_active_，若离开时不清零，
+    // 再次进入本状态或经由失败路径切换时会被永久挡住。
+    traj.stop();
+    trajectory_active_ = false;
     return true;
 }
 
@@ -818,9 +776,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         || !point.acc.allFinite()) {
         traj.stop();
         trajectory_active_ = false;
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Admittance trajectory sampling");
-        return true;
+        return false;
     }
 
     double dt         = (time - last_update_time_).seconds();
@@ -839,16 +795,12 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         if (!factory->model_->inverse_dynamic(joint_pos_, joint_velocity_, joint_acceleration_, &model_torque_)) {
             traj.stop();
             trajectory_active_ = false;
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Admittance inverse dynamics");
-            return true;
+            return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Admittance inverse dynamics");
-        return true;
+        return false;
     }
     for (std::size_t i = 0; i < joint_count_; ++i) {
         torque_residual_(static_cast<Eigen::Index>(i)) = factory->state_[i].torque - model_torque_(static_cast<Eigen::Index>(i));
@@ -857,16 +809,12 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         if (!factory->arm_solve_->static_force(joint_pos_, torque_residual_, &task_force_)) {
             traj.stop();
             trajectory_active_ = false;
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Admittance static force mapping");
-            return true;
+            return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Admittance static force mapping");
-        return true;
+        return false;
     }
 
     position_error_.noalias() = desired_task_position_ - point.pos;
@@ -880,9 +828,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
     if (!desired_task_position_.allFinite() || !desired_task_velocity_.allFinite() || !desired_task_acceleration_.allFinite()) {
         traj.stop();
         trajectory_active_ = false;
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Admittance command integration");
-        return true;
+        return false;
     }
 
     try {
@@ -893,16 +839,12 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
                 joint_pos_, desired_task_velocity_, desired_task_acceleration_, task_force_, &model_torque_)) {
             traj.stop();
             trajectory_active_ = false;
-            fall_back_to_idel_after_solve_failure(
-                factory, joint_count_, default_kp_, default_kd_, "Admittance solve");
-            return true;
+            return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
-        fall_back_to_idel_after_solve_failure(
-            factory, joint_count_, default_kp_, default_kd_, "Admittance solve");
-        return true;
+        return false;
     }
 
     for (std::size_t i = 0; i < joint_count_; ++i) {

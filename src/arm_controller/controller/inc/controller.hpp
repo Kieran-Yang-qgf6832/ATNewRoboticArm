@@ -182,6 +182,21 @@ private:
      */
     void publish_current_state();
 
+    /**
+     * @brief 故障兜底：锁定当前实测位置并请求切回 idel
+     *
+     * 当状态机报告可恢复故障（@c RunResult::Recoverable）或结构损坏（@c Fatal）时调用：
+     * -# 把每个关节的命令接口写成「位置 = 当前实测值，速度/力矩/积分项 = 0，
+     *    kp/kd = 默认增益」，使机械臂原地保持而不是失去力矩；
+     * -# 把状态机的期望状态置为 @c idel，下一周期由状态机完成切换。
+     *
+     * @note 这是控制器内**唯一**的故障裁决点：状态只需 @c return false 报告失败，
+     *       不需要自己写保持命令或修改期望状态，从而杜绝「新增状态忘记兜底」。
+     * @warning 运行于实时控制线程，仅做标量运算与接口写入，禁止分配与阻塞。
+     * @see ArmController::update
+     */
+    void apply_safe_hold_and_idel();
+
     /// 参数在线更新回调句柄，持有它以保证回调在控制器存活期间始终有效
     rclcpp_lifecycle::LifecycleNode::OnSetParametersCallbackHandle::SharedPtr param_cb_;
 
