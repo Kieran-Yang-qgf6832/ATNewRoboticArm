@@ -48,7 +48,7 @@
 
 ### P1 故障策略分散（安全，最高优先级）
 
-当前每个状态各自处理求解失败，共约 15 处 `fall_back_to_idel_after_solve_failure()` 调用。每个调用点都必须写对参数、记得修改 `exp_state`、记得返回 `true` 而非 `false`。
+当前每个状态各自处理求解失败，共 17 处 `fall_back_to_idel_after_solve_failure()` 调用。每个调用点都必须写对参数、记得修改 `exp_state`、记得返回 `true` 而非 `false`。
 
 **结构性风险：新增状态时漏写一处，就是一次坠落。**
 
@@ -97,7 +97,7 @@ update(time, period):
 | 要点 | 说明 |
 | --- | --- |
 | 可恢复故障一律返回 `OK` | 安全策略在控制器内部完成，不把控制器链交给上层关掉。这是 P1 的根因修复 |
-| 状态只报告失败 | FSM 内的 15 处兜底删除，`run()` 失败即失败，不自己写命令、不自己改状态 |
+| 状态只报告失败 | FSM 内的 17 处兜底删除，`run()` 失败即失败，不自己写命令、不自己改状态 |
 | 命令连续性 | 故障当拍写保持命令；下一拍 `FSMFactory` 执行 `exit`/`enter` 切到 `idel`，该拍不更新 `command_`，保持值延续到 `idel` 接手，不存在空窗 |
 
 **接口变更**：`FSM::run()` 保持 `bool`（状态级只需报告成功/失败），仅将 `FSMFactory::run()` 的返回值从 `bool` 改为枚举，把"什么情况下允许停用控制器链"从隐含约定变成显式契约。
@@ -153,10 +153,12 @@ run_sequence(name):
 
 #### 热加载
 
-复用现有触发方式：`ros2 param set /task_runner task_sequence "[pick_demo]"` 时重新读取 YAML 文件。
+复用现有触发方式：`ros2 param set /task_runner task_sequence "pick_demo"` 时重新读取 YAML 文件。
+
+> 参数语义变更：原 `task_sequence` 是任务类型列表（`std::vector<std::string>`，如 `"[reset, cart_traj]"`），重写后改为**单个序列名**（`std::string`），指向 `tasks.yaml` 中 `sequences` 下的一个键。
 
 ```
-编辑 tasks.yaml → ros2 param set /task_runner task_sequence "[pick_demo]"
+编辑 tasks.yaml → ros2 param set /task_runner task_sequence "pick_demo"
 ```
 
 无需重启节点，无需 `colcon build`。
@@ -218,7 +220,7 @@ sequences:
 
 YAML 解析使用 `yaml_cpp_vendor`（`rclcpp` 已依赖，`CMakeLists.txt` 加一行即可）。
 
-**配置文件路径**：由 `task_runner` 的 `tasks_config` 参数指定，默认指向 `launch_pack` 安装后的 `tasks.yaml`。便于在不重新安装的情况下用 `-p tasks_config:=/path/to/my.yaml` 指定调试用配置。
+**配置文件路径**：由 `task_runner` 的 `tasks_config` 参数指定，默认指向 `tasks` 包安装后的 `share/tasks/config/tasks.yaml`。便于在不重新安装的情况下用 `-p tasks_config:=/path/to/my.yaml` 指定调试用配置。
 
 ## 7. 步骤词汇表
 
@@ -279,7 +281,7 @@ tasks/config/tasks.yaml
 ```
 src/arm_controller/lib/fsm/fsm_factory.hpp    # run() 返回值改 RunResult
 src/arm_controller/controller/src/controller.cpp  # update() 统一故障裁决
-src/arm_controller/arm/arm_fsm.cpp            # 删除 15 处兜底调用
+src/arm_controller/arm/arm_fsm.cpp            # 删除 17 处兜底调用
 src/arm_controller/controller/inc/controller.hpp
 src/tasks/src/task_runner.cpp                 # 瘦身为入口
 src/tasks/CMakeLists.txt
