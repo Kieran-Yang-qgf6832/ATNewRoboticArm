@@ -78,6 +78,9 @@ public:
         return true;
     }
 
+    // 当前活动状态名（只读）：供外部观测控制器实际处于哪个状态。
+    const std::string& current_state_name() const { return current_state_name_; }
+
 private:
     bool first_run{true};
     bool state_switch{false};

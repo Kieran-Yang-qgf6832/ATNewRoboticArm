@@ -62,6 +62,11 @@ bool ResetTask::enter(const std::string& last_task, const rclcpp::Time& time) {
 
     enter_time_ = time;
     done_       = false;
+    if (!ctx_->require_controller_idel("reset")) {
+        ctx_->fail("reset task requires the controller to be in idel before starting");
+        done_ = true;
+        return true;
+    }
     if (!ctx_->set_exp_state("reset")) {
         ctx_->fail("failed to switch arm_controller to reset");
         done_ = true;

@@ -61,6 +61,12 @@ bool JointTrajTask::enter(const std::string& last_task, const rclcpp::Time& time
         return true;
     }
 
+    if (!ctx_->require_controller_idel("joint trajectory")) {
+        ctx_->fail("joint_traj task requires the controller to be in idel before starting");
+        phase_ = Phase::kDone;
+        return true;
+    }
+
     if (!ctx_->set_exp_state("joint_traj")) {
         ctx_->fail("failed to switch arm_controller to joint_traj");
         phase_ = Phase::kDone;

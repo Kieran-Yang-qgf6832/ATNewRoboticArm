@@ -31,6 +31,12 @@
  * 与 robot_state_publisher 正在运行（后者提供末端位姿 TF）。
  *
  * @note 仿真时间下请附加 @c -p @c use_sim_time:=true，否则时间基准与 TF 不一致。
+ * @note 进程默认**常驻**：任务失败不会结束进程；链跑完后轮询 @c task_sequence
+ *       参数，改成新序列即可再执行一条链，例如：
+ * @code{.sh}
+ * ros2 param set /task_runner task_sequence "[joint_traj]"
+ * @endcode
+ *       需要"跑完就退出"的旧行为时把 @c exit_when_idle 设为 true。
  *
  * @author lyz
  * @date 2026-09-30
@@ -46,6 +52,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include "admittance_task.hpp"
 #include "cart_traj_task.hpp"
@@ -144,9 +151,23 @@ std::string join_names(const std::vector<std::string>& values) {
  *   （默认 "arm_cart_traj" / "arm_joint_traj" / "arm_admittance"）；
  * - @c base_frame / @c ee_frame：末端位姿参考系与末端坐标系（默认 "base_link" / "link6"）；
  * - @c task_sequence：任务链（默认 {"reset", "cart_traj"}），可含 "idel"；
+ * - @c task_status_topic：任务状态话题（默认 "task_status"），消息为
+ *   @c std_msgs::msg::String，内容约定为：
+ *   - @c "chain:pending <a> -> <b> -> ..."：任务链已就绪、开始执行；
+ *   - @c "<task>:running"：某个任务正在执行（含链首任务）；
+ *   - @c "chain:finished"：整条任务链正常走完；
+ *   - @c "chain:failed: <原因>"：前置条件不满足、任务失败或整链超时；
+ *   - @c "chain:idle; waiting for a new task_sequence parameter"：本链已结束，
+ *     进程常驻等待新的 @c task_sequence。
+ *
+ *   话题为 transient_local，外部用 @c ros2 topic echo --once /task_status
+ *   就能看到最近一次状态，不必抓取日志。
  * - @c step_period：调度周期（秒，默认 0.02）；
  * - @c task_timeout：整条任务链超时（秒，默认 120）；
  * - @c exit_settle：任务链结束后保持 idel 的时长（秒，默认 0.5）；
+ * - @c controller_idle_timeout：切入新任务前等待控制器进入 idel 的最长时间
+ *   （秒，默认 0.5）。控制器不在 idel 时任务直接报错、不发轨迹；设为 0 表示
+ *   严格立即检查（代价是刚切完状态的任务可能被误判为忙）。
  * - @c startup_timeout：等待控制器与 /joint_states 就绪的超时（秒，默认 10；
  *   冷启动仿真时建议调大，launch 里默认给 60）。
  */
@@ -167,29 +188,69 @@ public:
         task_timeout_ = declare_parameter<double>("task_timeout", 120.0);
         exit_settle_  = declare_parameter<double>("exit_settle", 0.5);
         startup_timeout_ = declare_parameter<double>("startup_timeout", 10.0);
+        task_status_topic_ = declare_parameter<std::string>("task_status_topic", "task_status");
+        controller_idle_timeout_ = declare_parameter<double>("controller_idle_timeout", 0.5);
+        exit_when_idle_ = declare_parameter<bool>("exit_when_idle", false);
+
+        // 任务状态出口：transient_local，后启动的订阅者也能立刻拿到最近一次状态。
+        status_pub_ = create_publisher<std_msgs::msg::String>(task_status_topic_, rclcpp::QoS(1).transient_local());
     }
 
     /**
-     * @brief 执行整条任务链
-     * @return true 任务链正常走到末端；false 前置条件不满足或任务失败
+     * @brief 发布一次任务状态
+     * @param text 状态文本，格式见类文档中的 @c task_status_topic 说明
      */
-    bool run() {
-        // 1. 构造共享上下文并等待控制器就绪。
-        TaskContext::Options options;
-        options.controller_node = controller_node_;
-        options.joints          = joints_;
-        options.cart_traj_topic  = cart_traj_topic_;
-        options.joint_traj_topic = joint_traj_topic_;
-        options.admittance_topic = admittance_topic_;
-        options.base_frame       = base_frame_;
-        options.ee_frame         = ee_frame_;
-        auto ctx                = std::make_unique<TaskContext>(shared_from_this(), options);
+    void publish_status(const std::string& text) const {
+        if (!status_pub_) {
+            return;
+        }
+        std_msgs::msg::String message;
+        message.data = text;
+        status_pub_->publish(message);
+    }
 
-        // 2. 注册任务并串成任务链：sequence[0] -> ... -> idel。
-        //    先校验任务链与参数，再等待控制器，参数写错时可以立即返回。
-        TaskFSMFactory factory;
-        const std::any task_ctx(ctx.get());
+    /**
+     * @brief 保持 idel 若干秒，让控制器完成状态切换
+     * @param ctx      任务上下文
+     * @param seconds  保持时长（秒）
+     */
+    void hold_idel(TaskContext& ctx, double seconds) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+        rclcpp::WallRate hold_rate(100.0);
+        while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+            ctx.spin_some();
+            hold_rate.sleep();
+        }
+    }
 
+    /**
+     * @brief 任务链失败时的收尾：打 ERROR、发布状态、把控制器切回 idel 并保持
+     * @param ctx    任务上下文
+     * @param reason 失败原因
+     * @note 只结束**本次**任务链，进程继续存活，可以再发下一条链。
+     */
+    void fail_and_fall_back_to_idel(TaskContext& ctx, const std::string& reason) {
+        RCLCPP_ERROR(get_logger(), "task chain failed: %s", reason.c_str());
+        publish_status("chain:failed: " + reason);
+        if (!ctx.set_exp_state("idel")) {
+            RCLCPP_ERROR(get_logger(), "failed to switch arm_controller back to idel");
+            return;
+        }
+        RCLCPP_INFO(get_logger(), "arm_controller switched back to idel, holding for %.2f s", exit_settle_);
+        hold_idel(ctx, exit_settle_);
+    }
+
+    /**
+     * @brief 把任务序列串成一条链并设定初始任务
+     * @param factory    任务工厂；任务实例只注册一次，可被后续多条链复用
+     * @param task_ctx   任务构造用的上下文（实际类型为 @c TaskContext*）
+     * @param sequence   任务序列，例如 {"reset", "cart_traj"}
+     * @param chain_out  输出：补齐 idel 门控后的完整任务链
+     * @return true 串链成功；false 任务类型未知、注册或 link 失败
+     */
+    bool link_chain(
+        TaskFSMFactory& factory, const std::any& task_ctx, const std::vector<std::string>& sequence,
+        std::vector<std::string>* chain_out) {
         // 同一类型只注册一次（任务名可重复出现在任务链中，例如链中间的 idel）。
         auto register_type = [&](const std::string& type) {
             if (factory.has_task(type)) {
@@ -210,7 +271,7 @@ public:
         };
 
         std::vector<std::string> chain;
-        for (const auto& type : task_sequence_) {
+        for (const auto& type : sequence) {
             if (!register_type(type)) {
                 return false;
             }
@@ -242,34 +303,50 @@ public:
             return false;
         }
 
+        *chain_out = chain;
+        return true;
+    }
+
+    /**
+     * @brief 执行一条任务链
+     * @param factory   任务工厂（复用其中的任务实例）
+     * @param sequence  任务序列
+     * @param ctx       任务上下文
+     * @return true 任务链正常走到末端；false 任务失败或被中断
+     * @note 失败时已经把控制器切回 idel，但**不结束进程**：调用方可以再发下一条链。
+     */
+    bool execute_chain(TaskFSMFactory& factory, const std::vector<std::string>& sequence, TaskContext& ctx) {
+        std::vector<std::string> chain;
+        if (!link_chain(factory, std::any(&ctx), sequence, &chain)) {
+            publish_status("chain:failed: cannot build the task chain");
+            return false;
+        }
+
         RCLCPP_INFO(get_logger(), "task chain: %s", join_names(chain).c_str());
+        publish_status("chain:pending " + join_names(chain));
 
-        // 3. 等待控制器与关节反馈就绪。
-        if (!ctx->wait_for_controller(startup_timeout_)) {
-            return false;
-        }
-        if (!ctx->wait_for_joint_states(startup_timeout_)) {
-            return false;
-        }
-
-        // 4. 周期调度，直到走完整条任务链（切换次数达到链长 - 1）。
-        bool ok               = true;
         bool reached_terminal = false;
+        std::string last_task;  ///< 上一次发布过状态的任务名，用于只在任务切换时发布
         const auto loop_start_time = std::chrono::steady_clock::now();
         rclcpp::WallRate rate(1.0 / std::max(step_period_, 1e-3));
+
         while (rclcpp::ok()) {
-            ctx->spin_some();
+            ctx.spin_some();
 
             const auto now = this->now();
             if (!factory.run(now)) {
-                RCLCPP_ERROR(get_logger(), "task %s failed to run", factory.current_task().c_str());
-                ok = false;
-                break;
+                fail_and_fall_back_to_idel(ctx, "task " + factory.current_task() + " failed to run");
+                return false;
             }
-            if (ctx->failed()) {
-                RCLCPP_ERROR(get_logger(), "task chain aborted: %s", ctx->failure_message().c_str());
-                ok = false;
-                break;
+            if (ctx.failed()) {
+                fail_and_fall_back_to_idel(ctx, ctx.failure_message());
+                return false;
+            }
+
+            // 任务切换时发布一次 "<task>:running"，配合 transient_local 即可看到当前进度。
+            if (factory.current_task() != last_task) {
+                last_task = factory.current_task();
+                publish_status(last_task + ":running");
             }
 
             RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "current task: %s", factory.current_task().c_str());
@@ -281,29 +358,102 @@ public:
 
             const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - loop_start_time).count();
             if (elapsed > task_timeout_) {
-                RCLCPP_ERROR(get_logger(), "task chain did not finish within %.1f s", task_timeout_);
-                ok = false;
-                break;
+                fail_and_fall_back_to_idel(
+                    ctx, "task chain did not finish within " + std::to_string(static_cast<int>(task_timeout_)) + " s");
+                return false;
             }
 
             rate.sleep();
         }
 
-        if (!ok) {
+        if (!reached_terminal) {
+            fail_and_fall_back_to_idel(ctx, "interrupted before reaching the terminal task");
             return false;
         }
-        if (!reached_terminal) {
-            RCLCPP_WARN(get_logger(), "task chain interrupted before reaching the terminal task");
-            return false;
+        publish_status("chain:finished");
+
+        // 结束时保持 idel 一小段时间，让控制器完成最后一次状态切换。
+        RCLCPP_INFO(get_logger(), "task chain finished, holding idel for %.2f s", exit_settle_);
+        hold_idel(ctx, exit_settle_);
+        return true;
+    }
+
+    /**
+     * @brief 等待下一条任务链：检测 @c task_sequence 参数是否被改成新的序列
+     * @param current 当前任务序列
+     * @return 新的任务序列；节点已关闭时返回空数组
+     */
+    std::vector<std::string> wait_for_next_sequence(const std::vector<std::string>& current) {
+        rclcpp::WallRate rate(20.0);
+        while (rclcpp::ok()) {
+            // 等待期间也要处理参数服务回调，否则外部改不动 task_sequence。
+            rclcpp::spin_some(shared_from_this());
+            std::vector<std::string> sequence;
+            if (get_parameter("task_sequence", sequence) && sequence != current) {
+                return sequence;
+            }
+            rate.sleep();
+        }
+        return {};
+    }
+
+    /**
+     * @brief 常驻执行任务链
+     *
+     * 启动时先执行一次 @c task_sequence；之后**进程常驻**，轮询 @c task_sequence
+     * 参数，一旦被改成新的序列就再执行一条链。任务失败只结束本次链（控制器回退
+     * idel、机械臂保持不动），进程不会退出，因此失败后可以直接改参数重发任务：
+     * @code{.sh}
+     * ros2 param set /task_runner task_sequence "[joint_traj]"
+     * @endcode
+     *
+     * 把 @c exit_when_idle 设为 true 可恢复旧行为（链跑完立即退出）。
+     *
+     * @return true 正常结束（Ctrl+C）；异常由 main 捕获并转成退出码 1
+     */
+    bool run() {
+        // 1. 构造共享上下文（整个进程复用，避免每条链重建 TF 监听）。
+        TaskContext::Options options;
+        options.controller_node = controller_node_;
+        options.joints          = joints_;
+        options.cart_traj_topic  = cart_traj_topic_;
+        options.joint_traj_topic = joint_traj_topic_;
+        options.admittance_topic = admittance_topic_;
+        options.base_frame       = base_frame_;
+        options.ee_frame         = ee_frame_;
+        options.controller_idle_timeout = controller_idle_timeout_;
+        auto ctx                = std::make_unique<TaskContext>(shared_from_this(), options);
+
+        // 2. 等待控制器与关节反馈就绪；未就绪时持续重试，进程不退出。
+        while (rclcpp::ok()) {
+            if (ctx->wait_for_controller(5.0) && ctx->wait_for_joint_states(startup_timeout_)) {
+                break;
+            }
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 5000, "waiting for arm_controller and /joint_states before running tasks");
+        }
+        if (!rclcpp::ok()) {
+            return true;
         }
 
-        // 5. 结束时保持 idel 一小段时间，让控制器完成最后一次状态切换。
-        RCLCPP_INFO(get_logger(), "task chain finished, holding idel for %.2f s", exit_settle_);
-        const auto hold_deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(exit_settle_);
-        rclcpp::WallRate hold_rate(100.0);
-        while (rclcpp::ok() && std::chrono::steady_clock::now() < hold_deadline) {
-            ctx->spin_some();
-            hold_rate.sleep();
+        // 3. 任务实例只创建一次并复用；每条链只重新 link 与设定初始任务。
+        TaskFSMFactory factory;
+        std::vector<std::string> sequence = task_sequence_;
+        while (rclcpp::ok()) {
+            execute_chain(factory, sequence, *ctx);
+            if (!rclcpp::ok() || exit_when_idle_) {
+                break;
+            }
+
+            publish_status("chain:idle; waiting for a new task_sequence parameter");
+            RCLCPP_INFO(
+                get_logger(),
+                "task chain done; waiting for a new task_sequence parameter (Ctrl+C to exit). "
+                "e.g. ros2 param set /task_runner task_sequence \"[joint_traj]\"");
+            sequence = wait_for_next_sequence(sequence);
+            if (!rclcpp::ok() || sequence.empty()) {
+                break;
+            }
         }
         return true;
     }
@@ -316,11 +466,15 @@ private:
     std::string admittance_topic_;             ///< 导纳期望轨迹话题
     std::string base_frame_;                   ///< 末端位姿参考系
     std::string ee_frame_;                     ///< 末端坐标系
+    std::string task_status_topic_;            ///< 任务状态话题名
     std::vector<std::string> task_sequence_;   ///< 任务链
     double step_period_{0.02};                 ///< 调度周期（秒）
     double task_timeout_{120.0};               ///< 任务链超时（秒）
     double exit_settle_{0.5};                  ///< 结束前保持 idel 的时长（秒）
     double startup_timeout_{10.0};             ///< 等待控制器/关节反馈就绪的超时（秒）
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;  ///< 任务状态发布器（transient_local）
+    double controller_idle_timeout_{0.5};            ///< 切入新任务前等待控制器进入 idel 的最长时间（秒）
+    bool exit_when_idle_{false};                     ///< 任务链跑完后立即退出（默认常驻等待新链）
 };
 
 /**

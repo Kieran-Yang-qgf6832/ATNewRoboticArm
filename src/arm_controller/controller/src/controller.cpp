@@ -43,11 +43,13 @@
 #include <memory>
 #include <pluginlib/class_list_macros.hpp>
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include <pinocchio/multibody/model.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <exception>
 #include <limits>
@@ -91,7 +93,9 @@ ArmController::ArmController() {
  * -# 构造状态机工厂 @ref FSMArmControlFactory，加载模型并注册全部控制状态；
  * -# 注册参数在线更新回调 @ref param_cb_，对可热更新参数做合法性校验；
  * -# 读取并缓存默认阻抗增益 @c default_kp / @c default_kd（不足部分补 0）；
- * -# 读取 @c exp_state 并写入状态机工厂的期望目标状态。
+ * -# 读取 @c exp_state 并写入状态机工厂的期望目标状态；
+ * -# 创建状态可观测性出口：话题 @c ~/state 与参数 @c current_state，
+ *    由 500 ms wall timer（非实时线程）发布状态机**实际**所处的状态。
  *
  * @return 初始化结果：
  * @retval SUCCESS 初始化成功，控制器可继续进入 configure；
@@ -135,6 +139,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("exp_state", "idel");
     auto_declare<std::string>("command_interface_prefix", "");
+    auto_declare<std::string>("current_state", "unknown");
 
     // 读取初始化后不可修改的接口参数：关节名列表与命令接口命名前缀。
     node->get_parameter<std::vector<std::string>>("joints", joints_name);
@@ -162,6 +167,11 @@ controller_interface::CallbackReturn ArmController::on_init() {
         RCLCPP_ERROR(node->get_logger(), "Failed to initialize arm controller FSM: %s", error.what());
         return controller_interface::CallbackReturn::ERROR;
     }
+
+    // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
+    // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。
+    state_pub_ = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
+    state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() { publish_current_state(); });
 
     /**
      * @brief 参数在线更新校验回调
@@ -313,6 +323,38 @@ controller_interface::CallbackReturn ArmController::on_init() {
 
     fsm_factory->exp_state_name = exp_state;
     return controller_interface::CallbackReturn::SUCCESS;
+}
+
+/**
+ * @brief 发布状态机当前实际所处的状态
+ *
+ * 仅在状态名变化时发布一次，负载为零；状态未变化时不做任何 ROS 操作。
+ * 话题消息为纯状态名（如 @c "idel" / @c "reset"），参数 @c current_state 同值。
+ *
+ * @note 运行于 wall timer 回调（非实时线程）。@c set_parameter() 是本地同步调用，
+ *       不会等待参数服务往返，因此可以安全地在本回调中调用；
+ *       但 @c update() 仍禁止任何 ROS 通信与参数写入。
+ * @see ArmController::on_init
+ */
+void ArmController::publish_current_state() {
+    if (!fsm_factory) {
+        return;
+    }
+    const std::string& state = fsm_factory->current_state_name();
+    if (state.empty() || state == published_state_name_) {
+        return;
+    }
+    published_state_name_ = state;
+
+    if (state_pub_) {
+        std_msgs::msg::String message;
+        message.data = state;
+        state_pub_->publish(message);
+    }
+    // current_state 是纯输出参数，参数回调对它不做任何处理，这里写入不会影响 FSM。
+    if (get_node()) {
+        get_node()->set_parameter(rclcpp::Parameter("current_state", state));
+    }
 }
 
 

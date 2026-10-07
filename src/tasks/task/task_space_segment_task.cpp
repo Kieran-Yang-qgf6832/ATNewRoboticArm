@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -68,6 +69,13 @@ bool TaskSpaceSegmentTask::enter(const std::string& last_task, const rclcpp::Tim
 
     phase_            = Phase::kSettle;
     phase_start_time_ = time;
+    // 门禁：只有控制器确实空闲时才切入新状态，否则命令会被静默丢弃（状态机卡在
+    // 复位 / 上一任务未收尾时，exp_state 请求根本不会被消费）。
+    if (!context_->require_controller_idel(task_kind())) {
+        context_->fail(task_kind() + " task requires the controller to be in idel before starting");
+        phase_ = Phase::kDone;
+        return true;
+    }
     if (!context_->set_exp_state(parameter_prefix_)) {
         context_->fail("failed to switch arm_controller to " + parameter_prefix_);
         phase_ = Phase::kDone;
@@ -136,10 +144,15 @@ bool TaskSpaceSegmentTask::run(const rclcpp::Time& time) {
             return true;
         }
         if (elapsed >= timeout_) {
-            RCLCPP_WARN(
+            // 残差超差视为任务失败：控制器侧解不出来时会自行回退 idel（机械臂停在原地），
+            // 这里必须同时把失败上报，否则链条会以「成功 + 退出码 0」收场，掩盖真实故障。
+            RCLCPP_ERROR(
                 context_->node()->get_logger(),
-                "%s task finished with a residual position error of %.4f m (tolerance %.4f m)", task_kind().c_str(),
-                position_error, position_tolerance_);
+                "%s task finished with a residual position error of %.4f m (tolerance %.4f m); falling back to idel",
+                task_kind().c_str(), position_error, position_tolerance_);
+            context_->fail(
+                task_kind() + " task residual " + std::to_string(position_error) + " m exceeds the tolerance "
+                + std::to_string(position_tolerance_) + " m");
             phase_ = Phase::kDone;
         }
         return true;

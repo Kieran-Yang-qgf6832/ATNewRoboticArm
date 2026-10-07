@@ -46,13 +46,14 @@ public:
      */
     struct Options {
         std::string controller_node{"arm_controller"}; ///< 控制器节点名，用于拼接参数服务名
-        std::vector<std::string> joints{                ///< 关节顺序，需与 ros2_controller.yaml 一致
+        std::vector<std::string> joints{                 ///< 关节顺序，需与 ros2_controller.yaml 一致
             "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
-        std::string cart_traj_topic{"arm_cart_traj"};                  ///< 笛卡尔轨迹话题
-        std::string joint_traj_topic{"arm_joint_traj"};                ///< 关节轨迹话题
-        std::string admittance_topic{"arm_admittance"};                ///< 导纳期望轨迹话题
-        std::string base_frame{"base_link"};                           ///< 末端位姿参考系
-        std::string ee_frame{"link6"};                                 ///< 末端执行器坐标系
+        std::string cart_traj_topic{"arm_cart_traj"};     ///< 笛卡尔轨迹话题
+        std::string joint_traj_topic{"arm_joint_traj"};   ///< 关节轨迹话题
+        std::string admittance_topic{"arm_admittance"};   ///< 导纳期望轨迹话题
+        std::string base_frame{"base_link"};              ///< 末端位姿参考系
+        std::string ee_frame{"link6"};                    ///< 末端执行器坐标系
+        double controller_idle_timeout{0.5};              ///< 切入新任务前等待控制器进入 idel 的最长时间（秒）
     };
 
     /**
@@ -82,6 +83,36 @@ public:
      * @return true 设置成功
      */
     bool set_exp_state(const std::string& state_name, double timeout_sec = 5.0);
+
+    /**
+     * @brief 读取控制器当前**实际**所处的状态
+     *
+     * 读取 @c arm_controller 的 @c current_state 参数（由控制器 500 ms wall timer
+     * 刷新，发布在话题 @c ~/state 上）。这是与 @c exp_state（期望状态）不同的量：
+     * 前者是"现在真的在做什么"，后者只是"想做什么"。
+     *
+     * @param timeout_sec 服务调用超时（秒）
+     * @return 状态名；服务不可用、参数不存在或类型不符时返回空字符串
+     */
+    std::string controller_state(double timeout_sec = 2.0) const;
+
+    /**
+     * @brief 切入新任务前的门禁检查：控制器必须处于 @c idel
+     *
+     * 任务层切状态只是往 @c exp_state 写一个字符串，控制器状态机（尤其卡在
+     * @c reset 时）不一定消费；若此时直接发轨迹，命令会被静默丢弃。这里先轮询
+     * 确认控制器确实空闲，非 @c idel 时打 ERROR 并由调用方判失败。
+     *
+     * @param task_name   调用方任务名，仅用于日志
+     * @param timeout_sec 最长等待时间（秒，默认取 @c Options::controller_idle_timeout）；
+     *                    期间一旦读到 @c idel 立即返回
+     * @return true 控制器处于 @c idel，可以执行新任务
+     *
+     * @note @c current_state 由控制器 500 ms wall timer 刷新，切状态后最多滞后一拍，
+     *       因此默认给 0.5 s 等待；把 @c Options::controller_idle_timeout 设为 0 即可
+     *       变成"严格立即检查"，代价是刚切完状态的任务可能被误判为忙。
+     */
+    bool require_controller_idel(const std::string& task_name, double timeout_sec = -1.0) const;
 
     /**
      * @brief 自旋等待至少一帧可用的 /joint_states
@@ -165,6 +196,7 @@ private:
     rclcpp::Publisher<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_traj_pub_;     ///< 关节轨迹发布
     rclcpp::Publisher<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_pub_;    ///< 导纳期望轨迹发布
     rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr set_param_cli_;    ///< exp_state 参数服务客户端
+    rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr get_param_cli_;   ///< current_state 参数服务客户端
 
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;                 ///< TF 缓冲
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;    ///< TF 监听
@@ -172,3 +204,4 @@ private:
     bool failed_{false};            ///< 任务链是否失败
     std::string failure_message_;   ///< 失败描述
 };
+

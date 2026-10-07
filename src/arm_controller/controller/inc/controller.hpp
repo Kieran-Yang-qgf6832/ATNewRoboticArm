@@ -24,8 +24,11 @@
 #include <controller_interface/controller_interface.hpp>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/publisher.hpp>
 #include <rclcpp/subscription.hpp>
 #include <rclcpp/time.hpp>
+#include <rclcpp/timer.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <../arm/arm_fsm_factory.hpp>
 #include <../arm/arm_fsm.hpp>
 #include <string>
@@ -166,6 +169,19 @@ public:
     controller_interface::InterfaceConfiguration state_interface_configuration() const override;
 
 private:
+    /**
+     * @brief 把状态机当前实际所处的状态名对外发布（话题 + 参数）
+     *
+     * 由 @ref ArmController::state_timer_ 周期调用，仅在状态发生变化时发布一次。
+     * 话题 @c ~/state（@c std_msgs::msg::String，transient_local）便于外部直接
+     * @c ros2 topic echo --once 观察；参数 @c current_state 便于
+     * @c ros2 param get /arm_controller current_state。
+     *
+     * @note 该函数运行在 wall timer 回调（非实时线程）中：@c set_parameter() 是
+     *       本地同步调用，不会与参数服务产生往返等待；但仍禁止放到 @ref ArmController::update()。
+     */
+    void publish_current_state();
+
     /// 参数在线更新回调句柄，持有它以保证回调在控制器存活期间始终有效
     rclcpp_lifecycle::LifecycleNode::OnSetParametersCallbackHandle::SharedPtr param_cb_;
 
@@ -182,6 +198,12 @@ private:
      *       供 @ref ArmController::on_activate() 与安全保护逻辑使用。
      */
     std::vector<float> default_kp,default_kd;
+    /// 状态机实际状态名的话题发布器（~/state，transient_local）
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+    /// 状态发布用的 wall timer，运行在非实时线程
+    rclcpp::TimerBase::SharedPtr state_timer_;
+    /// 上一次已发布的状态名，用于只在状态变化时发布
+    std::string published_state_name_;
 };
 
 }  // namespace arm_controller

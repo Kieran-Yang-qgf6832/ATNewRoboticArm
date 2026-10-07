@@ -46,6 +46,12 @@ bool TeachPendantTask::enter(const std::string& last_task, const rclcpp::Time& t
         start_joints_.clear();
     }
 
+    if (!ctx_->require_controller_idel("teach pendant")) {
+        ctx_->fail("teach_pendant task requires the controller to be in idel before starting");
+        done_ = true;
+        return true;
+    }
+
     if (!ctx_->set_exp_state("teach_pendant")) {
         ctx_->fail("failed to switch arm_controller to teach_pendant");
         done_ = true;

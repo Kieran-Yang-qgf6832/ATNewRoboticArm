@@ -24,6 +24,7 @@ find_package(kdl_parser REQUIRED)
 find_package(orocos_kdl REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(robot_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(arm_model REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
@@ -90,6 +91,7 @@ ament_target_dependencies(
   pluginlib
   hardware_interface
   robot_msgs
+  std_msgs
   ament_index_cpp
   kdl_parser
   orocos_kdl

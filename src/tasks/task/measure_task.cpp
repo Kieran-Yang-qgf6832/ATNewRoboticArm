@@ -27,6 +27,12 @@ bool MeasureTask::enter(const std::string& last_task, const rclcpp::Time& time) 
     phase_            = Phase::kMeasuring;
     phase_start_time_ = time;
 
+    if (!ctx_->require_controller_idel("parameter measurement")) {
+        ctx_->fail("measure task requires the controller to be in idel before starting");
+        phase_ = Phase::kDone;
+        return true;
+    }
+
     if (!ctx_->set_exp_state("measure")) {
         ctx_->fail("failed to switch arm_controller to measure");
         phase_ = Phase::kDone;

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <thread>
 #include <utility>
 
 #include <rcl_interfaces/msg/parameter.hpp>
@@ -21,6 +22,9 @@ constexpr double kMinSinHalfAngle = 1e-9;
 
 /// 任务空间自由度：3 位置 + 3 旋转向量。
 constexpr std::size_t kTaskDof = 6;
+
+/// 控制器空闲状态名；切入任何新任务前要求控制器处于该状态。
+const char kControllerIdleState[] = "idel";
 
 /**
  * @brief 把轨迹点填充为 *TrajCmd 消息
@@ -106,6 +110,8 @@ TaskContext::TaskContext(const rclcpp::Node::SharedPtr& node, Options options)
 
     set_param_cli_ = node_->create_client<rcl_interfaces::srv::SetParameters>(
         "/" + options_.controller_node + "/set_parameters");
+    get_param_cli_ = node_->create_client<rcl_interfaces::srv::GetParameters>(
+        "/" + options_.controller_node + "/get_parameters");
 
     tf_buffer_   = std::make_unique<tf2_ros::Buffer>(node_->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, false);
@@ -146,6 +152,51 @@ bool TaskContext::set_exp_state(const std::string& state_name, double timeout_se
 
     RCLCPP_INFO(node_->get_logger(), "exp_state -> %s", state_name.c_str());
     return true;
+}
+
+std::string TaskContext::controller_state(double timeout_sec) const {
+    if (!get_param_cli_ || !get_param_cli_->wait_for_service(std::chrono::duration<double>(timeout_sec))) {
+        return {};
+    }
+
+    auto request = std::make_shared<rcl_interfaces::srv::GetParameters::Request>();
+    request->names.push_back("current_state");
+    auto future = get_param_cli_->async_send_request(request);
+    if (rclcpp::spin_until_future_complete(node_, future, std::chrono::duration<double>(timeout_sec))
+        != rclcpp::FutureReturnCode::SUCCESS) {
+        return {};
+    }
+
+    const auto response = future.get();
+    if (response->values.empty()) {
+        return {};
+    }
+    return response->values.front().string_value;
+}
+
+bool TaskContext::require_controller_idel(const std::string& task_name, double timeout_sec) const {
+    // current_state 由控制器的 500 ms wall timer 刷新，切状态后最多滞后一拍，
+    // 因此默认只容忍半秒；超时仍不是 idel 就报错，绝不静默把命令发进忙碌的状态机。
+    const double wait_sec = timeout_sec >= 0.0 ? timeout_sec : options_.controller_idle_timeout;
+    const auto deadline   = std::chrono::steady_clock::now() + std::chrono::duration<double>(wait_sec);
+    std::string state;
+    while (rclcpp::ok()) {
+        state = controller_state(0.5);
+        if (state == kControllerIdleState) {
+            return true;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    RCLCPP_ERROR(
+        node_->get_logger(),
+        "cannot start %s: arm_controller is in state '%s' instead of '%s' (waited %.1f s); "
+        "wait for the previous task to finish or switch the controller back to idel",
+        task_name.c_str(), state.empty() ? "<unknown>" : state.c_str(), kControllerIdleState, wait_sec);
+    return false;
 }
 
 bool TaskContext::wait_for_joint_states(double timeout_sec) {

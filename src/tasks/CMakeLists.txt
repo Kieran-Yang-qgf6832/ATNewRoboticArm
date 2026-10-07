@@ -21,6 +21,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(robot_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 
 # 任务层状态机框架 + 各任务（新增任务时把对应 .cpp 加进来即可）
 add_library(tasks_core STATIC
@@ -49,6 +50,7 @@ ament_target_dependencies(tasks_core
   tf2
   tf2_ros
   robot_msgs
+  std_msgs
 )
 
 # 任务链 runner
@@ -62,6 +64,7 @@ ament_target_dependencies(task_runner
   tf2
   tf2_ros
   robot_msgs
+  std_msgs
 )
 
 install(TARGETS tasks_core
