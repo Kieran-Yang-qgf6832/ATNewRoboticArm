@@ -245,6 +245,7 @@ private:
     Eigen::VectorXd task_force_;      ///< 任务空间力
     std::vector<float> default_kp_;    ///< 默认位置增益
     std::vector<float> default_kd_;    ///< 默认速度增益
+    std::vector<float> hold_position_; ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
     std::vector<double> default_kp_param_; ///< 位置增益参数原始值
     std::vector<double> default_kd_param_; ///< 速度增益参数原始值
     std::size_t joint_count_{0};       ///< 关节数量
@@ -320,6 +321,7 @@ private:
     Eigen::VectorXd torque;            ///< 关节力矩
     std::vector<float> default_kp_;    ///< 默认位置增益
     std::vector<float> default_kd_;    ///< 默认速度增益
+    std::vector<float> hold_position_; ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
     std::vector<double> default_kp_param_; ///< 位置增益参数原始值
     std::vector<double> default_kd_param_; ///< 速度增益参数原始值
     std::size_t joint_count_{0};       ///< 关节数量
@@ -486,6 +488,7 @@ private:
     Eigen::VectorXd admittance_stiffness_;            ///< 导纳刚度参数
     std::vector<float> default_kp_;                   ///< 默认位置增益
     std::vector<float> default_kd_;                   ///< 默认速度增益
+    std::vector<float> hold_position_;                ///< 锁存的保持位置（轨迹未激活时使用）
     std::vector<double> default_kp_param_;            ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;            ///< 速度增益参数原始值
 

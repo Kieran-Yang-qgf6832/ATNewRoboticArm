@@ -29,16 +29,51 @@ int model_dof_from_context(std::any ctx) {
     return factory->model_->dof();
 }
 
-void hold_current_joint_position(
-    FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& default_kp, const std::vector<float>& default_kd) {
-    if (factory == nullptr || factory->state_.size() != joint_count || factory->command_.size() != joint_count
+/**
+ * @brief 锁存当前实测关节角，作为后续「保持」的位置指令
+ *
+ * 必须在**进入保持时调用一次**。绝不能每个周期重新读取实测值：那样位置指令永远
+ * 等于当前值，位置误差恒为 0，kp 再大也产生不了恢复力，机械臂只剩 kd 阻尼，会在
+ * 重力下缓慢坠落——"保持"名不副实。IDELState 用的就是这种锁存式保持。
+ *
+ * @param factory       状态机工厂
+ * @param joint_count   关节数
+ * @param hold_position 输出：预分配的保持位置缓存
+ */
+void latch_joint_position(
+    FSMArmControlFactory* factory, std::size_t joint_count, std::vector<float>* hold_position) {
+    if (factory == nullptr || hold_position == nullptr || factory->state_.size() != joint_count
+        || hold_position->size() != joint_count) {
+        return;
+    }
+
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        (*hold_position)[i] = factory->state_[i].position;
+    }
+}
+
+/**
+ * @brief 按锁存值下发保持命令
+ *
+ * 位置指令取锁存值（固定不变），kp 才会产生真实的恢复力。
+ *
+ * @param factory       状态机工厂
+ * @param joint_count   关节数
+ * @param hold_position 锁存的目标位置
+ * @param default_kp    位置增益
+ * @param default_kd    速度增益
+ */
+void write_hold_command(
+    FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& hold_position,
+    const std::vector<float>& default_kp, const std::vector<float>& default_kd) {
+    if (factory == nullptr || factory->command_.size() != joint_count || hold_position.size() != joint_count
         || default_kp.size() != joint_count || default_kd.size() != joint_count) {
         return;
     }
 
     for (std::size_t i = 0; i < joint_count; ++i) {
         auto& command    = factory->command_[i];
-        command.position = factory->state_[i].position;
+        command.position = hold_position[i];
         command.velocity = 0.0f;
         command.torque   = 0.0f;
         command.kp       = default_kp[i];
@@ -328,6 +363,7 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     torque_.resize(static_cast<Eigen::Index>(joint_count_));
     task_force_.setZero(static_cast<Eigen::Index>(task_dof_));
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
+    hold_position_.resize(joint_count_);
 
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
@@ -352,7 +388,10 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
 
     state = TrajPhase::STOP;
     traj.stop();
-    hold_current_joint_position(factory, joint_count_, default_kp_, default_kd_);
+    // 进入时锁存一次当前位置。保持命令必须基于固定目标：若每个周期重新读取实测值，
+    // 位置误差恒为 0，kp 再大也不产生恢复力，机械臂会在重力下缓慢坠落。
+    latch_joint_position(factory, joint_count_, &hold_position_);
+    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
     return true;
 }
 
@@ -378,7 +417,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     }
 
     if (state == TrajPhase::STOP) {
-        hold_current_joint_position(factory, joint_count_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
         return true;
     }
 
@@ -446,6 +485,8 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     if (trajectory_finished(traj, traj_start_time_, time)) {
         traj.stop();
         state = TrajPhase::STOP;
+        // 轨迹结束时锁存终点：否则进入 STOP 后位置指令会跟着实测值跑，失去刚度。
+        latch_joint_position(factory, joint_count_, &hold_position_);
     }
 
     return true;
@@ -459,6 +500,7 @@ JointTrajState::JointTrajState(const std::string& name, std::any ctx)
     joint_count_ = model_dof_from_context(ctx);
     torque.resize(static_cast<Eigen::Index>(joint_count_));
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
+    hold_position_.resize(joint_count_);
 
     joint_trajectory_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::JointTrajCmd>(
         "arm_joint_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::JointTrajCmd& msg) {
@@ -483,7 +525,9 @@ bool JointTrajState::enter(const std::string& last_state, const rclcpp::Time& ti
 
     state = TrajPhase::STOP;
     traj.stop();
-    hold_current_joint_position(factory, joint_count_, default_kp_, default_kd_);
+    // 进入时锁存一次当前位置（理由同 CartTrajState::enter）。
+    latch_joint_position(factory, joint_count_, &hold_position_);
+    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
     return true;
 }
 
@@ -508,7 +552,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
     }
 
     if (state == TrajPhase::STOP) {
-        hold_current_joint_position(factory, joint_count_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
         return true;
     } else if (state == TrajPhase::MOVING) {
         traj.update(time, point);
@@ -553,6 +597,8 @@ bool JointTrajState::run(const rclcpp::Time& time) {
         if (trajectory_finished(traj, traj_start_time_, time)) {
             traj.stop();
             state = TrajPhase::STOP;
+            // 轨迹结束时锁存终点（理由同 CartTrajState::run）。
+            latch_joint_position(factory, joint_count_, &hold_position_);
         }
     }
     return true;
@@ -705,6 +751,7 @@ AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
     position_error_.resize(static_cast<Eigen::Index>(task_dof_));
     velocity_error_.resize(static_cast<Eigen::Index>(task_dof_));
     torque_.resize(static_cast<Eigen::Index>(joint_count_));
+    hold_position_.resize(joint_count_);
     admittance_mass_.resize(static_cast<Eigen::Index>(task_dof_));
     admittance_damping_.resize(static_cast<Eigen::Index>(task_dof_));
     admittance_stiffness_.resize(static_cast<Eigen::Index>(task_dof_));
@@ -763,6 +810,8 @@ bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& t
     desired_task_acceleration_.setZero();
     task_force_.setZero();
     last_update_time_ = time;
+    // 轨迹未激活时按锁存值保持；进入时锁存一次当前位置（理由同 CartTrajState::enter）。
+    latch_joint_position(factory, joint_count_, &hold_position_);
     return true;
 }
 
@@ -790,7 +839,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
     }
 
     if (!trajectory_active_) {
-        hold_current_joint_position(factory, joint_count_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
         return true;
     }
 
