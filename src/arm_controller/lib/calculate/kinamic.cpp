@@ -1,16 +1,21 @@
 #include "kinamic.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
 namespace {
 
-constexpr int kMaxIterations     = 200;
-constexpr double kTolerance      = 1e-6;
-constexpr double kDamping        = 1e-4;
-constexpr double kMaxJointStep   = 0.1;
+/// 连续多少次步被拒绝就判定停滞并提前退出，避免在实时回路里空转满迭代上限。
+constexpr int kMaxConsecutiveRejections = 8;
 
 }  // namespace
+
+IKSolver::Tuning& IKSolver::tuning() {
+    static Tuning instance;
+    return instance;
+}
 
 IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping> task_mapping)
     : robot_(std::move(robot)), task_mapping_(std::move(task_mapping)) {
@@ -25,6 +30,8 @@ IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping
     workspace_.solution.resize(joint_count);
     workspace_.current.resize(6);
     workspace_.error.resize(6);
+    workspace_.trial.resize(joint_count);
+    workspace_.trial_error.resize(6);
     workspace_.rhs.resize(joint_count);
     workspace_.joint_step.resize(joint_count);
     workspace_.geometric_jacobian.resize(6, joint_count);
@@ -68,70 +75,130 @@ bool IKSolver::jacobian(const Eigen::VectorXd& joint_pos, Eigen::MatrixXd* task_
     return true;
 }
 
+bool IKSolver::evaluate_error(
+    const Eigen::VectorXd& target, const Eigen::VectorXd& joint_pos, Eigen::VectorXd* error) {
+    if (!task_position(joint_pos, &workspace_.current) || workspace_.current.size() != target.size()) {
+        return false;
+    }
+    // 误差交给 TaskMapping 计算：姿态用旋转向量表示时逐分量相减在 |rv| ≈ π 处失效。
+    return task_mapping_->error_map(target, workspace_.current, error);
+}
+
 bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) {
+    const Tuning& config = tuning();
 
     const int joint_count = robot_->dof();
     if (target.size() != 6 || joint_pos.size() != joint_count) {
         return false;
     }
+
+    last_error_norm_ = 0.0;
+    last_iterations_ = 0;
+
     workspace_.solution = joint_pos;
+    if (!workspace_.solution.allFinite()) {
+        return false;
+    }
+
     const Eigen::VectorXd& lower = robot_->lower_joint_limit();
     const Eigen::VectorXd& upper = robot_->upper_joint_limit();
     const bool use_joint_limits = lower.size() == joint_count && upper.size() == joint_count
         && lower.allFinite() && upper.allFinite();
 
-    if (!workspace_.solution.allFinite()) {
+    // 限位截断留出 joint_limit_slack 的余量。实测关节角可能略微超出 URDF 限位
+    // （柔性、噪声、仿真软约束），严格截断会把「当前位形」本身变成不可达目标，
+    // 逆解必然失败——这正是 cart_traj 曾经一进入就报求解失败的原因之一。
+    const double slack = config.joint_limit_slack;
+    Eigen::VectorXd effective_lower = lower;
+    Eigen::VectorXd effective_upper = upper;
+    if (use_joint_limits) {
+        effective_lower = lower.array() - slack;
+        effective_upper = upper.array() + slack;
+        workspace_.solution = workspace_.solution.cwiseMax(effective_lower).cwiseMin(effective_upper);
+    }
+
+    if (!evaluate_error(target, workspace_.solution, &workspace_.error)) {
         return false;
     }
-    if (use_joint_limits) {
-        workspace_.solution = workspace_.solution.cwiseMax(lower).cwiseMin(upper);
+    double current_norm = workspace_.error.norm();
+    if (current_norm < config.tolerance) {
+        joint_pos        = workspace_.solution;
+        last_error_norm_ = current_norm;
+        return true;
     }
 
-    for (int iteration = 0; iteration < kMaxIterations; ++iteration) {
-        if (!task_position(workspace_.solution, &workspace_.current) || workspace_.current.size() != target.size()) {
+    double lambda       = config.lambda_initial;
+    double trust_radius = config.trust_initial;
+    int consecutive_rejections = 0;
+
+    for (int iteration = 0; iteration < config.max_iterations; ++iteration) {
+        last_iterations_ = iteration + 1;
+
+        if (!jacobian(workspace_.solution, &workspace_.task_jacobian)) {
+            last_error_norm_ = current_norm;
             return false;
         }
 
-        // 任务空间误差必须交给 TaskMapping 计算：姿态用旋转向量表示时，逐分量相减
-        // 在 |rv| ≈ π 处会得到 ≈2π 的假误差，迭代必然发散（见 TaskMapping::error_map）。
-        if (!task_mapping_->error_map(target, workspace_.current, &workspace_.error)) {
-            return false;
-        }
-        if (!workspace_.error.allFinite()) {
-            return false;
-        }
-        if (workspace_.error.norm() < kTolerance) {
-            joint_pos = workspace_.solution;
-            return true;
-        }
-
-        if (!jacobian(workspace_.solution, &workspace_.task_jacobian)
-            || workspace_.task_jacobian.rows() != target.size()
-            || workspace_.task_jacobian.cols() != joint_count) {
-            return false;
-        }
-
+        // Levenberg-Marquardt 步：(JᵀJ + λI)⁻¹ Jᵀ e
         workspace_.hessian.noalias() = workspace_.task_jacobian.transpose() * workspace_.task_jacobian;
-        workspace_.hessian.diagonal().array() += kDamping * kDamping;
-
+        workspace_.hessian.diagonal().array() += lambda;
         workspace_.rhs.noalias() = workspace_.task_jacobian.transpose() * workspace_.error;
         workspace_.ldlt.compute(workspace_.hessian);
         workspace_.joint_step = workspace_.ldlt.solve(workspace_.rhs);
         if (!workspace_.joint_step.allFinite()) {
+            last_error_norm_ = current_norm;
             return false;
         }
 
-        workspace_.joint_step = workspace_.joint_step.cwiseMax(-kMaxJointStep).cwiseMin(kMaxJointStep);
-        if (use_joint_limits) {
-            workspace_.joint_step =
-                workspace_.joint_step.cwiseMax(lower - workspace_.solution).cwiseMin(upper - workspace_.solution);
+        // 信赖域：限制步长范数。接近奇异时 LM 步会非常大，硬截断到某个固定上限会让
+        // 迭代来回震荡；按半径等比缩回则保持方向、只缩短步长。
+        const double step_norm = workspace_.joint_step.norm();
+        if (step_norm > trust_radius) {
+            workspace_.joint_step *= trust_radius / step_norm;
         }
-        workspace_.solution += workspace_.joint_step;
+
+        if (use_joint_limits) {
+            workspace_.joint_step = workspace_.joint_step
+                                        .cwiseMax(effective_lower - workspace_.solution)
+                                        .cwiseMin(effective_upper - workspace_.solution);
+        }
+
+        workspace_.trial = workspace_.solution + workspace_.joint_step;
+        if (!evaluate_error(target, workspace_.trial, &workspace_.trial_error)) {
+            last_error_norm_ = current_norm;
+            return false;
+        }
+        const double trial_norm = workspace_.trial_error.norm();
+
+        if (trial_norm < current_norm) {
+            // 实际下降：接受该步，放宽信赖域、减小阻尼
+            workspace_.solution = workspace_.trial;
+            workspace_.error    = workspace_.trial_error;
+            current_norm        = trial_norm;
+            if (current_norm < config.tolerance) {
+                joint_pos        = workspace_.solution;
+                last_error_norm_ = current_norm;
+                return true;
+            }
+            lambda       = std::max(lambda * config.lambda_down, config.lambda_min);
+            trust_radius = std::min(trust_radius * config.trust_grow, config.trust_max);
+            consecutive_rejections = 0;
+        } else {
+            // 未下降：拒绝该步，收紧信赖域、加大阻尼后重试
+            lambda       = std::min(lambda * config.lambda_up, config.lambda_max);
+            trust_radius = std::max(trust_radius * config.trust_shrink, config.trust_min);
+            // 停滞提前退出：连续多次无法下降说明已到数值极限（目标与可达集存在微小
+            // 不一致时误差降不到零）。此时必须尽快返回，否则会在实时回路里空转满
+            // max_iterations，拖慢控制周期、让机械臂跟不上轨迹。
+            if (++consecutive_rejections >= kMaxConsecutiveRejections) {
+                last_error_norm_ = current_norm;
+                return current_norm < config.tolerance;
+            }
+        }
     }
 
-    if (task_position(workspace_.solution, &workspace_.current) && workspace_.current.size() == target.size()
-        && task_mapping_->error_map(target, workspace_.current, &workspace_.error)
-        && workspace_.error.norm() < kTolerance) {
+    last_error_norm_ = current_norm;
+    if (current_norm < config.tolerance) {
         joint_pos = workspace_.solution;
         return true;
     }

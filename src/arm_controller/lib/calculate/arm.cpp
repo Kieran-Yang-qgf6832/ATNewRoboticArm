@@ -46,6 +46,14 @@ bool ArmSolve::forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd
     return ik_solver_->task_position(joint_pos, task_pos);
 }
 
+double ArmSolve::last_ik_error_norm() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_error_norm() : 0.0;
+}
+
+int ArmSolve::last_ik_iterations() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_iterations() : 0;
+}
+
 bool ArmSolve::inverse_dynamic(
     const Eigen::VectorXd& joint_pos,
     const Eigen::VectorXd& task_vel,

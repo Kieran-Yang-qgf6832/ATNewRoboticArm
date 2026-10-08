@@ -107,6 +107,11 @@ target_link_libraries(arm_controller
 install(TARGETS arm_controller
 LIBRARY DESTINATION lib)
 
+# 逆解器离线基准：只用于扫描信赖域 / LM 参数，不参与控制器运行，因此不安装。
+add_executable(ik_benchmark tools/ik_benchmark.cpp)
+target_link_libraries(ik_benchmark arm_controller)
+ament_target_dependencies(ik_benchmark rclcpp)
+
 install(
   FILES
     arm_ctrl_plugin.xml

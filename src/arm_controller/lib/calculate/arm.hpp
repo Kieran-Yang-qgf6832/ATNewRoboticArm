@@ -34,6 +34,12 @@ public:
                       const Eigen::VectorXd& joint_torque_residual,
                       Eigen::VectorXd* task_force);
 
+    /// @return 上一次 inverse_kinamic() 的残余任务空间误差范数，用于诊断
+    double last_ik_error_norm() const;
+
+    /// @return 上一次 inverse_kinamic() 实际使用的迭代次数，用于诊断
+    int last_ik_iterations() const;
+
 private:
     struct Workspace {
         Eigen::VectorXd finite_joint_pos;
