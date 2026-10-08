@@ -444,14 +444,27 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             traj.stop();
             set_fault_stage("Cartesian trajectory inverse kinematics");
             if (joint_count_ == 6) {
+                // 打印「目标」与「当前实测关节角的正解」以及二者的任务空间误差范数，
+                // 用于区分「目标不可达」与「迭代不收敛」。
+                Eigen::VectorXd seed_joints(6);
+                for (std::size_t i = 0; i < 6; ++i) {
+                    seed_joints(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+                }
+                Eigen::VectorXd measured_task(6);
+                double error_norm = -1.0;
+                if (factory->arm_solve_->forward_kinamic(seed_joints, &measured_task)) {
+                    Eigen::VectorXd task_error(6);
+                    if (factory->task_map_->error_map(point.pos, measured_task, &task_error)) {
+                        error_norm = task_error.norm();
+                    }
+                }
                 RCLCPP_WARN_THROTTLE(
                     factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
-                    "Cartesian IK failed at t=%.3f s: target=[%.4f %.4f %.4f | %.4f %.4f %.4f], measured=[%.4f %.4f "
-                    "%.4f %.4f %.4f %.4f]",
-                    (time - traj_start_time_).seconds(), point.pos(0), point.pos(1), point.pos(2), point.pos(3),
-                    point.pos(4), point.pos(5), factory->state_[0].position, factory->state_[1].position,
-                    factory->state_[2].position, factory->state_[3].position, factory->state_[4].position,
-                    factory->state_[5].position);
+                    "Cartesian IK failed at t=%.3f s: error_norm=%.6f, target=[%.4f %.4f %.4f | %.4f %.4f %.4f], "
+                    "fk(measured)=[%.4f %.4f %.4f | %.4f %.4f %.4f]",
+                    (time - traj_start_time_).seconds(), error_norm, point.pos(0), point.pos(1), point.pos(2),
+                    point.pos(3), point.pos(4), point.pos(5), measured_task(0), measured_task(1), measured_task(2),
+                    measured_task(3), measured_task(4), measured_task(5));
             }
             return false;
         }

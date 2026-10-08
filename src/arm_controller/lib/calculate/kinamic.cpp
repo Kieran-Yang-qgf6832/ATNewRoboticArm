@@ -92,7 +92,11 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
             return false;
         }
 
-        workspace_.error.noalias() = target - workspace_.current;
+        // 任务空间误差必须交给 TaskMapping 计算：姿态用旋转向量表示时，逐分量相减
+        // 在 |rv| ≈ π 处会得到 ≈2π 的假误差，迭代必然发散（见 TaskMapping::error_map）。
+        if (!task_mapping_->error_map(target, workspace_.current, &workspace_.error)) {
+            return false;
+        }
         if (!workspace_.error.allFinite()) {
             return false;
         }
@@ -125,9 +129,9 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
         workspace_.solution += workspace_.joint_step;
     }
 
-    if (task_position(workspace_.solution, &workspace_.current)
-        && workspace_.current.size() == target.size()
-        && (target - workspace_.current).norm() < kTolerance) {
+    if (task_position(workspace_.solution, &workspace_.current) && workspace_.current.size() == target.size()
+        && task_mapping_->error_map(target, workspace_.current, &workspace_.error)
+        && workspace_.error.norm() < kTolerance) {
         joint_pos = workspace_.solution;
         return true;
     }

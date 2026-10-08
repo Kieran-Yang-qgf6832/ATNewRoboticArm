@@ -41,10 +41,21 @@ sequences:
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: idel}
 
-  # 复位后沿 +Z 抬升 5 cm（阶段 3 实现 cart_move 后可用）。
+  # 复位后沿 +Z 抬升 5 cm。注意：reset 目标零位形是奇异位形，此处仅作反例保留，
+  # 预期会因逆解不收敛而失败；可用的笛卡尔序列见下面的 ready_then_cart。
   reset_then_cart:
     steps:
       - {type: reset}
+      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: idel}
+
+  # 先关节运动到非奇异位姿，再做笛卡尔运动。
+  # 注意：零位形（reset 目标）机械臂完全伸直，是奇异位形，雅可比降秩，
+  # 从那里直接做笛卡尔运动逆解不收敛（bugs.md B3）。笛卡尔任务务必先离开零位形。
+  ready_then_cart:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
       - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
       - {type: idel}
 
