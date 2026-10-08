@@ -388,6 +388,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         || !point.acc.allFinite()) {
         state = TrajPhase::STOP;
         traj.stop();
+        set_fault_stage("Cartesian trajectory sampling");
         return false;
     }
 
@@ -399,11 +400,27 @@ bool CartTrajState::run(const rclcpp::Time& time) {
 
     try {
         if (!factory->arm_solve_->inverse_kinamic(point.pos, &joint_pos_)
-            || joint_pos_.size() != static_cast<Eigen::Index>(joint_count_) || !joint_pos_.allFinite()
-            || !factory->arm_solve_->inverse_dynamic(joint_pos_, point.vel, point.acc, task_force_, &torque_)
+            || joint_pos_.size() != static_cast<Eigen::Index>(joint_count_) || !joint_pos_.allFinite()) {
+            state = TrajPhase::STOP;
+            traj.stop();
+            set_fault_stage("Cartesian trajectory inverse kinematics");
+            if (joint_count_ == 6) {
+                RCLCPP_WARN_THROTTLE(
+                    factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
+                    "Cartesian IK failed at t=%.3f s: target=[%.4f %.4f %.4f | %.4f %.4f %.4f], measured=[%.4f %.4f "
+                    "%.4f %.4f %.4f %.4f]",
+                    (time - traj_start_time_).seconds(), point.pos(0), point.pos(1), point.pos(2), point.pos(3),
+                    point.pos(4), point.pos(5), factory->state_[0].position, factory->state_[1].position,
+                    factory->state_[2].position, factory->state_[3].position, factory->state_[4].position,
+                    factory->state_[5].position);
+            }
+            return false;
+        }
+        if (!factory->arm_solve_->inverse_dynamic(joint_pos_, point.vel, point.acc, task_force_, &torque_)
             || torque_.size() != static_cast<Eigen::Index>(joint_count_) || !torque_.allFinite()) {
             state = TrajPhase::STOP;
             traj.stop();
+            set_fault_stage("Cartesian trajectory inverse dynamics");
             return false;
         }
     } catch (const std::exception& error) {
@@ -411,6 +428,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             factory->node_->get_logger(), *factory->node_->get_clock(), 1000, "Cartesian trajectory solve failed: %s", error.what());
         state = TrajPhase::STOP;
         traj.stop();
+        set_fault_stage("Cartesian trajectory solve threw");
         return false;
     }
 
@@ -499,6 +517,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
             || !point.acc.allFinite()) {
             state = TrajPhase::STOP;
             traj.stop();
+            set_fault_stage("Joint trajectory sampling");
             return false;
         }
 
@@ -507,6 +526,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
                 || torque.size() != static_cast<Eigen::Index>(joint_count_) || !torque.allFinite()) {
                 state = TrajPhase::STOP;
                 traj.stop();
+                set_fault_stage("Joint trajectory inverse dynamics");
                 return false;
             }
         } catch (const std::exception& error) {
@@ -515,6 +535,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
                 error.what());
             state = TrajPhase::STOP;
             traj.stop();
+            set_fault_stage("Joint trajectory inverse dynamics");
             return false;
         }
 
@@ -629,6 +650,7 @@ bool ServoState::run(const rclcpp::Time& time) {
 
     desired_task_position_.noalias() += desired_task_velocity_ * dt;
     if (!desired_task_position_.allFinite()) {
+        set_fault_stage("Servo target integration");
         return false;
     }
 
@@ -642,9 +664,11 @@ bool ServoState::run(const rclcpp::Time& time) {
             || !factory->arm_solve_->inverse_velocity(joint_pos_, desired_task_velocity_, &joint_velocity_)
             || !factory->arm_solve_->inverse_dynamic(
                 joint_pos_, desired_task_velocity_, desired_task_acceleration_, task_force_, &torque_)) {
+            set_fault_stage("Servo solve");
             return false;
         }
     } catch (const std::exception&) {
+        set_fault_stage("Servo solve");
         return false;
     }
 
@@ -776,6 +800,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         || !point.acc.allFinite()) {
         traj.stop();
         trajectory_active_ = false;
+        set_fault_stage("Admittance trajectory sampling");
         return false;
     }
 
@@ -795,11 +820,13 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         if (!factory->model_->inverse_dynamic(joint_pos_, joint_velocity_, joint_acceleration_, &model_torque_)) {
             traj.stop();
             trajectory_active_ = false;
+            set_fault_stage("Admittance inverse dynamics");
             return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
+        set_fault_stage("Admittance inverse dynamics");
         return false;
     }
     for (std::size_t i = 0; i < joint_count_; ++i) {
@@ -809,11 +836,13 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         if (!factory->arm_solve_->static_force(joint_pos_, torque_residual_, &task_force_)) {
             traj.stop();
             trajectory_active_ = false;
+            set_fault_stage("Admittance static force mapping");
             return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
+        set_fault_stage("Admittance static force mapping");
         return false;
     }
 
@@ -828,6 +857,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
     if (!desired_task_position_.allFinite() || !desired_task_velocity_.allFinite() || !desired_task_acceleration_.allFinite()) {
         traj.stop();
         trajectory_active_ = false;
+        set_fault_stage("Admittance command integration");
         return false;
     }
 
@@ -839,11 +869,13 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
                 joint_pos_, desired_task_velocity_, desired_task_acceleration_, task_force_, &model_torque_)) {
             traj.stop();
             trajectory_active_ = false;
+            set_fault_stage("Admittance solve");
             return false;
         }
     } catch (const std::exception&) {
         traj.stop();
         trajectory_active_ = false;
+        set_fault_stage("Admittance solve");
         return false;
     }
 

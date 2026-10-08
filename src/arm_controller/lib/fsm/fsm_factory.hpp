@@ -92,6 +92,7 @@ public:
             current_state_name_ = next_state_name_;
             state_switch        = false;
         } else {
+            current_fsm.clear_fault_stage();
             if (!current_fsm.run(time)) {
                 // 状态自身报告失败（求解失败、数据异常等）：可恢复。
                 //
@@ -129,6 +130,16 @@ public:
 
     // 当前活动状态名（只读）：供外部观测控制器实际处于哪个状态。
     const std::string& current_state_name() const { return current_state_name_; }
+
+    /**
+     * @brief 当前活动状态对象（只读）
+     * @return 状态指针；状态名不存在时为 nullptr
+     * @note 供上层读取 @ref FSM::fault_stage() 用于故障日志定位
+     */
+    const FSM* current_fsm() const {
+        const auto state = fsm_map.find(current_state_name_);
+        return (state == fsm_map.end()) ? nullptr : state->second.get();
+    }
 
 private:
     bool first_run{true};

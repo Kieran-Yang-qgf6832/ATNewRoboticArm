@@ -78,6 +78,15 @@ private:
     /// 执行单个步骤
     bool run_step(const Step& step, std::string* error);
 
+    /// 执行关节空间两点轨迹（joint_move）
+    bool run_joint_move(const Step& step, std::string* error);
+
+    /// 执行任务空间两点轨迹（cart_move / admittance_move）
+    bool run_task_space_move(const Step& step, const std::string& state_name, std::string* error);
+
+    /// 自旋等待控制器进入指定状态；若控制器回退到 idel 则立即判失败
+    bool wait_for_state(const std::string& expected, std::string* error);
+
     /// 自旋等待控制器回到 idel
     bool wait_for_idel(const std::string& context, std::string* error);
 
@@ -100,6 +109,7 @@ private:
     std::string tool_off_{"off"};                            ///< 「关」的语义名
     double step_timeout_{30.0};                              ///< 单步骤超时（秒）
     double idel_hold_{0.3};                                  ///< 切到 idel 后的稳定时长（秒）
+    double settle_duration_{0.3};                            ///< 切入运动状态后的稳定时长（秒）
     /**
      * @brief 切换状态后的稳定期（秒）
      *

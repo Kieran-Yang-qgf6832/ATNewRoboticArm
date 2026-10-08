@@ -39,6 +39,45 @@ std::string locate(const std::string& sequence, std::size_t index, const Step& s
            + std::to_string(step.yaml_line) + ", type '" + step.type + "')";
 }
 
+/// 把关节角/位姿转成轨迹消息需要的 float 向量。
+std::vector<float> to_float(const std::vector<double>& values) {
+    std::vector<float> result;
+    result.reserve(values.size());
+    for (const double value : values) {
+        result.push_back(static_cast<float>(value));
+    }
+    return result;
+}
+
+/**
+ * @brief 判定一次运动是否「实际执行了」
+ *
+ * 残差超容差有两种截然不同的原因：
+ * - 稳定后略偏离目标（例如 joint4 的已知重力静差）——属正常，只告警；
+ * - 机械臂几乎没动（轨迹被控制器丢弃，例如上一次运动尚未结束）——必须判失败，
+ *   否则序列会带着错误的位姿继续往下走。
+ *
+ * @param residual   末态残差（到目标的最大偏差）
+ * @param commanded  指令位移（起点到目标的最大偏差）
+ * @param moved      实际位移（起点到末态的最大偏差）
+ * @param tolerance  到位容差
+ * @param off_target 输出：是否为「到位但超容差」
+ * @return true 看起来正常执行了
+ */
+bool motion_looks_executed(
+    double residual, double commanded, double moved, double tolerance, bool* off_target) {
+    if (residual <= tolerance) {
+        *off_target = false;
+        return true;
+    }
+    *off_target = true;
+    // 指令位移本身就在容差量级时不具备判别力，按正常处理。
+    if (commanded <= tolerance) {
+        return true;
+    }
+    return moved >= 0.5 * commanded;
+}
+
 /// 边自旋边等待，保证订阅回调（/joint_states、TF）在等待期间仍被处理。
 void sleep_with_spin(const rclcpp::Node::SharedPtr& node, double seconds) {
     rclcpp::WallRate rate(50.0);
@@ -55,9 +94,10 @@ TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx
     : node_(node)
     , ctx_(ctx) {
     if (node_ != nullptr) {
-        step_timeout_ = node_->declare_parameter<double>("step_timeout", step_timeout_);
-        idel_hold_    = node_->declare_parameter<double>("idel_hold", idel_hold_);
-        state_settle_ = node_->declare_parameter<double>("state_settle", state_settle_);
+        step_timeout_    = node_->declare_parameter<double>("step_timeout", step_timeout_);
+        idel_hold_       = node_->declare_parameter<double>("idel_hold", idel_hold_);
+        state_settle_    = node_->declare_parameter<double>("state_settle", state_settle_);
+        settle_duration_ = node_->declare_parameter<double>("settle_duration", settle_duration_);
     }
 }
 
@@ -313,6 +353,187 @@ void TaskExecutor::fall_back_to_idel() {
     }
 }
 
+bool TaskExecutor::wait_for_state(const std::string& expected, std::string* error) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(step_timeout_);
+    rclcpp::WallRate rate(20.0);
+    std::string state;
+
+    while (rclcpp::ok()) {
+        ctx_->spin_some();
+        state = ctx_->controller_state(0.5);
+        if (state == expected) {
+            return true;
+        }
+        // 目标不是 idel 却读到 idel：控制器拒绝了这次切入，或已因故障回退，无需等满超时。
+        if (state == kIdleState) {
+            if (error != nullptr) {
+                *error = "arm_controller stayed in idel instead of entering '" + expected + "'";
+            }
+            return false;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            if (error != nullptr) {
+                *error = "arm_controller did not enter '" + expected + "' within " + std::to_string(step_timeout_)
+                         + " s (current state: " + (state.empty() ? "<unknown>" : state) + ")";
+            }
+            return false;
+        }
+        rate.sleep();
+    }
+
+    if (error != nullptr) {
+        *error = "interrupted while waiting for state '" + expected + "'";
+    }
+    return false;
+}
+
+bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (!ctx_->set_exp_state("joint_traj")) {
+        return fail("failed to switch arm_controller to joint_traj");
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state("joint_traj", error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+
+    if (!ctx_->have_joint_states()) {
+        return fail("no valid /joint_states before publishing the joint trajectory");
+    }
+    // 起点必须取当前实测关节角：控制器以当前位形为逆解种子，首点与实测不一致会直接跳变。
+    const std::vector<double> start = ctx_->joint_positions();
+    if (start.size() != step.target.size()) {
+        return fail("joint state size does not match the target size");
+    }
+
+    const std::vector<std::vector<float>> points{to_float(start), to_float(step.target)};
+    const std::vector<float> seconds{0.0f, static_cast<float>(step.duration)};
+    if (!ctx_->publish_joint_traj(points, seconds)) {
+        return fail("failed to publish the joint trajectory");
+    }
+    RCLCPP_INFO(node_->get_logger(), "joint trajectory published, moving in %.2f s", step.duration);
+
+    sleep_with_spin(node_, step.duration);
+
+    // 控制器若因求解失败回退到 idel，说明这次运动没有走完，必须上报。
+    const std::string state = ctx_->controller_state(2.0);
+    if (state != "joint_traj") {
+        return fail(
+            "arm_controller left joint_traj (now '" + (state.empty() ? std::string("<unknown>") : state)
+            + "'), likely a solve failure");
+    }
+
+    if (ctx_->have_joint_states() && ctx_->joint_positions().size() == step.target.size()) {
+        const std::vector<double>& settled = ctx_->joint_positions();
+        double residual = 0.0;
+        double commanded = 0.0;
+        double moved = 0.0;
+        for (std::size_t i = 0; i < settled.size(); ++i) {
+            residual  = std::max(residual, std::abs(settled[i] - step.target[i]));
+            commanded = std::max(commanded, std::abs(step.target[i] - start[i]));
+            moved     = std::max(moved, std::abs(settled[i] - start[i]));
+        }
+
+        bool off_target = false;
+        if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            return fail(
+                "joint trajectory appears to have been ignored: moved " + std::to_string(moved)
+                + " rad of the commanded " + std::to_string(commanded) + " rad");
+        }
+        if (off_target) {
+            RCLCPP_WARN(
+                node_->get_logger(), "joint trajectory finished with a residual joint error of %.4f rad (tolerance %.4f rad)",
+                residual, step.tolerance);
+        } else {
+            RCLCPP_INFO(node_->get_logger(), "joint trajectory finished, max joint error %.4f rad", residual);
+        }
+    }
+    return true;
+}
+
+bool TaskExecutor::run_task_space_move(const Step& step, const std::string& state_name, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (!ctx_->set_exp_state(state_name)) {
+        return fail("failed to switch arm_controller to " + state_name);
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state(state_name, error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+
+    // 起点必须取当前实测末端位姿：轨迹首点若与当前位姿不一致，机械臂会在 t=0 直接跳过去。
+    std::vector<double> start_pose;
+    if (!ctx_->end_effector_pose(&start_pose)) {
+        return fail("cannot read the end-effector pose before publishing the task space trajectory (TF unavailable)");
+    }
+
+    std::vector<double> target_pose = start_pose;
+    for (std::size_t i = 0; i < step.offset.size() && i < target_pose.size(); ++i) {
+        target_pose[i] += step.offset[i];
+    }
+
+    const std::vector<std::vector<float>> points{to_float(start_pose), to_float(target_pose)};
+    const std::vector<float> seconds{0.0f, static_cast<float>(step.duration)};
+    const bool published =
+        (state_name == "admittance") ? ctx_->publish_admittance(points, seconds) : ctx_->publish_cart_traj(points, seconds);
+    if (!published) {
+        return fail("failed to publish the task space trajectory");
+    }
+    RCLCPP_INFO(
+        node_->get_logger(), "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s", state_name.c_str(),
+        start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2], step.duration);
+
+    sleep_with_spin(node_, step.duration);
+
+    const std::string state = ctx_->controller_state(2.0);
+    if (state != state_name) {
+        return fail(
+            "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
+            + "'), likely a solve failure");
+    }
+
+    std::vector<double> current_pose;
+    if (ctx_->end_effector_pose(&current_pose)) {
+        double residual = 0.0;
+        double commanded = 0.0;
+        double moved = 0.0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            residual  = std::max(residual, std::abs(current_pose[i] - target_pose[i]));
+            commanded = std::max(commanded, std::abs(target_pose[i] - start_pose[i]));
+            moved     = std::max(moved, std::abs(current_pose[i] - start_pose[i]));
+        }
+
+        bool off_target = false;
+        if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            return fail(
+                "task space trajectory appears to have been ignored: moved " + std::to_string(moved)
+                + " m of the commanded " + std::to_string(commanded) + " m");
+        }
+        if (off_target) {
+            RCLCPP_WARN(
+                node_->get_logger(), "%s finished with a residual position error of %.4f m (tolerance %.4f m)",
+                state_name.c_str(), residual, step.tolerance);
+        } else {
+            RCLCPP_INFO(node_->get_logger(), "%s finished, position error %.4f m", state_name.c_str(), residual);
+        }
+    }
+    return true;
+}
+
 bool TaskExecutor::run_step(const Step& step, std::string* error) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
@@ -325,6 +546,18 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
         // 不切换控制器状态：上一步完成后控制器自身处于保持态（idel / *_traj 的 STOP 阶段）。
         sleep_with_spin(node_, step.duration);
         return true;
+    }
+
+    if (step.type == "joint_move") {
+        return run_joint_move(step, error);
+    }
+
+    if (step.type == "cart_move") {
+        return run_task_space_move(step, "cart_traj", error);
+    }
+
+    if (step.type == "admittance_move") {
+        return run_task_space_move(step, "admittance", error);
     }
 
     if (step.type == "idel") {

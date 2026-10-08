@@ -476,9 +476,22 @@ void ArmController::apply_safe_hold_and_idel() {
         fsm_factory->exp_state_name = "idel";
     }
 
+    // 状态在 run() 返回 false 前会记录失败阶段（FSM::fault_stage），这里一并打出。
+    // 否则把故障策略收拢到一处之后，会丢失「到底是采样、逆解还是逆动力学失败」这一
+    // 关键定位信息——这正是原先 17 处兜底各自携带 stage 参数的作用。
+    const char* stage = nullptr;
+    if (fsm_factory) {
+        const FSM* fsm = fsm_factory->current_fsm();
+        if (fsm != nullptr) {
+            stage = fsm->fault_stage();
+        }
+    }
+
     RCLCPP_ERROR_THROTTLE(
         get_node()->get_logger(), *get_node()->get_clock(), 2000,
-        "state machine reported a fault; holding the current joint position and switching to idel");
+        "state machine fault in state '%s'%s%s; holding the current joint position and switching to idel",
+        fsm_factory ? fsm_factory->current_state_name().c_str() : "<unknown>", stage != nullptr ? " at stage: " : "",
+        stage != nullptr ? stage : "");
 }
 
 /**

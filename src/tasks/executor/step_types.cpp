@@ -17,19 +17,20 @@ struct Entry {
     const char* type;
     bool requires_idel;
     bool needs_duration;
+    const char* exp_state; ///< 控制器状态名；nullptr 表示本步骤不切换控制器状态
 };
 
 /// 全部步骤类型。requires_idel 对应控制器侧「只能从 idel 进入、只能切回 idel」的约束。
 const Entry kStepTable[] = {
-    {"wait", false, true},            // 不切换控制器状态，纯等待
-    {"idel", false, false},           // 切回 idel 并锁定当前位置
-    {"reset", true, false},           // 复位；ResetState::enter 要求 last_state == idel
-    {"joint_move", false, true},      // 关节空间轨迹
-    {"cart_move", false, true},       // 笛卡尔空间轨迹
-    {"admittance_move", false, true}, // 导纳控制下的期望轨迹
-    {"tool", false, false},           // 末端执行器开关量
-    {"teach", true, true},            // 示教；TeachPendantState 要求 idel 进出
-    {"measure", true, true},          // 参数辨识；ParamterMeasureState 要求 idel 进出
+    {"wait", false, true, nullptr},            // 不切换控制器状态，纯等待
+    {"idel", false, false, "idel"},            // 切回 idel 并锁定当前位置
+    {"reset", true, false, "reset"},           // 复位；ResetState::enter 要求 last_state == idel
+    {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
+    {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹
+    {"admittance_move", false, true, "admittance"}, // 导纳控制下的期望轨迹
+    {"tool", false, false, nullptr},           // 末端执行器开关量
+    {"teach", true, true, "teach_pendant"},    // 示教；TeachPendantState 要求 idel 进出
+    {"measure", true, true, "measure"},        // 参数辨识；ParamterMeasureState 要求 idel 进出
 };
 
 constexpr std::size_t kStepTableSize = sizeof(kStepTable) / sizeof(kStepTable[0]);
@@ -63,6 +64,7 @@ StepSpec step_spec(const std::string& type) {
         spec.known          = true;
         spec.requires_idel  = entry->requires_idel;
         spec.needs_duration = entry->needs_duration;
+        spec.exp_state      = entry->exp_state;
     }
     return spec;
 }

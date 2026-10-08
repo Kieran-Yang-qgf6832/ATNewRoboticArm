@@ -46,6 +46,7 @@ struct StepSpec {
     bool known{false};          ///< 是否为已知类型
     bool requires_idel{false};  ///< 执行前是否要求控制器处于 idel
     bool needs_duration{false}; ///< 是否必须提供正的 duration
+    const char* exp_state{nullptr}; ///< 对应的控制器状态名；nullptr 表示不切换状态
 };
 
 /**
