@@ -1,0 +1,59 @@
+# 任务层配置：序列由步骤组合而成，新增任务只需编辑本文件，不需要重新编译。
+#
+# 步骤类型（封闭集合，共 9 类）：
+#   wait            不切换控制器状态，纯等待 duration 秒
+#   idel            切回 idel 并锁定当前位置
+#   reset           复位；只等控制器 current_state 回到 idel
+#   joint_move      关节空间轨迹；用 to 引用目标点，或直接给 target
+#   cart_move       笛卡尔轨迹；offset 为相对当前末端位姿的位移（3 维）
+#   admittance_move 导纳控制下的期望轨迹；同样用 offset
+#   tool            末端执行器开关量；action 取下面 tool 段定义的语义名
+#   teach           示教；需 duration
+#   measure         参数辨识；需 duration
+#
+# 常用字段：duration（秒）、tolerance（到位容差）。
+# reset / teach / measure 只能从 idel 进出，执行器会自动先等待控制器空闲。
+
+# 当前挂载的末端执行器：只影响 tool 步骤的语义名与日志。
+# 换夹爪时把 name 改成 gripper、on/off 改成 clamp/release 即可，任务序列不用动。
+tool:
+  name: suction
+  on: suck
+  off: release
+
+# 命名目标点：修改一处，所有引用它的序列一起生效。
+points:
+  home:      [0.0, 0.0,  0.0, 0.0, 0.0, 0.0]
+  ready:     [0.0, 0.3, -0.3, 0.0, 0.3, 0.0]
+  above_box: [0.2, 0.1,  0.4, 0.0, 0.5, 0.0]
+
+sequences:
+  # 最小可用序列：仅复位后回到空闲，用于验证执行器骨架。
+  reset_only:
+    steps:
+      - {type: reset}
+      - {type: idel}
+
+  # 复位后运动到 ready 点（阶段 3 实现 joint_move 后可用）。
+  reset_then_joint:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: idel}
+
+  # 复位后沿 +Z 抬升 5 cm（阶段 3 实现 cart_move 后可用）。
+  reset_then_cart:
+    steps:
+      - {type: reset}
+      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: idel}
+
+  # 完整取放示例：吸住后必须等真空建立才能抬升，所以 tool 之后跟一个 wait。
+  pick_demo:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: tool, action: suck}
+      - {type: wait, duration: 1.5}
+      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: idel}
