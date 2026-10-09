@@ -112,6 +112,11 @@ add_executable(ik_benchmark tools/ik_benchmark.cpp)
 target_link_libraries(ik_benchmark arm_controller)
 ament_target_dependencies(ik_benchmark rclcpp)
 
+# 正运动学打印工具：用于与 TF 逐项对比，排查 docs/bugs.md O1。同样不安装。
+add_executable(fk_dump tools/fk_dump.cpp)
+target_link_libraries(fk_dump arm_controller)
+ament_target_dependencies(fk_dump rclcpp)
+
 install(
   FILES
     arm_ctrl_plugin.xml
