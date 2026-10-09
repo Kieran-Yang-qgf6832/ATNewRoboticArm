@@ -23,6 +23,7 @@
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 
 #include "step_types.hpp"
 #include "task_context.hpp"
@@ -84,6 +85,21 @@ private:
     /// 执行任务空间两点轨迹（cart_move / admittance_move）
     bool run_task_space_move(const Step& step, const std::string& state_name, std::string* error);
 
+    /**
+     * @brief 执行「切入某状态 -> 保持 duration -> 切回 idel」型步骤
+     *
+     * 适用于 teach（示教）与 measure（参数辨识）：控制器在该状态下自行完成全部工作，
+     * 任务层只负责按时长守候，并在结束后把控制器交还给 idel。
+     *
+     * @param step       步骤（需含正 duration）
+     * @param state_name 控制器状态名
+     * @param error      输出：失败原因
+     */
+    bool run_timed_state(const Step& step, const std::string& state_name, std::string* error);
+
+    /// 执行 tool 步骤：向 /tool_cmd 发布开关量
+    bool run_tool(const Step& step, std::string* error);
+
     /// 自旋等待控制器进入指定状态；若控制器回退到 idel 则立即判失败
     bool wait_for_state(const std::string& expected, std::string* error);
 
@@ -101,6 +117,9 @@ private:
 
     rclcpp::Node::SharedPtr node_; ///< runner 节点
     TaskContext* ctx_{nullptr};    ///< 任务上下文（不持有所有权）
+
+    /// 末端执行器开关量发布器（std_msgs/Bool，见 tool 步骤）
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr tool_pub_;
 
     std::map<std::string, std::vector<double>> points_;      ///< 命名目标点
     std::map<std::string, std::vector<Step>> sequences_;     ///< 序列名 → 步骤列表

@@ -98,6 +98,11 @@ TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx
         idel_hold_       = node_->declare_parameter<double>("idel_hold", idel_hold_);
         state_settle_    = node_->declare_parameter<double>("state_settle", state_settle_);
         settle_duration_ = node_->declare_parameter<double>("settle_duration", settle_duration_);
+
+        // 末端执行器开关量出口。话题名与缺陷文档中约定的 /tool_cmd 一致；
+        // 用 transient_local 让晚启动的订阅者（例如实机侧硬件接口）也能拿到最近一次状态。
+        const std::string tool_topic = node_->declare_parameter<std::string>("tool_cmd_topic", "tool_cmd");
+        tool_pub_ = node_->create_publisher<std_msgs::msg::Bool>(tool_topic, rclcpp::QoS(10).transient_local());
     }
 }
 
@@ -534,6 +539,59 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
     return true;
 }
 
+bool TaskExecutor::run_timed_state(const Step& step, const std::string& state_name, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (!ctx_->set_exp_state(state_name)) {
+        return fail("failed to switch arm_controller to " + state_name);
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state(state_name, error)) {
+        return false;
+    }
+
+    RCLCPP_INFO(node_->get_logger(), "%s active for %.2f s", state_name.c_str(), step.duration);
+    sleep_with_spin(node_, step.duration);
+
+    // 结束后把控制器交还给 idel：teach / measure 都只允许 idel 进出。
+    if (!ctx_->set_exp_state(kIdleState)) {
+        return fail("failed to switch arm_controller back to idel after " + state_name);
+    }
+    sleep_with_spin(node_, state_settle_);
+    return wait_for_idel(state_name, error);
+}
+
+bool TaskExecutor::run_tool(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (tool_pub_ == nullptr) {
+        return fail("tool command publisher is unavailable");
+    }
+
+    const bool on = tool_action_is_on(step.action);
+    std_msgs::msg::Bool message;
+    message.data = on;
+    tool_pub_->publish(message);
+
+    RCLCPP_INFO(
+        node_->get_logger(), "tool '%s' -> %s (action '%s')", tool_name_.c_str(), on ? "ON" : "OFF",
+        step.action.c_str());
+
+    // 只发布不等待：开关量本身没有运动过程。需要建立时间（例如吸盘抽真空）时，
+    // 由序列里紧随其后的 wait 步骤承担，这样时长由配置决定而不是写死在代码里。
+    return true;
+}
+
 bool TaskExecutor::run_step(const Step& step, std::string* error) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
@@ -558,6 +616,18 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
 
     if (step.type == "admittance_move") {
         return run_task_space_move(step, "admittance", error);
+    }
+
+    if (step.type == "tool") {
+        return run_tool(step, error);
+    }
+
+    if (step.type == "teach") {
+        return run_timed_state(step, "teach_pendant", error);
+    }
+
+    if (step.type == "measure") {
+        return run_timed_state(step, "measure", error);
     }
 
     if (step.type == "idel") {

@@ -67,6 +67,14 @@
 namespace arm_controller {
 
 /**
+ * @brief 关节越限判定的容差（弧度）
+ *
+ * 实测关节角可能因连杆柔性、传感器噪声、仿真的软约束而略微超出 URDF 限位
+ * （实测约 0.003 rad）。只有超出该容差才判为真正的越限故障，避免误报。
+ */
+constexpr double kJointLimitFaultSlack = 0.05;
+
+/**
  * @brief 构造函数
  *
  * 仅执行默认初始化，不在构造阶段读取 ROS 参数或申请系统资源。
@@ -443,7 +451,7 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
  * @warning 运行于实时控制线程，仅做标量运算与接口写入，禁止分配与阻塞。
  * @see ArmController::update
  */
-void ArmController::apply_safe_hold_and_idel() {
+void ArmController::apply_safe_hold_and_idel(const char* reason) {
     // 位置锁定为当前实测值，速度/力矩/积分项清零，仅保留默认 kp/kd，避免失控运动。
     //
     // 同时写入状态机的命令缓存 command_：切回 idel 的那一周期，FSMFactory::run()
@@ -489,9 +497,32 @@ void ArmController::apply_safe_hold_and_idel() {
 
     RCLCPP_ERROR_THROTTLE(
         get_node()->get_logger(), *get_node()->get_clock(), 2000,
-        "state machine fault in state '%s'%s%s; holding the current joint position and switching to idel",
+        "safety hold (%s) in state '%s'%s%s; holding the current joint position and switching to idel", reason,
         fsm_factory ? fsm_factory->current_state_name().c_str() : "<unknown>", stage != nullptr ? " at stage: " : "",
         stage != nullptr ? stage : "");
+}
+
+int ArmController::first_joint_limit_violation() const {
+    if (!fsm_factory || !fsm_factory->model_) {
+        return -1;
+    }
+
+    const Eigen::VectorXd& lower = fsm_factory->model_->lower_joint_limit();
+    const Eigen::VectorXd& upper = fsm_factory->model_->upper_joint_limit();
+    if (lower.size() != static_cast<Eigen::Index>(joints_name.size())
+        || upper.size() != static_cast<Eigen::Index>(joints_name.size()) || !lower.allFinite() || !upper.allFinite()) {
+        // 模型没有提供可用的限位信息时不做判断，交由状态机自身的检查负责。
+        return -1;
+    }
+
+    for (std::size_t i = 0; i < joints_name.size(); i++) {
+        const auto index      = static_cast<Eigen::Index>(i);
+        const double position = fsm_factory->state_[i].position;
+        if (position < lower(index) - kJointLimitFaultSlack || position > upper(index) + kJointLimitFaultSlack) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 /**
@@ -530,20 +561,37 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
         fsm_factory->state_[i].torque   = static_cast<float>(state_interfaces_[i * 3 + 2].get_value());
     }
 
+    // 关节越限检查：**只做诊断上报，不改变状态、不覆盖指令**。
+    //
+    // 为什么不在这里强制切回 idel：越限时既想禁止运动、又必须允许运动才能把机械臂
+    // 带回限位以内，强制切回会把外部后续下发的合法指令一并覆盖掉，形成死锁。
+    // 安全处置交给状态机自身的失败处理——IK 类状态在非法位形上会求解失败，走
+    // RunResult::Recoverable 分支保持并切回 idel；关节空间运动则不受影响，正好
+    // 是恢复路径。本检查的价值在于让越限被**显式看见**，而不是以「逆解莫名失败」
+    // 的形式表现出来。
+    const int violated_joint = first_joint_limit_violation();
+    if (violated_joint >= 0) {
+        RCLCPP_ERROR_THROTTLE(
+            get_node()->get_logger(), *get_node()->get_clock(), 2000,
+            "joint%zu is outside its model limit (%.4f rad); check the model limits and the commanded motion",
+            static_cast<std::size_t>(violated_joint) + 1,
+            static_cast<double>(fsm_factory->state_[static_cast<std::size_t>(violated_joint)].position));
+    }
+
     // 推进状态机：内部完成状态切换、轨迹求解与控制量计算。
     const RunResult result = fsm_factory->run(time);
 
     if (result == RunResult::Fatal) {
         // 状态机结构损坏（状态名不存在、指针为空）：属于代码缺陷。
         // 停用链条前也先保持一拍，尽量避免机械臂在停用瞬间失去力矩。
-        apply_safe_hold_and_idel();
+        apply_safe_hold_and_idel("state machine structure fault");
         return controller_interface::return_type::ERROR;
     }
 
     if (result == RunResult::Recoverable) {
         // 可恢复故障：锁定当前位置并切回 idel，但**不停用控制器链**。
         // 返回 ERROR 会让 controller_manager 停用整条链，力矩消失导致坠落。
-        apply_safe_hold_and_idel();
+        apply_safe_hold_and_idel("state machine reported a failure");
         return controller_interface::return_type::OK;
     }
 
