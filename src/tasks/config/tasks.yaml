@@ -41,22 +41,28 @@ sequences:
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: idel}
 
-  # 复位后沿 +Z 抬升 5 cm。注意：reset 目标零位形是奇异位形，此处仅作反例保留，
-  # 预期会因逆解不收敛而失败；可用的笛卡尔序列见下面的 ready_then_cart。
+  # 复位后直接做笛卡尔运动。**反例**：reset 目标的零位形是奇异位形（机械臂完全
+  # 伸直、雅可比降秩），此处预期失败；可用的笛卡尔序列见 ready_then_cart。
   reset_then_cart:
     steps:
       - {type: reset}
-      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: cart_move, offset: [0.05, 0.0, 0.0], duration: 2.0}
       - {type: idel}
 
   # 先关节运动到非奇异位姿，再做笛卡尔运动。
-  # 注意：零位形（reset 目标）机械臂完全伸直，是奇异位形，雅可比降秩，
-  # 从那里直接做笛卡尔运动逆解不收敛（bugs.md B3）。笛卡尔任务务必先离开零位形。
+  #
+  # 两个必须遵守的约束（均由实测确定，见 docs/bugs.md）：
+  #   1) 不要从零位形直接做笛卡尔运动——零位形机械臂完全伸直、雅可比降秩，
+  #      逆解不收敛（bugs.md B3）。先 joint_move 离开零位形。
+  #   2) **不要选 +Z 方向**——ready 位姿已在最大高度（z ≈ 1.233 m），向上偏移
+  #      5 cm 时「位置 + 姿态」的组合目标不可达（实测：位置单独可达、姿态单独可达、
+  #      组合不可达；6 个不同初值全部收敛到同一残余，证明是全局不可达而非局部极小）。
+  #      实测 ready 位姿处 ±X / ±Y / -Z 均可达，+Z 不可达。
   ready_then_cart:
     steps:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
-      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: cart_move, offset: [0.05, 0.0, 0.0], duration: 2.0}
       - {type: idel}
 
   # 完整取放示例：吸住后必须等真空建立才能抬升，所以 tool 之后跟一个 wait。
@@ -66,5 +72,5 @@ sequences:
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: tool, action: suck}
       - {type: wait, duration: 1.5}
-      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: cart_move, offset: [0.0, 0.0, -0.05], duration: 2.0}
       - {type: idel}
