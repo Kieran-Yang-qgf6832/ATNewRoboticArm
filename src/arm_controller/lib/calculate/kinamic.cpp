@@ -30,6 +30,7 @@ IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping
     workspace_.solution.resize(joint_count);
     workspace_.current.resize(6);
     workspace_.error.resize(6);
+    workspace_.zero_error.setZero(6);
     workspace_.trial.resize(joint_count);
     workspace_.trial_error.resize(6);
     workspace_.rhs.resize(joint_count);
@@ -53,9 +54,10 @@ bool IKSolver::task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* 
     return true;
 }
 
-bool IKSolver::jacobian(const Eigen::VectorXd& joint_pos, Eigen::MatrixXd* task_jacobian) {
+bool IKSolver::jacobian(
+    const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, Eigen::MatrixXd* task_jacobian) {
     if (task_jacobian == nullptr || joint_pos.size() != robot_->dof() || task_jacobian->rows() != 6
-        || task_jacobian->cols() != robot_->dof()) {
+        || task_jacobian->cols() != robot_->dof() || error.size() != 6) {
         return false;
     }
 
@@ -66,13 +68,17 @@ bool IKSolver::jacobian(const Eigen::VectorXd& joint_pos, Eigen::MatrixXd* task_
         return false;
     }
 
-    if (!task_mapping_->jacobian_map(joint_pos, workspace_.geometric_jacobian, task_jacobian)
+    if (!task_mapping_->jacobian_map(joint_pos, error, workspace_.geometric_jacobian, task_jacobian)
         || task_jacobian->rows() == 0 || task_jacobian->cols() != workspace_.geometric_jacobian.cols()
         || !task_jacobian->allFinite()) {
         return false;
     }
 
     return true;
+}
+
+bool IKSolver::jacobian(const Eigen::VectorXd& joint_pos, Eigen::MatrixXd* task_jacobian) {
+    return jacobian(joint_pos, workspace_.zero_error, task_jacobian);
 }
 
 bool IKSolver::evaluate_error(
@@ -134,7 +140,7 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
     for (int iteration = 0; iteration < config.max_iterations; ++iteration) {
         last_iterations_ = iteration + 1;
 
-        if (!jacobian(workspace_.solution, &workspace_.task_jacobian)) {
+        if (!jacobian(workspace_.solution, workspace_.error, &workspace_.task_jacobian)) {
             last_error_norm_ = current_norm;
             return false;
         }

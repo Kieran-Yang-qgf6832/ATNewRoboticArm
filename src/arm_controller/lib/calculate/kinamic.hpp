@@ -73,6 +73,20 @@ public:
      */
     bool solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos);
 
+    /**
+     * @brief 任务误差的 Gauss-Newton 雅可比
+     * @param joint_pos     当前关节角
+     * @param error         当前任务空间误差（见 @ref TaskMapping::error_map）
+     * @param task_jacobian 输出：6 × dof
+     */
+    bool jacobian(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, Eigen::MatrixXd* task_jacobian);
+
+    /**
+     * @brief 任务坐标雅可比（误差取零）
+     *
+     * 用于速度映射等不做迭代线性化的场合。误差为零时右雅可比退化为单位阵，
+     * 等价于直接把几何雅可比当任务雅可比。
+     */
     bool jacobian(const Eigen::VectorXd& joint_pos, Eigen::MatrixXd* task_jacobian);
 
     bool task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_position);
@@ -91,6 +105,7 @@ private:
         Eigen::VectorXd solution;
         Eigen::VectorXd current;
         Eigen::VectorXd error;
+        Eigen::VectorXd zero_error; ///< 速度映射路径用的零误差（右雅可比退化为单位阵）
         Eigen::VectorXd trial;
         Eigen::VectorXd trial_error;
         Eigen::VectorXd rhs;

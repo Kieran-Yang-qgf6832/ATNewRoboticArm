@@ -9,7 +9,14 @@ public:
                       const Eigen::Isometry3d& pose,
                       Eigen::VectorXd* task_position) override;
 
+    /**
+     * @brief 把几何雅可比映射为任务误差的 Gauss-Newton 雅可比
+     *
+     * 位置部分直接照搬；姿态部分乘右雅可比 @c J_r(ρ_e)（@c ρ_e 为误差旋转向量），
+     * 详见 @ref TaskMapping::jacobian_map。
+     */
     bool jacobian_map(const Eigen::VectorXd& joint_pos,
+                      const Eigen::VectorXd& error,
                       const Eigen::MatrixXd& jacobian,
                       Eigen::MatrixXd* task_jacobian) override;
 

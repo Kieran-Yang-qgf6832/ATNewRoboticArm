@@ -460,11 +460,14 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                 }
                 RCLCPP_WARN_THROTTLE(
                     factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
-                    "Cartesian IK failed at t=%.3f s: ik_err=%.3e (iters=%d), tracking_err=%.6f, target=[%.4f %.4f %.4f "
-                    "| %.4f %.4f %.4f], fk(measured)=[%.4f %.4f %.4f | %.4f %.4f %.4f]",
+                    "Cartesian IK failed at t=%.3f s: ik_err=%.3e (iters=%d), tracking_err=%.6f\n"
+                    "  target (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
+                    "  seed   (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
+                    "  fk(seed)     = [%.4f %.4f %.4f | %.4f %.4f %.4f]",
                     (time - traj_start_time_).seconds(), factory->arm_solve_->last_ik_error_norm(),
                     factory->arm_solve_->last_ik_iterations(), error_norm, point.pos(0), point.pos(1), point.pos(2),
-                    point.pos(3), point.pos(4), point.pos(5), measured_task(0), measured_task(1), measured_task(2),
+                    point.pos(3), point.pos(4), point.pos(5), seed_joints(0), seed_joints(1), seed_joints(2),
+                    seed_joints(3), seed_joints(4), seed_joints(5), measured_task(0), measured_task(1), measured_task(2),
                     measured_task(3), measured_task(4), measured_task(5));
             }
             return false;

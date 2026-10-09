@@ -117,6 +117,11 @@ add_executable(fk_dump tools/fk_dump.cpp)
 target_link_libraries(fk_dump arm_controller)
 ament_target_dependencies(fk_dump rclcpp)
 
+# 单次逆解复现工具：用给定的目标与初值跑一次 IK，离线复现仿真失败用例。同样不安装。
+add_executable(ik_solve tools/ik_solve.cpp)
+target_link_libraries(ik_solve arm_controller)
+ament_target_dependencies(ik_solve rclcpp)
+
 install(
   FILES
     arm_ctrl_plugin.xml
