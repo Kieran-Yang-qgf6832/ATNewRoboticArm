@@ -10,7 +10,7 @@
  *   向 @c /arm_admittance 发布导纳期望轨迹指令；
  * - 记录任务链的运行失败信息（共享黑板）。
  *
- * @see TaskFSM
+ * @see TaskExecutor
  *
  * @author lyz
  * @date 2026-09-30
