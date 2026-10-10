@@ -60,7 +60,8 @@ private:
 
     void on_pack_praser(const uint8_t* data, int size);
 
-    std::vector<std::string> joint_names_{"joint1","joint2","joint3","joint4","joint5","joint6"};
+    // 关节名在 on_init 中从 URDF 的 <ros2_control> 段读取，不再硬编码。
+    std::vector<std::string> joint_names_;
     std::vector<JointStateData> states_;
     std::vector<JointStateData> received_states_;
     std::vector<JointCommandData> commands_;

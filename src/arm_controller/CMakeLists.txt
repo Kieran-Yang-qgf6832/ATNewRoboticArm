@@ -122,6 +122,11 @@ add_executable(ik_solve tools/ik_solve.cpp)
 target_link_libraries(ik_solve arm_controller)
 ament_target_dependencies(ik_solve rclcpp)
 
+# 实机接口关节数校验：不连硬件，验证关节数与 MCU 通信帧不符时拒绝启动。同样不安装。
+add_executable(arm_real_joint_count_test tools/arm_real_joint_count_test.cpp)
+target_link_libraries(arm_real_joint_count_test arm_controller)
+ament_target_dependencies(arm_real_joint_count_test rclcpp hardware_interface)
+
 install(
   FILES
     arm_ctrl_plugin.xml

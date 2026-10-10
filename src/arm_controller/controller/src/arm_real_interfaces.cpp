@@ -23,6 +23,17 @@
 
 namespace arm_controller {
 
+namespace {
+
+// MCU 通信帧在 data_pack.h 中固定为 6 个电机。这里从结构体定义反推，避免帧长在两处各写一个数字而失配。
+constexpr std::size_t kProtocolMotorCount = sizeof(MCUTarget2Pack::motor) / sizeof(MCUTarget2Pack::motor[0]);
+
+static_assert(
+    sizeof(MCUStatePack::motor) / sizeof(MCUStatePack::motor[0]) == kProtocolMotorCount,
+    "MCU 收发帧的电机数量不一致，请检查 data_pack.h");
+
+} // namespace
+
 ArmRealInterfaces::ArmRealInterfaces() = default;
 
 ArmRealInterfaces::~ArmRealInterfaces() {
@@ -30,6 +41,26 @@ ArmRealInterfaces::~ArmRealInterfaces() {
 
 hardware_interface::CallbackReturn ArmRealInterfaces::on_init(const hardware_interface::HardwareInfo& hardware_info) {
     if (hardware_interface::SystemInterface::on_init(hardware_info) != hardware_interface::CallbackReturn::SUCCESS) {
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    // 关节名必须以 URDF 为准。此前硬编码为 joint1..joint6，URDF 里改了名字或数量时，
+    // 导出的接口名会和 URDF 对不上，而下面的循环又假定一定有 6 个元素。
+    joint_names_.clear();
+    joint_names_.reserve(hardware_info.joints.size());
+    for (const auto& joint : hardware_info.joints) {
+        joint_names_.push_back(joint.name);
+    }
+
+    // MCU 通信帧长度固定为 kProtocolMotorCount。数量不符时，收发循环会越界读写
+    // commands_ / received_states_，把垃圾数据当指令发给电机（docs/bugs.md O3）。
+    // 这里直接拒绝启动，而不是靠截断把问题藏起来。
+    if (joint_names_.size() != kProtocolMotorCount) {
+        RCLCPP_ERROR(
+            rclcpp::get_logger("arm_real_interfaces"),
+            "URDF 声明了 %zu 个关节，但 MCU 通信帧固定为 %zu 个电机，拒绝启动。",
+            joint_names_.size(),
+            kProtocolMotorCount);
         return hardware_interface::CallbackReturn::ERROR;
     }
 
@@ -148,7 +179,7 @@ hardware_interface::return_type ArmRealInterfaces::write(const rclcpp::Time& tim
     MCUTarget2Pack pack{};
     pack.head = 0x5B;
 
-    const auto joint_count = 6;
+    const auto joint_count = std::min(commands_.size(), kProtocolMotorCount);
     for (std::size_t i = 0; i < joint_count; ++i) {
         pack.motor[i].position = static_cast<float>(commands_[i].position);
         pack.motor[i].velocity = static_cast<float>(commands_[i].velocity);
@@ -173,7 +204,7 @@ void ArmRealInterfaces::on_pack_praser(const uint8_t* data, int size) {
     }
 
     std::lock_guard<std::mutex> lock(received_states_mutex_);
-    const auto joint_count = 6;
+    const auto joint_count = std::min(received_states_.size(), kProtocolMotorCount);
     for (std::size_t i = 0; i < joint_count; ++i) {
         received_states_[i].position = pack.motor[i].position;
         received_states_[i].velocity = pack.motor[i].velocity;
