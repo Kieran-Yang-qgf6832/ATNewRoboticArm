@@ -149,16 +149,6 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   **笛卡尔运动的起点不是指令要求的位姿且没有提示**。详见 `docs/bugs.md` O7。
 - `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
-- **`src/launch_pack/launch/task_*.launch.py` 共 7 个文件已全部失效**（`task_admittance` /
-  `task_cart_traj` / `task_idel` / `task_joint_traj` / `task_measure` / `task_reset` /
-  `task_teach_pendant`）。它们是任务层重构**之前**的产物：
-  - `task_sequence` 传的是列表（如 `["cart_traj"]`），新节点要的是序列名字符串；
-  - 还传了 22 个新节点**不认识**的参数（`cart_traj_target_offset`、
-    `joint_traj_target_positions`、`task_timeout` 等），现在这些都写在 `tasks.yaml` 里；
-  - 文件头 `@see src/tasks/task/*.hpp` 指向**已删除**的目录。
-
-  **不要用它们**，直接用 `ros2 run tasks task_runner -p task_sequence:=<序列名>`。
-  建议后续统一删除，或改写成对新接口的薄封装。
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。

@@ -223,13 +223,6 @@ ros2 launch launch_pack arm_controller_test_sim.launch.py
 
 > 控制器激活后会自动执行一次 `reset`（`exp_state: reset`），把机械臂拉到零位并回到 `idel`。
 
-> ⚠️ `src/launch_pack/launch/` 下还有 7 个 `task_*.launch.py`
-> （`task_cart_traj` / `task_joint_traj` / `task_admittance` / `task_measure` /
-> `task_teach_pendant` / `task_reset` / `task_idel`），**它们已全部失效**：
-> 是任务层重构前的产物，用的是列表式 `task_sequence` 和一批新节点不认识的参数，
-> 文件头还指向已删除的 `src/tasks/task/*.hpp`。**不要用**——跑任务请用
-> `ros2 run tasks task_runner -p task_sequence:=<序列名>`。
-
 ### 2. 实机
 
 ```bash

@@ -6,3 +6,6 @@
 # 沙箱内运行时把 ROS_HOME/ROS_LOG_DIR 指到工作区内，避免写 ~/.ros 被拒
 /.ros_home/
 /.ros/
+# Python 编译产物：以前被误提交过（含 Python 版本号，跨环境无意义）
+__pycache__/
+*.pyc
