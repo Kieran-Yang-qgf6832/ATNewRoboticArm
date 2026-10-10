@@ -20,25 +20,65 @@ third_party/figaroh-plus/src
 
 ## 依赖与物理一致性（重要）
 
-辨识出的完整惯性参数要**物理可行**（伪惯量半正定、主惯量满足三角不等式），必须走 SDP：
+辨识出的完整惯性参数要**物理可行**（伪惯量半正定、主惯量满足三角不等式），需要 SDP 能力：
 
 ```bash
 pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
 ```
 
-- `reconstruction.method`：`sdp` 强制物理约束；`auto` 在装了 picos 时走 sdp、没装时
-  自动退回 `nullspace`（`identify.yaml` 默认用 `auto`）。
-- `nullspace` **不施加物理约束**，结果可能非物理；此时 `require_physical: true` 会
-  **拒绝写出**非物理的 URDF——这是有意的保护，不是 bug。报错形如：
+三条路线，`identify.yaml` 默认 `method: auto`（装了 picos 走 sdp）：
+
+| `method` | `physical_projection` | 说明 |
+| --- | --- | --- |
+| `sdp`（`auto` 在装了 picos 时选中） | 任意 | 联合最优：直接解 `M·θ = φ_base` + 逐杆伪惯量 PSD。**本项目当前数据判定不可行**（见下） |
+| `nullspace` | `false` | 只做零空间重建，**不施加物理约束**，结果通常非物理，会被 `require_physical` 拒绝 |
+| `nullspace` | `true` | 先零空间重建，再用 LMI 把每个连杆投影到物理可行集。**能写出文件，但本项目数据下会退化**（见下） |
+
+### ⚠️ 当前这份测量数据辨识不出可用模型
+
+**症状**：`method: auto`（→ sdp）直接报 `status=error`，提示"问题不可行"。
+
+**实测证据**（CSV = `measured_for_identification.csv`，5000 样本）：
+
+| 项 | 值 |
+| --- | --- |
+| 基参数拟合 | `‖φ_base − M·θ_prior‖ = 0.365`，而 `‖φ_base‖ ≈ 1.98`（偏离先验 18.5%） |
+| 问题拆解 | 只留 PSD **可行**；只留等式 `M·θ = φ_base` **可行**；两者同时 **不可行**（等式放宽到 1.0 才可行） |
+| 原始辨识结果 | 明显非物理：joint3 的 `Izz = −0.153`，而 URDF 真值是 `+0.00278` |
+| 投影路线结果 | 物理可行但**退化成质点**：joint3 绕质心惯量从 `1e-3` 塌到 `1e-10`（`izz` 甚至 `−1.8e-10`） |
+
+**已排除的原因**：picos/cvxopt 缺失（已装，LP/SDP 都能解）、CAD 约束过紧（去掉后照样不可行）、
+URDF 与 MJCF 模型不一致（逐杆惯量数值一致，只是主轴排列不同）、仿真里的关节阻尼/摩擦
+（MJCF 没有 `damping`/`frictionloss`）。
+
+**结论**：模型没问题，是**数据与刚体动力学假设不一致**，所以辨识出的参数被拉出物理可行集。
+投影只能把结果推到可行域边界（质点），不是可用模型。建议排查方向：
+
+1. 记录到的 `/joint_states` 或控制器 `state_[i].torque` 到底是不是"关节实际输出力矩"
+   （若含 PD 修正项或与真实力矩有相位差，会直接偏置惯量项）；
+2. `acceleration_source: computed` 的有限差分精度（惯量项乘的是加速度，相位误差会被放大）；
+3. 激励轨迹的信息量：`measure_trajectory_period = 10 s`、`repeat_cnt = 1` 只有 10 s 数据，
+   可能不足以激励全部 36 个基参数；
+4. 辨识模型里 `has_friction` / `has_actuator_inertia` 都是 `false`，若实机/仿真存在这些效应
+   需要打开。
+
+在数据修好之前，`identify.yaml` 保持"失败就报错"，**不静默降级**到投影路线——那样只会得到一个
+看起来 `passed: true`、实则退化的 URDF。
+
+其他要点：
+
+- `require_physical: true`（默认）会在结果非物理时**拒绝写出** URDF，这是有意的保护。报错形如：
 
   ```text
   Refusing to write a non-physical identified URDF.
   Issues: joint1: pseudo-inertia is not positive semidefinite (min eigenvalue -0.0134), ...
   ```
 
-- `physical_projection: true`（LMI 投影）同样依赖 picos，不能作为替代方案。
 - 只想看诊断数据（rmse / 相关性 / 参数值）时，可以另存一份配置把 `require_physical` 设为
   `false` 跑一遍，但**不要**把这样得到的 URDF 用于控制。
+- `psd_eig_tol` 在校验时按**容差**使用（允许 `min_eig ≥ -|tol|`）：SDP/LMI 求解器只能把
+  `P ≽ 0` 满足到 ~1e-8 的相对精度，不留余量的话投影明明成功也会被判非物理。真实违反量是
+  1e-2 量级，仍然会被拦下。
 
 > **vendored FIGAROH 是 0.6.0**，其重建入口不接受 `strict_base_constraints` /
 > `base_residual_weight` / `shape_prior` / `tensor_trust_region` /

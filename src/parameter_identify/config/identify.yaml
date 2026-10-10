@@ -20,9 +20,12 @@ identification:
 
 reconstruction:
   enabled: true
-  # auto：装了 picos 走 sdp，没装就自动退回 nullspace。
-  # 本机当前没有 picos / cvxopt，写死 sdp 会返回 status=solver_missing，配合下面的
-  # require_physical: true 直接报错退出；auto 则在有 picos 时自动启用 SDP，无需改配置。
+  # auto：装了 picos 走 sdp，没装退回 nullspace。
+  # 本项目**当前这份测量数据**用 sdp 会判定不可行（辨识出的基参数 phi_base 距物理可行集
+  # 约 0.37，而 ‖phi_base‖≈1.98；只留 PSD 可行、只留等式可行、两者同时不可行），
+  # 这是数据/模型一致性问题，不是缺依赖，所以这里保持"失败就报错"，不静默降级。
+  # 想强行拿到一个物理可行的模型可以改成 method: nullspace + physical_projection: true，
+  # 但实测那样会把连杆投影成质点（惯量从 1e-3 塌到 1e-10），不是可用模型——详见 README。
   method: auto
   prior_source: urdf
   physical_projection: false

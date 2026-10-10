@@ -283,9 +283,21 @@ def identify(
     )
     require_physical = bool(recon_cfg.get("require_physical", True))
     if reconstruction_status != "ok" and require_physical:
+        # 区分两种失败，别再把"求解器没装"和"SDP 不可行"混成一句话——后者才是常见情形，
+        # 而它的含义是"辨识出的基参数不在物理可行集内"，与 picos 装没装无关
+        # （docs/bugs.md 教训 7：错误信息必须指对方向）。
+        if reconstruction_status == "solver_missing":
+            hint = "picos/cvxopt 未安装或不可用；装好后重试，或改用 method: nullspace + physical_projection: true。"
+        else:
+            hint = (
+                "SDP 求解失败。最常见的原因是问题不可行：辨识出的基参数与逐杆物理约束"
+                "（伪惯量 PSD）无法同时满足，属数据/模型一致性问题，不是缺依赖。"
+                "可改用 method: nullspace + physical_projection: true 走 LMI 投影，"
+                "并检查报告里的 physical_projection 与 reconstruction_base_residual_after_projection。"
+            )
         raise RuntimeError(
-            f"Physical reconstruction did not complete successfully: status={reconstruction_status}. "
-            "Install picos/cvxopt or set reconstruction.require_physical=false to allow diagnostic output only."
+            f"Physical reconstruction did not complete successfully: status={reconstruction_status}. {hint} "
+            "（诊断用：reconstruction.require_physical=false 只写报告、不写 URDF。）"
         )
     if physical_issues and require_physical:
         issue_text = "; ".join(
@@ -716,7 +728,13 @@ def _validate_physical_parameters(
             joint_issues.append(f"mass {p['m']:.6g} < {mass_min:.6g}")
 
         p10 = np.asarray([p[key] for key in INERTIAL_KEYS], dtype=float)
-        verify_psd_tol = 0.0 if psd_eig_tol > 0.0 else psd_eig_tol
+        # psd_eig_tol 一律当作**容差**用：允许 min_eig >= -|tol|。
+        # 原实现在它为正值时退化成 0.0（要求严格 >= 0），而 SDP 求解器只能把
+        # P ≽ 0 满足到 ~1e-8 的相对精度（vendored 的 physical_consistency.py 自己
+        # 也是这么注释的，并在校验时主动放宽）。结果是 LMI 投影明明成功、min_eig
+        # 只有 -4e-11 的求解器噪声，却永远过不了校验，报出"投影成功但拒绝写出"。
+        # 注意这只吸收数值噪声：未投影时的真实违反量是 1e-2 量级，仍然会被拦下。
+        verify_psd_tol = -abs(psd_eig_tol)
         pseudo_report = physical_module.check_p10_feasibility(
             p10,
             mass_min=mass_min,
