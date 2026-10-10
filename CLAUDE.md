@@ -4,7 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、双层状态机控制、以及动力学参数辨识（FIGAROH + CMA-ES）完整工作流。
+基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层、以及动力学参数辨识（FIGAROH + CMA-ES）完整工作流。
+
+> **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
+> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
+> 里面记了 6 条必须遵守的设计约束（零位形奇异、保持命令必须锁存、参数必须
+> `auto_declare` 等）和唯一一条未修缺陷 O7。
 
 ## 常用命令
 
@@ -25,12 +30,11 @@ colcon build --packages-select arm_controller parameter_identify --symlink-insta
 # MuJoCo 仿真（控制器 + RViz）
 ros2 launch launch_pack arm_controller_test_sim.launch.py
 
-# 任务层：复位后执行笛卡尔轨迹
-ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, cart_traj]" -p use_sim_time:=true
+# 任务层：跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
+ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
 
-# 任务层：复位后运动到指定关节角
-ros2 run tasks task_runner --ros-args -p task_sequence:="[reset, joint_traj]" \
-  -p joint_traj_target_positions:="[0.0, 0.3, -0.3, 0.0, 0.3, 0.0]"
+# 任务层：换一份任务配置文件
+ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
 
 # 切换控制器工作状态
 ros2 param set /arm_controller exp_state reset
@@ -64,24 +68,37 @@ ArmController (controller_interface, 500 Hz)
 
 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，默认 500 Hz。
 
-### 双层状态机
+### 两层控制：控制器侧 FSM + 任务层配置驱动执行器
 
-项目有两层独立的状态机，接口形态相同（`enter/run/check_switch/exit`），但语义和约束完全不同：
+两层**不再**是形态相同的状态机。控制器侧是真正的 FSM（实时路径），任务层已重构为
+**配置驱动的步骤执行器**（普通线程）：
 
-| | 控制器侧 FSM | 任务层 FSM |
+| | 控制器侧 FSM | 任务层执行器 |
 |---|---|---|
 | 位置 | `src/arm_controller/arm/` | `src/tasks/` |
-| 基类 | `FSM`（`lib/fsm/fsm.hpp`） | `TaskFSM`（`tasks/fsm/task_fsm.hpp`） |
+| 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
 | 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
 | 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 任务编排，通过 ROS 接口驱动控制器切换状态 |
+| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 9 类步骤驱动控制器 |
+| 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
+
+任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `sequences`。
+步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `cart_move` /
+`admittance_move` / `tool` / `teach` / `measure`），类型属性表在
+`src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
+加新**任务**只改 YAML。
 
 任务层通过 `TaskContext` 与控制器交互：
 - `exp_state` 参数服务 → 切换控制器工作状态
-- `/arm_cart_traj`、`/arm_joint_traj` 话题 → 下发轨迹指令
+- `/arm_cart_traj`、`/arm_joint_traj`、`/arm_admittance` 话题 → 下发轨迹指令
 - `/joint_states` 订阅 + TF 查询 → 获取关节角与末端位姿
 
-任务链由 `task_runner` 节点按 `task_sequence` 参数串联，自动以 `idel` 结尾。
+`task_runner` 的 `task_sequence` 参数是**序列名字符串**（如 `"pick_demo"`），不是步骤列表。
+进程默认常驻，改写该参数即可再跑一条；加 `exit_when_idle:=true` 让它在序列结束后退出
+（退出码反映成败）。
+
+> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形奇异）、
+> `unreachable_near` / `unreachable_far`（目标不可达）。它们退出码为 1 是正确行为。
 
 ### 计算库分层
 
@@ -125,17 +142,46 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
-- `third_party/figaroh-plus/` 是空目录，使用前需手动 clone：`git clone https://github.com/thanhndv212/figaroh-plus.git third_party/figaroh-plus`
-- `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用
+- **O7（唯一未修缺陷，高）**：通用保持路径 `write_hold_command()` 没有重力前馈
+  （只写了 `command.torque = 0`），而 O6 只给 `reset`/`idel` 加了补偿。后果是进入
+  `cart_traj` 后等待轨迹到达的约 0.9 s 里 joint4 塌陷 0.089 rad（5.1°），
+  **笛卡尔运动的起点不是指令要求的位姿且没有提示**。详见 `docs/bugs.md` O7。
+- `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
-- 项目无测试
+- **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
+  （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
+  构建后在 `build/arm_controller/` 里，用于排查与离线校验。
+- **仿真未验证的状态**：`admittance`、`teach_pendant`、`servo`、`measure` 没有端到端跑过。
+
+### 两个容易踩的运维细节
+
+- **`robot_description` 话题被改名了。** `controller_manager` 是从**话题**（不是参数）
+  取 URDF 的，同 ROS domain 内任何其他 `robot_state_publisher` 都会让它静默加载错模型。
+  因此发布端与订阅端一起重映射到了 **`/arm_robot_description`**（RViz 配置已同步）。
+  用 `ros2 topic echo /robot_description` 看不到东西是正常的。
+- **`gravity_compensation` 参数**（`ros2_controller.yaml`，默认 `true`）是 `reset`/`idel`
+  的重力前馈开关。这是实机上唯一一处**主动输出力矩**的保持路径，怀疑模型质量或力矩
+  符号时先关掉它（关掉后复位会有约 0.124 rad 静差并触发 WARN）。
 
 ### 修改控制器接口时
 
 同步检查三处：controller YAML（`ros2_controller.yaml`）、URDF `ros2_control` 接口标签、插件 XML。
 
+### 新增控制器参数时
+
+**必须在 `ArmController::on_init` 里 `auto_declare`**，否则 YAML 里写了也读不到——
+控制器只读取已声明的参数，未声明的键会被静默忽略并取默认值，**写错参数名不会有任何提示**。
+关键参数建议在构造阶段打一行 INFO 把实际生效值打出来（`gravity_compensation` 就是这么做的）。
+详见 `docs/bugs.md` C6。
+
 ## 第三方库
 
 - `third_party/libcmaes/`：CMA-ES 优化库（已就位，CMake 自动构建）
-- `third_party/figaroh-plus/`：FIGAROH 动力学参数辨识（需手动 clone）
+- `third_party/figaroh-plus/`：FIGAROH 动力学参数辨识（已就位，有完整内容）
 - `src/mujoco_ros2_control/`：MuJoCo 的 ros2_control 插件（独立 git 仓库）
+
+> **注意**：`third_party/` 下两个目录是以 **gitlink（嵌入 git 仓库）**方式记录的，
+> 项目里**没有 `.gitmodules`**，所以它们不是标准 submodule。
+> 当前 `git status` 会把 `third_party/figaroh-plus` 报成已修改——因为索引里记的是
+> 提交 `8899853`，而工作区实际停在 `96b586f`。这**不是代码改动**，处理前先确认意图
+> （要么把 gitlink 更新到 `96b586f`，要么把工作区切回 `8899853`）。

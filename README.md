@@ -1,18 +1,23 @@
 # RoboticArm
 
-基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、以及动力学参数辨识（FIGAROH + CMA-ES）的完整工作流。
+基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层、以及动力学参数辨识（FIGAROH + CMA-ES）的完整工作流。
+
+> **当前状态**：仿真链路已端到端跑通并验证；**实机从未运行过**。
+> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)。
 
 ## 特性
 
 - **双运行模式**：同一上层控制器 `ArmController` 可无缝切换
   - 仿真：`ArmController` → `SimPidController` → `mujoco_ros2_control/MujocoSystem`
   - 实机：`ArmController` → `ArmRealInterfaces` → USB CDC → MCU
-- **基于状态机（FSM）的控制**：8 种可切换工作状态（见下方「状态机」）。
+- **基于状态机（FSM）的控制**：8 种可切换工作状态（见下方「控制器状态机」）。
+- **配置驱动的任务层**：任务由 YAML 里的步骤组合而成，新增目标点与任务类型**不需要写 C++、不需要重新编译**。
 - **模型无关的计算库**：`ArmSolve → IKSolver → ModelBase + TaskMapping` 分层，任务空间语义与机器人模型数学解耦。
 - **基于 Pinocchio 的刚体动力学**：正运动学、几何雅可比、RNEA 逆动力学、关节限位。
 - **轨迹插值**：五次 Hermite/Bezier 段插值，保证位置、速度、加速度连续。
 - **动力学参数辨识**：激励轨迹生成（傅里叶级数）、CSV 测量记录、离线辨识与 URDF 回写。
 - **实时安全约束**：控制热路径严格无 ROS 参数读写、无动态内存分配。
+- **失效安全**：逆解失败只保持并回退 `idel`，绝不使控制器链失活；不可达的笛卡尔目标在下发前就被拒绝。
 
 ## 整体架构
 
@@ -41,6 +46,14 @@
       │ control        │               MCU
       │ /MujocoSystem  │
       └────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    tasks / task_runner                       │
+│  普通 ROS 节点线程（允许阻塞与内存分配）                       │
+│  读 config/tasks.yaml → 按步骤驱动上面的控制器                  │
+│    exp_state 参数服务 / arm_cart_traj / arm_joint_traj 话题    │
+│    /joint_states + TF → 关节角与末端位姿                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 控制配置位于 `src/launch_pack/config/ros2_controller.yaml`，默认控制频率 **500 Hz**。
@@ -48,26 +61,34 @@
 ## 目录结构
 
 ```
-RoboticArm/
+ATNewRoboticArm/
 ├── src/
 │   ├── arm_controller/         # 控制核心包（C++ 共享库 + 插件导出）
 │   │   ├── controller/         #   ROS 2 controller 与 hardware interface 插件
 │   │   ├── arm/                #   状态机（arm_fsm）与 URDF 模型封装（ModelFromURDF）
+│   │   ├── tools/              #   离线排查工具（不安装，见下）
 │   │   └── lib/
 │   │       ├── calculate/      #   运动学/动力学/轨迹工具（ArmSolve/IKSolver/Trajectory）
 │   │       ├── cdc_trans/      #   USB CDC 通信封装（libusb）
 │   │       ├── fsm/            #   轻量 FSM 基类与工厂
 │   │       ├── paramter_identify/ # 激励轨迹生成与测量（C++ 侧）
 │   │       └── executer/       #   DAG 组件执行器实验代码（未接入主库）
+│   ├── tasks/                  # 任务层：配置驱动的执行器 + task_runner 入口
+│   │   ├── config/tasks.yaml   #   任务定义（目标点、序列、末端执行器）
+│   │   ├── executor/           #   步骤类型表与执行器
+│   │   ├── context/            #   与控制器交互的 ROS 接口封装
+│   │   └── src/task_runner.cpp #   节点入口
 │   ├── arm_model/              # URDF/STL/MJCF 模型描述包
 │   ├── launch_pack/            # launch 文件、控制器 YAML、RViz 配置
 │   ├── mujoco_ros2_control/    # MuJoCo 的 ros2_control 插件（上游 dfki-ric）
 │   ├── parameter_identify/     # 离线动力学参数辨识（Python，ament_python）
-│   └── robot_msgs/             # 自定义消息（MotorCmd/MotorState）
+│   └── robot_msgs/             # 自定义消息
 ├── third_party/
 │   ├── libcmaes/               # CMA-ES 优化库
 │   └── figaroh-plus/           # FIGAROH 动力学参数辨识库
-├── AGENT.md                    # 项目开发笔记（实时约束、约定等）
+├── docs/bugs.md                # 缺陷台账与设计约束（重要）
+├── CLAUDE.md                   # 面向 AI 助手的项目指引
+├── AGENT.md                    # arm_controller 包的开发笔记
 └── README.md
 ```
 
@@ -76,11 +97,12 @@ RoboticArm/
 | 包 | 类型 | 说明 |
 | --- | --- | --- |
 | `arm_controller` | ament_cmake | 控制核心，通过 pluginlib 导出 3 个插件 |
+| `tasks` | ament_cmake | 配置驱动的任务层与 `task_runner` 入口 |
 | `arm_model` | ament_cmake | 机械臂 URDF 描述、STL 网格、MJCF 场景 |
 | `launch_pack` | ament_cmake | launch 文件与控制器配置 |
 | `mujoco_ros2_control` | ament_cmake | MuJoCo 仿真硬件插件（第三方） |
 | `parameter_identify` | ament_python | 离线动力学参数辨识 CLI（`identify_arm`） |
-| `robot_msgs` | ament_cmake | `MotorCmd.msg` / `MotorState.msg` |
+| `robot_msgs` | ament_cmake | 自定义消息：`CartTrajCmd` / `JointTrajCmd` / `AdmittanceCmd` / `ServoCtrlCmd` / `Vector` / `MotorCmd` / `MotorState` |
 
 ### `arm_controller` 导出的插件
 
@@ -88,17 +110,17 @@ RoboticArm/
 | --- | --- | --- |
 | `arm_controller/ArmController` | `controller_interface::ControllerInterface` | 上层控制器，读取 URDF 关节名与 `default_kp/default_kd`，每周期把状态送入 FSM，输出 `position/velocity/effort/kp/kd/ki` 命令 |
 | `arm_controller/SimPidController` | `controller_interface::ChainableControllerInterface` | 链式 PID，接收每关节 6 个 reference interface，向仿真硬件输出 `effort` |
-| `arm_controller/ArmRealInterfaces` | `hardware_interface::SystemInterface` | 实机硬件接口，固定 6 关节，使用 libusb CDC 与 MCU 收发 packed struct 数据包 |
+| `arm_controller/ArmRealInterfaces` | `hardware_interface::SystemInterface` | 实机硬件接口，使用 libusb CDC 与 MCU 收发 packed struct 数据包。关节名取自 URDF，**关节数必须等于 MCU 通信帧的电机数（6），否则拒绝启动** |
 
-## 状态机
+## 控制器状态机
 
 状态机由 `FSMArmControlFactory` 注册，初始状态为 `idel`，通过 `exp_state` 参数切换：
 
 | 状态名 | 功能 |
 | --- | --- |
-| `idel` | 机械臂锁定在当前位置 |
-| `reset` | 机械臂复位 |
-| `cart_traj` | 执行笛卡尔空间轨迹 |
+| `idel` | 机械臂锁定在当前位置（带重力前馈） |
+| `reset` | 机械臂复位（带重力前馈） |
+| `cart_traj` | 执行笛卡尔空间轨迹；**下发前先做可达性预检** |
 | `joint_traj` | 执行关节空间轨迹 |
 | `servo` | 伺服动作，接收速度指令并积分得到期望位置 |
 | `admittance` | 导纳控制 |
@@ -111,56 +133,124 @@ RoboticArm/
 ros2 param set /arm_controller exp_state reset
 ```
 
+## 任务层（配置驱动）
+
+任务定义在 `src/tasks/config/tasks.yaml`，**新增目标点或任务类型只需编辑该文件**。
+
+### 步骤类型（封闭集合，共 9 类）
+
+| 类型 | 说明 |
+| --- | --- |
+| `wait` | 不切换控制器状态，纯等待 `duration` 秒 |
+| `idel` | 切回 `idel` 并锁定当前位置 |
+| `reset` | 复位；等控制器状态回到 `idel` |
+| `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
+| `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维） |
+| `admittance_move` | 导纳控制下的期望轨迹；同样用 `offset` |
+| `tool` | 末端执行器开关量；`action` 取 `tool` 段定义的语义名 |
+| `teach` | 示教；需 `duration` |
+| `measure` | 参数辨识；需 `duration` |
+
+常用字段：`duration`（秒）、`tolerance`（到位容差）。
+`reset` / `teach` / `measure` 只能从 `idel` 进出，执行器会自动先等待控制器空闲。
+
+### 当前序列
+
+| 序列 | 性质 | 说明 |
+| --- | --- | --- |
+| `reset_only` | 正常 | 仅复位后回到空闲 |
+| `reset_then_joint` | 正常 | 复位后运动到 `ready` 点 |
+| `ready_then_cart` | 正常 | 先关节运动离开奇异位形，再笛卡尔平移 |
+| `pick_demo` | 正常 | 完整取放示例：吸住 → 等待真空 → 抬升 |
+| `reset_then_cart` | **反例，预期失败** | 零位形是奇异位形，直接做笛卡尔运动必然失败 |
+| `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
+| `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
+
+```bash
+# 跑一条序列（退出码反映成败）
+ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
+
+# 用别的配置文件
+ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
+```
+
+> 两条实测约束（写在 `tasks.yaml` 注释里）：
+> 1. **不要从零位形直接做笛卡尔运动**——零位形机械臂完全伸直、雅可比降秩；
+> 2. **`ready` 位姿处 +Z 不可达**——该位姿已在最大高度（z ≈ 1.233 m）。
+
 ## 依赖
 
-- **ROS 2**（Humble / Ubuntu 22.04，Python 3.10）
+- **ROS 2 Jazzy / Ubuntu 24.04 / Python 3.12**
 - `ros2_control`：`controller_interface`、`hardware_interface`、`controller_manager`、`realtime_tools`
 - `rclcpp`、`rclcpp_lifecycle`、`pluginlib`
 - `Pinocchio`（运动学/动力学）
 - `Eigen3`
 - `libusb-1.0`（USB CDC 通信）
 - `kdl_parser` / `orocos_kdl`
+- `yaml-cpp`（任务层配置解析）
 - `MuJoCo`（仿真）
 - Python：`numpy`、`scipy`、`pinocchio`、`pyyaml`
 
 ## 构建
 
 ```bash
-cd /space2/Project/RoboticArm
+cd <项目根目录>
 colcon build --symlink-install
 source install/setup.bash
 ```
 
-仅构建核心包与辨识包：
+仅构建核心包与任务层（快速验证）：
 
 ```bash
-colcon build --packages-select arm_controller parameter_identify --symlink-install
+colcon build --packages-select arm_controller tasks --symlink-install
 ```
+
+> 若 `colcon build` 报 `failed to create symbolic link ... Is a directory`，
+> 说明 `build/<包名>/ament_cmake_python/...` 下有陈旧目录残留，
+> 删掉那个同名目录再构建即可（该目录本应是符号链接）。
 
 ## 运行
 
-### 1. 仿真（MuJoCo）
+### 1. 仿真（MuJoCo）——推荐入口
 
 ```bash
 source install/setup.bash
 ros2 launch launch_pack arm_controller_test_sim.launch.py
 ```
 
-### 2. 静态模型展示（无控制器）
+> 控制器激活后会自动执行一次 `reset`（`exp_state: reset`），把机械臂拉到零位并回到 `idel`。
 
-```bash
-ros2 launch launch_pack arm_static_display.launch.py
-```
-
-### 3. 实机
+### 2. 实机
 
 ```bash
 ros2 launch launch_pack arm_real.launch.py
 ```
 
+> **注意**：`arm_real.launch.py` 与 `arm_static_display.launch.py` 引用了不存在的包
+> （`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，
+> **当前不可用**。实机路径尚未打通。
+>
 > 实机模式由 `ArmRealInterfaces` 通过 USB CDC（VID `0x0483` / PID `0x5740`）与 MCU 通信，
 > 数据包格式见 `controller/inc/data_pack.h`（`MCUTarget1Pack` / `MCUTarget2Pack` / `MCUStatePack`）。
 
+### 关于 `/arm_robot_description`
+
+`controller_manager` 是从**话题**（不是参数）取 URDF 的，而同 ROS domain 内任何其他
+`robot_state_publisher` 都会让它静默加载错模型。因此本工作区把发布端与订阅端一起
+重映射到了 **`/arm_robot_description`**（RViz 配置已同步）。
+
+如果你有外部工具依赖标准的 `/robot_description`，需要改用 `/arm_robot_description`。
+
+## 离线排查工具
+
+`src/arm_controller/tools/` 下的工具**不安装**，构建后在 `build/arm_controller/` 里：
+
+| 工具 | 用途 |
+| --- | --- |
+| `fk_dump <urdf> <q1..q6>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量 |
+| `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
+| `ik_benchmark` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
+| `arm_real_joint_count_test` | 不连硬件校验实机接口的关节数处理（5/6/7 关节） |
 
 ## 参数辨识工作流
 
@@ -190,7 +280,9 @@ ros2 run parameter_identify identify_arm \
 - 优先保持 `TaskMapping` 承担任务空间语义，`ModelBase` 承担机器人模型数学。
 - 修改任务空间时，同步检查 `position_map()` 与 `jacobian_map()`。
 - 修改控制器接口时，同步检查 controller YAML、URDF `ros2_control` 接口与插件 XML。
-- 修改后优先构建验证：`colcon build --packages-select arm_controller`。
+- **新增控制器参数时三处同步**：`ArmController::on_init` 里的 `auto_declare`、controller YAML、读取处。
+  控制器只读取**已声明**的参数，YAML 里未声明的键会被静默忽略并取默认值，写错名字不会有任何提示。
+- 修改后优先构建验证：`colcon build --packages-select arm_controller tasks`。
 
 ### ros2_control 实时约束
 

@@ -17,7 +17,9 @@
 - `arm_controller/SimPidController`：链式 PID 控制器。接收每关节 6 个
   reference interface，向仿真硬件输出 `effort`。
 - `arm_controller/ArmRealInterfaces`：实机 `hardware_interface::SystemInterface`。
-  固定 6 关节，使用 libusb CDC 与 MCU 收发 packed struct 数据包。
+  关节名从 URDF 的 `<ros2_control>` 段读取，使用 libusb CDC 与 MCU 收发 packed struct
+  数据包。MCU 通信帧固定为 6 个电机，**关节数与帧长不符时 `on_init` 直接拒绝启动**
+  （越界读写会把垃圾数据当指令发给电机，见 `docs/bugs.md` O3）。
 
 ## 主要目录
 
@@ -32,8 +34,33 @@
 
 `ArmSolve -> IKSolver -> ModelBase + TaskMapping`。
 `ModelFromURDF` 基于 Pinocchio 提供 FK、几何雅可比、RNEA 和关节限位；
-`IKSolver` 使用阻尼最小二乘迭代求 IK；
+`IKSolver` 用**信赖域 + Levenberg-Marquardt** 迭代求 IK，返回三态结果
+`Converged` / `Unreachable` / `Failed`——`Unreachable` 表示迭代结束（停滞或次数用尽）
+时残余仍超判据，`last_error_norm()` 给出「最近可达位姿离目标还有多远」；
 `Trajectory` 使用五次 Hermite/Bezier 段插值位置、速度和加速度。
+
+## 与安全相关的三处实现细节
+
+- **保持命令必须锁存**。`latch_joint_position()` 只在**进入保持时调用一次**，之后每周期
+  下发同一个固定目标；若每周期重读实测值，位置误差恒为 0，`kp` 再大也不产生恢复力，
+  机械臂会在重力下坠落（`docs/bugs.md` F1）。
+- **`reset` / `idel` 带重力前馈**。用 RNEA 在 `dq = ddq = 0` 下算出重力力矩写入
+  `command.torque`，否则零位姿下 joint4 的静差约 0.124 rad、远超 `reset_tolerance`，
+  复位永远不达标（O6）。开关是参数 `gravity_compensation`，**必须先在
+  `ArmController::on_init` 里 `auto_declare`**，否则 YAML 里写了也读不到（C6）。
+  注意 `write_hold_command()` 这条通用保持路径**还没有**补偿（未修的 O7）。
+- **笛卡尔轨迹下发前先做可达性预检**。`cart_traj` 在 MOVING 的首个周期对轨迹**终点**
+  做一次逆解，不收敛就整条拒绝、**一个运动指令都不下发**（O2）。只查终点是因为单次
+  逆解最坏约 386 µs，而控制周期是 2 ms。
+
+## 离线排查工具
+
+`tools/` 下 4 个工具**不安装**，构建后在 `build/arm_controller/` 里：
+
+- `fk_dump <urdf> <q1..q6>`：打印 FK 的平移/四元数/旋转矩阵与任务空间 6 维向量
+- `ik_solve <urdf> <t0..t5> <s0..s5>`：单次逆解，报告三态结果、残余、迭代次数与耗时
+- `ik_benchmark`：批量采样统计收敛率与迭代次数，用于扫描求解器参数
+- `arm_real_joint_count_test`：不连硬件校验实机接口的关节数处理（5/6/7 关节）
 
 ## 开发约定
 
