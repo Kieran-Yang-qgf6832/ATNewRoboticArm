@@ -129,6 +129,10 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("reset_duration", 3.0);
     auto_declare<double>("reset_tolerance", 0.01);
     auto_declare<double>("reset_settle", 2.0);
+    // reset / idel 的重力前馈补偿（docs/bugs.md O6）。
+    // 必须在此声明：本控制器只读取已声明的参数，YAML 里未声明的键会被静默忽略，
+    // 取到的是这里的默认值——写错参数名不会有任何提示。
+    auto_declare<bool>("gravity_compensation", true);
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);

@@ -30,6 +30,62 @@ int model_dof_from_context(std::any ctx) {
 }
 
 /**
+ * @brief 用 RNEA 在 dq = ddq = 0 下算出重力补偿力矩
+ *
+ * reset / idel 仅靠 kp 保持位置时，重力静差为 τ_gravity / kp。零位姿下 joint4 的
+ * τ 约 1.24 N·m 而 default_kp 只有 10，静差约 0.124 rad，远超 reset_tolerance
+ * （0.01 rad），于是复位永远不达标并静默回退 idel（docs/bugs.md O6）。
+ *
+ * 把重力力矩作为前馈直接补掉，就不必为了压静差把 kp 加到可能振荡的程度。
+ * 这与 teach_pendant 用的是同一套机制（同一份模型、同一个 torque 前馈字段）。
+ *
+ * @note 只读写调用方预分配的 buffer，不做任何内存分配，可在实时路径调用。
+ * @return 计算成功返回 true；模型不可用、抛异常或结果非有限值时返回 false，
+ *         调用方应退回纯 kp 保持（会有静差，但不会失控）
+ */
+bool compute_gravity_torque(FSMArmControlFactory* factory,
+                            std::size_t joint_count,
+                            Eigen::VectorXd* joint_pos,
+                            const Eigen::VectorXd& zero,
+                            Eigen::VectorXd* gravity_torque,
+                            const char* state_name) {
+    const auto count = static_cast<Eigen::Index>(joint_count);
+    if (factory == nullptr || factory->model_ == nullptr || factory->node_ == nullptr || joint_pos == nullptr
+        || gravity_torque == nullptr || joint_pos->size() != count || zero.size() != count
+        || gravity_torque->size() != count || factory->state_.size() != joint_count) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        (*joint_pos)(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+    }
+
+    try {
+        // dq = ddq = 0 时 RNEA 退化为纯重力力矩。
+        if (!factory->model_->inverse_dynamic(*joint_pos, zero, zero, gravity_torque)) {
+            RCLCPP_WARN_THROTTLE(
+                factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+                "%s: 重力补偿求解失败，本次退回纯 kp 保持（会有重力静差）", state_name);
+            return false;
+        }
+    } catch (const std::exception& error) {
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "%s: 重力补偿抛出异常：%s，本次退回纯 kp 保持", state_name, error.what());
+        return false;
+    }
+
+    if (!gravity_torque->allFinite()) {
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "%s: 重力补偿结果非有限值，本次退回纯 kp 保持", state_name);
+        return false;
+    }
+
+    return true;
+}
+
+/**
  * @brief 锁存当前实测关节角，作为后续「保持」的位置指令
  *
  * 必须在**进入保持时调用一次**。绝不能每个周期重新读取实测值：那样位置指令永远
@@ -175,6 +231,26 @@ IDELState::IDELState(const std::string& name, std::any ctx)
         default_kp_[i] = i < default_kp_param_.size() ? static_cast<float>(default_kp_param_[i]) : 0.0f;
         default_kd_[i] = i < default_kd_param_.size() ? static_cast<float>(default_kd_param_[i]) : 0.0f;
     }
+
+    // 重力补偿：只在构造阶段读参数与分配内存，run() 里不再碰参数（实时约束）。
+    bool gravity_compensation_param = true;
+    const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
+    gravity_compensation_                 = gravity_compensation_param;
+    RCLCPP_INFO(
+        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", name.c_str(),
+        gravity_compensation_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
+    const auto dof        = static_cast<Eigen::Index>(joint_count_);
+    gravity_joint_pos_.resize(dof);
+    gravity_zero_.setZero(dof);
+    gravity_torque_.resize(dof);
+}
+
+bool IDELState::refresh_gravity_torque() {
+    if (!gravity_compensation_ || factory == nullptr) {
+        return false;
+    }
+    return compute_gravity_torque(
+        factory, joint_count_, &gravity_joint_pos_, gravity_zero_, &gravity_torque_, "idel");
 }
 
 bool IDELState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -186,12 +262,15 @@ bool IDELState::enter(const std::string& last_state, const rclcpp::Time& time) {
         return false;
     }
 
+    const bool gravity_ok = refresh_gravity_torque();
+
     for (std::size_t i = 0; i < hold_position_.size(); ++i) {
         hold_position_[i] = factory->state_[i].position;
         auto& command     = factory->command_[i];
         command.position  = hold_position_[i];
         command.velocity  = 0.0f;
-        command.torque    = 0.0f;
+        // 重力前馈：只靠 kp 保持时静差为 τ/kp，零位姿下 joint4 会偏出 0.1 rad 以上。
+        command.torque    = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
         command.kp        = default_kp_[i];
         command.kd        = default_kd_[i];
         command.ki        = 0.0f;                                // 只要i的值改变，底层会立即清空积分项
@@ -220,11 +299,13 @@ bool IDELState::run(const rclcpp::Time& time) {
         return false;
     }
 
+    const bool gravity_ok = refresh_gravity_torque();
+
     for (std::size_t i = 0; i < hold_position_.size(); ++i) {
         auto& command    = factory->command_[i];
         command.position = hold_position_[i];
         command.velocity = 0.0f;
-        command.torque   = 0.0f;
+        command.torque   = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
         command.kp       = default_kp_[i];
         command.kd       = default_kd_[i];
         command.ki       = 0.0f;
@@ -270,6 +351,26 @@ ResetState::ResetState(const std::string& name, std::any ctx)
         default_kp_[i]      = i < default_kp_param_.size() ? static_cast<float>(default_kp_param_[i]) : 0.0f;
         default_kd_[i]      = i < default_kd_param_.size() ? static_cast<float>(default_kd_param_[i]) : 0.0f;
     }
+
+    // 重力补偿：只在构造阶段读参数与分配内存，run() 里不再碰参数（实时约束）。
+    bool gravity_compensation_param = true;
+    const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
+    gravity_compensation_                 = gravity_compensation_param;
+    RCLCPP_INFO(
+        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", name.c_str(),
+        gravity_compensation_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
+    const auto dof        = static_cast<Eigen::Index>(joint_count_);
+    gravity_joint_pos_.resize(dof);
+    gravity_zero_.setZero(dof);
+    gravity_torque_.resize(dof);
+}
+
+bool ResetState::refresh_gravity_torque() {
+    if (!gravity_compensation_ || factory == nullptr) {
+        return false;
+    }
+    return compute_gravity_torque(
+        factory, joint_count_, &gravity_joint_pos_, gravity_zero_, &gravity_torque_, "reset");
 }
 
 bool ResetState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -314,12 +415,15 @@ bool ResetState::run(const rclcpp::Time& time) {
     bool joint_reached = true;
     float max_error    = 0.0f;
     std::size_t worst  = 0;
+    const bool gravity_ok = refresh_gravity_torque();
     for (std::size_t i = 0; i < joint_count_; ++i) {
         const float delta          = reset_joint_pos_[i] - start_joint_pos_[i];
         auto& command              = factory->command_[i];
         command.position           = start_joint_pos_[i] + delta * progress_;
         command.velocity           = progress_ < 1.0f ? delta / reset_duration_ : 0.0f;
-        command.torque             = 0.0f;
+        // 重力前馈：否则零位姿下 joint4 的静差约 0.124 rad，远超 reset_tolerance，
+        // 复位永远不达标，只能静默回退 idel（docs/bugs.md O6）。
+        command.torque             = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
         command.kp                 = default_kp_[i];
         command.kd                 = default_kd_[i];
         command.ki                 = 0.0f;

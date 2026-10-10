@@ -102,6 +102,18 @@ private:
     std::vector<float> default_kd_;         ///< 默认速度增益
     std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
+
+    /// 重力补偿（docs/bugs.md O6）。三者均在构造阶段分配，run() 中不再分配内存。
+    bool gravity_compensation_{true}; ///< 是否启用，来自参数 gravity_compensation
+    Eigen::VectorXd gravity_joint_pos_;  ///< 当前关节角，RNEA 输入
+    Eigen::VectorXd gravity_zero_;       ///< 全零向量，充当 RNEA 的 dq / ddq
+    Eigen::VectorXd gravity_torque_;     ///< 重力补偿力矩，RNEA 输出
+
+    /**
+     * @brief 刷新重力补偿力矩
+     * @return 可用（已启用且求解成功）返回 true；否则调用方应退回 torque = 0
+     */
+    bool refresh_gravity_torque();
 };
 
 /**
@@ -174,6 +186,18 @@ private:
     float progress_{0.0f};                       ///< 复位进度 [0, 1]
     bool reset_done_{false};                     ///< 复位完成标志
     bool give_up_warned_{false};                 ///< 是否已就「超时仍未到位」告警（只告警一次）
+
+    /// 重力补偿（docs/bugs.md O6）。三者均在构造阶段分配，run() 中不再分配内存。
+    bool gravity_compensation_{true}; ///< 是否启用，来自参数 gravity_compensation
+    Eigen::VectorXd gravity_joint_pos_;  ///< 当前关节角，RNEA 输入
+    Eigen::VectorXd gravity_zero_;       ///< 全零向量，充当 RNEA 的 dq / ddq
+    Eigen::VectorXd gravity_torque_;     ///< 重力补偿力矩，RNEA 输出
+
+    /**
+     * @brief 刷新重力补偿力矩
+     * @return 可用（已启用且求解成功）返回 true；否则调用方应退回 torque = 0
+     */
+    bool refresh_gravity_torque();
 };
 
 /**

@@ -41,6 +41,12 @@ arm_controller:
     exp_state: reset
     default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
     default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
+    # reset / idel 的重力前馈补偿（docs/bugs.md O6）。
+    # 关闭时只用 default_kp 保持：零位姿下 joint4 的重力静差约 0.124 rad，远超
+    # reset_tolerance，复位会一直不达标并静默回退 idel，最终停在偏离零位约 12.4° 的位置。
+    # 打开时用 RNEA 在 dq = ddq = 0 下算出重力力矩作为力矩前馈，静差被直接补掉。
+    # 这是实机上唯一一处主动输出力矩的保持路径，怀疑模型质量或力矩符号时先关掉它。
+    gravity_compensation: true
     reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     reset_duration: 3.0
     reset_tolerance: 0.01
