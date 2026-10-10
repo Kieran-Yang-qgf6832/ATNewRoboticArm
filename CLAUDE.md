@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 6 条必须遵守的设计约束（零位形奇异、保持命令必须锁存、参数必须
+> 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
 > `auto_declare` 等）和唯一一条未修缺陷 O7。
 
 ## 常用命令
@@ -97,8 +97,9 @@ ArmController (controller_interface, 500 Hz)
 进程默认常驻，改写该参数即可再跑一条；加 `exit_when_idle:=true` 让它在序列结束后退出
 （退出码反映成败）。
 
-> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形奇异）、
+> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形在工作空间边界）、
 > `unreachable_near` / `unreachable_far`（目标不可达）。它们退出码为 1 是正确行为。
+> 注意这几条的失败方式都是「**下发前被拒绝、完全不运动**」，不是「逆解跑到一半失败」。
 
 ### 计算库分层
 
@@ -148,10 +149,24 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   **笛卡尔运动的起点不是指令要求的位姿且没有提示**。详见 `docs/bugs.md` O7。
 - `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
+- **`src/launch_pack/launch/task_*.launch.py` 共 7 个文件已全部失效**（`task_admittance` /
+  `task_cart_traj` / `task_idel` / `task_joint_traj` / `task_measure` / `task_reset` /
+  `task_teach_pendant`）。它们是任务层重构**之前**的产物：
+  - `task_sequence` 传的是列表（如 `["cart_traj"]`），新节点要的是序列名字符串；
+  - 还传了 22 个新节点**不认识**的参数（`cart_traj_target_offset`、
+    `joint_traj_target_positions`、`task_timeout` 等），现在这些都写在 `tasks.yaml` 里；
+  - 文件头 `@see src/tasks/task/*.hpp` 指向**已删除**的目录。
+
+  **不要用它们**，直接用 `ros2 run tasks task_runner -p task_sequence:=<序列名>`。
+  建议后续统一删除，或改写成对新接口的薄封装。
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
-- **仿真未验证的状态**：`admittance`、`teach_pendant`、`servo`、`measure` 没有端到端跑过。
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 7 条序列只用到
+  `reset` / `idel` / `joint_move` / `cart_move` / `tool` / `wait` 六类步骤，因此
+  控制器侧 `admittance`（对应 `admittance_move` 步骤）、`teach_pendant`（`teach`）、
+  `measure`（`measure`）**没有任何序列在用**；`servo` 更是连步骤类型都没有，
+  只能手动设 `exp_state` 进入。这四个状态**没有端到端验证**。
 
 ### 两个容易踩的运维细节
 
@@ -180,8 +195,35 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - `third_party/figaroh-plus/`：FIGAROH 动力学参数辨识（已就位，有完整内容）
 - `src/mujoco_ros2_control/`：MuJoCo 的 ros2_control 插件（独立 git 仓库）
 
-> **注意**：`third_party/` 下两个目录是以 **gitlink（嵌入 git 仓库）**方式记录的，
-> 项目里**没有 `.gitmodules`**，所以它们不是标准 submodule。
-> 当前 `git status` 会把 `third_party/figaroh-plus` 报成已修改——因为索引里记的是
-> 提交 `8899853`，而工作区实际停在 `96b586f`。这**不是代码改动**，处理前先确认意图
-> （要么把 gitlink 更新到 `96b586f`，要么把工作区切回 `8899853`）。
+### `third_party/` 的两个坑（都会让 `git status` 显示"已修改"，但成因不同）
+
+两个目录都是以 **gitlink（嵌入 git 仓库）**方式记录的，项目里**没有 `.gitmodules`**，
+所以它们不是标准 submodule。两处"已修改"**都不是我改的**，也都不该在无关提交里带上。
+
+**1. `figaroh-plus` —— 悬空 gitlink**
+
+| | 提交 |
+| --- | --- |
+| 父仓库索引记录 | `8899853f80720d27e9656d658a6e2851d3f856dd` |
+| 工作区实际 HEAD | `96b586f` |
+
+关键是：**索引里记的那个提交在本地根本不存在**（`git cat-file -e 8899853` 失败；
+该仓库不是浅克隆，也不是任何本地 ref 的后代）。所以「把工作区切回索引记录的状态」
+这条常规做法**在这里做不到**，除非能从远端取回那个提交（也可能已被 force-push 掉了）。
+
+现实的选择只有一个方向：**把 gitlink 更新到 `96b586f` 并提交**（即承认当前工作区状态），
+或者维持现状不提交。
+
+**2. `libcmaes` —— 构建依赖的未提交补丁**
+
+gitlink 本身是**一致**的（索引与工作区都是 `6a53cd5`），但仓库**内部**有一处未提交改动：
+
+```diff
+-if (Boost_FOUND AND Python3_NumPy_FOUND)
++if (LIBCMAES_BUILD_PYTHON AND Boost_FOUND AND Python3_NumPy_FOUND)
+```
+
+这处补丁**构建依赖它**：`arm_controller/CMakeLists.txt` 在 `add_subdirectory(libcmaes)` 之前
+设了 `LIBCMAES_BUILD_PYTHON OFF`，没有这个补丁那个开关就不生效，Python 绑定仍会被构建。
+**它随时可能因为重新 clone / 重置而丢失，丢失后构建行为会变。** 要么把它固化下来
+（提交进 libcmaes 或改用别的方式传参），要么明确记录它是有意为之。

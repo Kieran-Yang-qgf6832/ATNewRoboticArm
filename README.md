@@ -162,7 +162,7 @@ ros2 param set /arm_controller exp_state reset
 | `reset_then_joint` | 正常 | 复位后运动到 `ready` 点 |
 | `ready_then_cart` | 正常 | 先关节运动离开奇异位形，再笛卡尔平移 |
 | `pick_demo` | 正常 | 完整取放示例：吸住 → 等待真空 → 抬升 |
-| `reset_then_cart` | **反例，预期失败** | 零位形是奇异位形，直接做笛卡尔运动必然失败 |
+| `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
 
@@ -174,9 +174,12 @@ ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when
 ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
 ```
 
-> 两条实测约束（写在 `tasks.yaml` 注释里）：
-> 1. **不要从零位形直接做笛卡尔运动**——零位形机械臂完全伸直、雅可比降秩；
-> 2. **`ready` 位姿处 +Z 不可达**——该位姿已在最大高度（z ≈ 1.233 m）。
+> 三条实测约束（写在 `tasks.yaml` 注释里，数据见 `docs/bugs.md`）：
+> 1. **不要从零位形直接做笛卡尔运动**——零位形机械臂完全伸直、处于工作空间边界，
+>    目标会被判为不可达并在下发前拒绝；
+> 2. **`ready` 位姿处 +Z 不可达**——该位姿已在最大高度（z ≈ 1.233 m）；
+> 3. 上面两条的余量都只有 **1~1.3 mm**（判据 1e-3），属于**判据边界**案例。
+>    换个目标或换个位姿，可达性会变——**下发前先想清楚目标在不在工作空间里**。
 
 ## 依赖
 
@@ -220,6 +223,13 @@ ros2 launch launch_pack arm_controller_test_sim.launch.py
 
 > 控制器激活后会自动执行一次 `reset`（`exp_state: reset`），把机械臂拉到零位并回到 `idel`。
 
+> ⚠️ `src/launch_pack/launch/` 下还有 7 个 `task_*.launch.py`
+> （`task_cart_traj` / `task_joint_traj` / `task_admittance` / `task_measure` /
+> `task_teach_pendant` / `task_reset` / `task_idel`），**它们已全部失效**：
+> 是任务层重构前的产物，用的是列表式 `task_sequence` 和一批新节点不认识的参数，
+> 文件头还指向已删除的 `src/tasks/task/*.hpp`。**不要用**——跑任务请用
+> `ros2 run tasks task_runner -p task_sequence:=<序列名>`。
+
 ### 2. 实机
 
 ```bash
@@ -247,7 +257,7 @@ ros2 launch launch_pack arm_real.launch.py
 
 | 工具 | 用途 |
 | --- | --- |
-| `fk_dump <urdf> <q1..q6>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量 |
+| `fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量 |
 | `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
 | `ik_benchmark` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
 | `arm_real_joint_count_test` | 不连硬件校验实机接口的关节数处理（5/6/7 关节） |

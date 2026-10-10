@@ -57,7 +57,7 @@
 
 `tools/` 下 4 个工具**不安装**，构建后在 `build/arm_controller/` 里：
 
-- `fk_dump <urdf> <q1..q6>`：打印 FK 的平移/四元数/旋转矩阵与任务空间 6 维向量
+- `fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>`：打印 FK 的平移/四元数/旋转矩阵与任务空间 6 维向量
 - `ik_solve <urdf> <t0..t5> <s0..s5>`：单次逆解，报告三态结果、残余、迭代次数与耗时
 - `ik_benchmark`：批量采样统计收敛率与迭代次数，用于扫描求解器参数
 - `arm_real_joint_count_test`：不连硬件校验实机接口的关节数处理（5/6/7 关节）
