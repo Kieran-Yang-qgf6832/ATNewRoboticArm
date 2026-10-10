@@ -266,12 +266,13 @@ ros2 launch launch_pack arm_real.launch.py
 快速流程：
 
 ```bash
-# 进入测量状态，记录 CSV（默认 /tmp/measured_for_identification.csv）
-ros2 param set /arm_controller exp_state measure
+# 1) 一条命令起仿真并跑测量：CSV 默认落在项目根目录 measured_for_identification.csv
+#    （任务序列定义在 tasks/config/measure.yaml，控制器侧由 measure 状态执行）
+ros2 launch launch_pack arm_measure_sim.launch.py
 
-# 离线辨识
+# 2) 离线辨识
 ros2 run parameter_identify identify_arm \
-  --csv /tmp/measured_for_identification.csv \
+  --csv measured_for_identification.csv \
   --urdf src/arm_model/model/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \

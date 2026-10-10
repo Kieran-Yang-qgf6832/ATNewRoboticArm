@@ -39,10 +39,13 @@ ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p
 # 切换控制器工作状态
 ros2 param set /arm_controller exp_state reset
 
-# 参数辨识：先录制测量 CSV，再离线辨识
-ros2 param set /arm_controller exp_state measure
+# 参数辨识：一条命令起仿真 + 跑 measure_only 序列，结束后 launch 自动退出
+# CSV 默认落在项目根目录：measured_for_identification.csv（不再是 /tmp）
+ros2 launch launch_pack arm_measure_sim.launch.py
+
+# 离线辨识
 ros2 run parameter_identify identify_arm \
-  --csv /tmp/measured_for_identification.csv \
+  --csv measured_for_identification.csv \
   --urdf src/arm_model/model/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
@@ -149,10 +152,11 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
 - **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 7 条序列只用到
-  `reset` / `idel` / `joint_move` / `cart_move` / `tool` / `wait` 六类步骤，因此
-  控制器侧 `admittance`（对应 `admittance_move` 步骤）、`teach_pendant`（`teach`）、
-  `measure`（`measure`）**没有任何序列在用**；`servo` 更是连步骤类型都没有，
-  只能手动设 `exp_state` 进入。这四个状态**没有端到端验证**。
+  `reset` / `idel` / `joint_move` / `cart_move` / `tool` / `wait` 六类步骤。
+  `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
+  **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录）。
+  仍未验证的是 `admittance`（对应 `admittance_move` 步骤）与 `teach_pendant`（`teach`）；
+  `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入。
 
 ### 两个容易踩的运维细节
 

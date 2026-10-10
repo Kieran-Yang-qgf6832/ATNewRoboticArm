@@ -7,7 +7,7 @@
 ## 构建
 
 ```bash
-cd /space2/Project/RoboticArm
+cd <项目根目录>
 colcon build --packages-select arm_controller parameter_identify --symlink-install
 source install/setup.bash
 ```
@@ -20,20 +20,27 @@ third_party/figaroh-plus/src
 
 ## 录制 CSV
 
-控制器参数中默认 CSV 路径是：
-
-```yaml
-measure_csv_file_path: /tmp/measured_for_identification.csv
-measure_record_sample_rate: 500.0
-```
-
-也可以运行时修改：
+推荐一条命令完成「起仿真 + 跑测量 + 落盘」，结束后 launch 自动退出：
 
 ```bash
-ros2 param set /arm_controller measure_csv_file_path /tmp/measured_for_identification.csv
-ros2 param set /arm_controller measure_record_sample_rate 500.0
-ros2 param set /arm_controller exp_state measure
+cd <项目根目录>
+source install/setup.bash
+ros2 launch launch_pack arm_measure_sim.launch.py
 ```
+
+CSV 默认落在**项目根目录**的 `measured_for_identification.csv`（launch 会算出绝对路径并
+传给控制器）。换位置用 `csv_file_path:=/path/to/foo.csv`；只想起仿真、测量另行触发用
+`run_measure:=false`，然后：
+
+```bash
+ros2 run tasks task_runner --ros-args \
+  -p tasks_config:=$(ros2 pkg prefix tasks)/share/tasks/config/measure.yaml \
+  -p task_sequence:=measure_only -p use_sim_time:=true -p exit_when_idle:=true
+```
+
+> `measure_csv_file_path` 由控制器在**构造阶段**读取（`ParamterMeasureState` 构造函数），
+> 因此 `ros2 param set` 在控制器已加载后再改是**不生效**的，必须改 launch/YAML 并重启控制器
+> （见 docs/bugs.md C6）。YAML 里的默认值是相对文件名，按启动进程的工作目录解析。
 
 `measure` 状态完成激励轨迹后，会异步保存 CSV。CSV 表头格式为：
 
@@ -44,11 +51,12 @@ time,pos_0,pos_1,...,vel_0,vel_1,...,torque_0,torque_1,...
 ## 生成辨识结果
 
 ```bash
+cd <项目根目录>
 ros2 run parameter_identify identify_arm \
-  --csv /tmp/measured_for_identification.csv \
-  --urdf /space2/Project/RoboticArm/src/arm_model/model/robotic_arm.urdf \
+  --csv measured_for_identification.csv \
+  --urdf src/arm_model/model/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
-  --config /space2/Project/RoboticArm/src/parameter_identify/config/identify.yaml \
+  --config src/parameter_identify/config/identify.yaml \
   --report /tmp/robotic_arm_identify_report.yaml
 ```
 
@@ -60,9 +68,9 @@ ros2 run parameter_identify identify_arm \
 ## 不安装时直接调试
 
 ```bash
-cd /space2/Project/RoboticArm
+cd <项目根目录>
 PYTHONPATH=src/parameter_identify:$PYTHONPATH python3 -m parameter_identify.identify_arm \
-  --csv /tmp/measured_for_identification.csv \
+  --csv measured_for_identification.csv \
   --urdf src/arm_model/model/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
