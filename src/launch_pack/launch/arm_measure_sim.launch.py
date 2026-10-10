@@ -52,6 +52,11 @@ def generate_launch_description():
         "robot_description": ParameterValue(robot_description_content, value_type=str)
     }
 
+    # O4：把发布端与订阅端一起改到本工作区专用的话题名，避免同 ROS domain 内别的
+    # robot_state_publisher（例如另一个项目的残留进程）让 controller_manager 静默加载
+    # 错模型。详见 arm_controller_test_sim.launch.py 里的说明。
+    robot_description_remap = [("robot_description", "arm_robot_description")]
+
     trajectory_file_path_arg = DeclareLaunchArgument(
         "trajectory_file_path",
         default_value="",
@@ -98,6 +103,7 @@ def generate_launch_description():
         package="robot_state_publisher",
         executable="robot_state_publisher",
         parameters=[robot_description],
+        remappings=robot_description_remap,
         output="screen",
     )
 
@@ -108,9 +114,11 @@ def generate_launch_description():
         executable="ros2_control_node",
         output="both",
         parameters=[
+            robot_description,
             {"use_sim_time": True},
             ParameterFile(controller_yaml),
         ],
+        remappings=robot_description_remap,
         on_exit=Shutdown(),
     )
 

@@ -4,7 +4,8 @@
 
 启动内容（按实际启动顺序）：
   1. robot_state_publisher  ：用 xacro 处理 arm_model/model/robotic_arm.urdf 后发布
-                              /robot_description 与 TF（RViz 显示、tasks 查询末端位姿都依赖它）
+                              /arm_robot_description 与 TF（RViz 显示、tasks 查询末端位姿都依赖它）
+                              话题名不是标准的 /robot_description——原因见下面 O4 的注释
   2. mujoco_ros2_control    ：ros2_control_node，MuJoCo 以 SystemInterface 插件形式运行在
                               controller_manager 进程内；硬件插件与 MJCF 路径写在 URDF 的
                               <ros2_control> 标签里（$(find arm_model)/model/scene.xml）
@@ -58,6 +59,19 @@ def generate_launch_description():
         "robot_description": ParameterValue(robot_description_content, value_type=str)
     }
 
+    # O4：controller_manager 是从 /robot_description **话题**取 URDF 的，不是用自己的参数
+    # （实测把 robot_description 传给它也照样订阅话题）。同 ROS domain 内只要有别的
+    # robot_state_publisher（实测遇到过另一个项目的残留进程），CM 就会收到那个机器人的
+    # 描述。由于它在 ResourceManager 初始化完成之前接受「最后一条」描述，结果会**静默
+    # 加载错模型**，随后报出「no 'ros2_control' tag found in the URDF」这种指不到真正
+    # 原因的错误；初始化完成之后才收到外来描述则只会打一条 WARN 并忽略。
+    #
+    # 因此把发布端（robot_state_publisher）与订阅端（controller_manager）一起改到本
+    # 工作区专用的话题名，从结构上杜绝串扰，而不是靠事后检测。
+    # 注意：话题重映射不影响同名参数，robot_state_publisher 仍从 robot_description
+    # 参数读模型；RViz 的 RobotModel 显示也已指向新话题（config/display_config.rviz）。
+    robot_description_remap = [("robot_description", "arm_robot_description")]
+
     use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
 
     show_rviz_arg = DeclareLaunchArgument(
@@ -99,6 +113,7 @@ def generate_launch_description():
             robot_description,
             {"use_sim_time": use_sim_time},
         ],
+        remappings=robot_description_remap,
         output="screen",
     )
 
@@ -111,9 +126,11 @@ def generate_launch_description():
         executable="ros2_control_node",
         output="both",
         parameters=[
+            robot_description,
             {"use_sim_time": use_sim_time},
             ParameterFile(controller_yaml),
         ],
+        remappings=robot_description_remap,
         on_exit=Shutdown(),
     )
 
