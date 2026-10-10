@@ -18,6 +18,34 @@ source install/setup.bash
 third_party/figaroh-plus/src
 ```
 
+## 依赖与物理一致性（重要）
+
+辨识出的完整惯性参数要**物理可行**（伪惯量半正定、主惯量满足三角不等式），必须走 SDP：
+
+```bash
+pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
+```
+
+- `reconstruction.method`：`sdp` 强制物理约束；`auto` 在装了 picos 时走 sdp、没装时
+  自动退回 `nullspace`（`identify.yaml` 默认用 `auto`）。
+- `nullspace` **不施加物理约束**，结果可能非物理；此时 `require_physical: true` 会
+  **拒绝写出**非物理的 URDF——这是有意的保护，不是 bug。报错形如：
+
+  ```text
+  Refusing to write a non-physical identified URDF.
+  Issues: joint1: pseudo-inertia is not positive semidefinite (min eigenvalue -0.0134), ...
+  ```
+
+- `physical_projection: true`（LMI 投影）同样依赖 picos，不能作为替代方案。
+- 只想看诊断数据（rmse / 相关性 / 参数值）时，可以另存一份配置把 `require_physical` 设为
+  `false` 跑一遍，但**不要**把这样得到的 URDF 用于控制。
+
+> **vendored FIGAROH 是 0.6.0**，其重建入口不接受 `strict_base_constraints` /
+> `base_residual_weight` / `shape_prior` / `tensor_trust_region` /
+> `central_moment_prior`。`identify_arm` 会按实际签名裁剪这些开关、打印 WARN，并把被忽略
+> 的键写进报告的 `inactive_reconstruction_options`；把 `third_party/figaroh-plus` 升级到
+> 带这些开关的版本后会自动启用，不需要改代码。
+
 ## 录制 CSV
 
 推荐一条命令完成「起仿真 + 跑测量 + 落盘」，结束后 launch 自动退出：

@@ -20,7 +20,10 @@ identification:
 
 reconstruction:
   enabled: true
-  method: sdp
+  # auto：装了 picos 走 sdp，没装就自动退回 nullspace。
+  # 本机当前没有 picos / cvxopt，写死 sdp 会返回 status=solver_missing，配合下面的
+  # require_physical: true 直接报错退出；auto 则在有 picos 时自动启用 SDP，无需改配置。
+  method: auto
   prior_source: urdf
   physical_projection: false
   strict_base_constraints: false

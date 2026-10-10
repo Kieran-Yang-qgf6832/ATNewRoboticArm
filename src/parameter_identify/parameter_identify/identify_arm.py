@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import inspect
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -73,6 +75,38 @@ def identify(
     BaseResult = reconstruction_module.BaseResult
     reconstruct_full_parameters = reconstruction_module.reconstruct_full_parameters
     build_cad_constraints_from_config = cad_module.build_cad_constraints_from_config
+
+    # 本仓库 vendored 的是 FIGAROH 0.6.0，它的重建入口只接受一部分开关；identify.yaml
+    # 里为更新版本准备的键（strict_base_constraints / base_residual_weight /
+    # shape_prior / tensor_trust_region / central_moment_prior）在这一版里不存在。
+    # 按实际签名裁剪并记录到报告，避免"配了却没生效"看不出来——升级
+    # third_party/figaroh-plus 到带这些开关的版本后会自动启用，不必再改代码。
+    recon_option_names = (
+        "method",
+        "params_std_prior",
+        "prior_source",
+        "model",
+        "weights",
+        "joint_names",
+        "mass_min",
+        "psd_eig_tol",
+        "strict_base_constraints",
+        "base_residual_weight",
+        "solver",
+        "max_seconds",
+        "cad_constraints",
+        "shape_prior",
+        "tensor_trust_region",
+        "central_moment_prior",
+    )
+    accepted_recon_options = set(inspect.signature(reconstruct_full_parameters).parameters)
+    ignored_recon_options = [
+        name for name in recon_option_names if name not in accepted_recon_options
+    ]
+
+    # method=auto 在缺 picos 时会**静默**退回 nullspace，而 nullspace 不施加物理约束。
+    # 把这个事实记进报告：否则"配了 sdp 却走了 nullspace"只能从后面的物理检查失败倒推。
+    sdp_available = importlib.util.find_spec("picos") is not None
 
     active_joints = list(config.get("model", {}).get("active_joints", []))
     if not active_joints:
@@ -162,24 +196,50 @@ def identify(
             recon_cfg.get("prior_weights", {}),
             params_std,
         )
+        recon_options: dict[str, Any] = {
+            "method": str(recon_cfg.get("method", "nullspace")),
+            "params_std_prior": params_std,
+            "prior_source": str(recon_cfg.get("prior_source", "dict")),
+            "model": model,
+            "weights": reconstruction_weights,
+            "joint_names": list(model.names[1:]),
+            "mass_min": float(recon_cfg.get("mass_min", 1e-6)),
+            "psd_eig_tol": float(recon_cfg.get("psd_eig_tol", -1e-10)),
+            "strict_base_constraints": bool(recon_cfg.get("strict_base_constraints", True)),
+            "base_residual_weight": float(recon_cfg.get("base_residual_weight", 1.0e6)),
+            "solver": str(recon_cfg.get("solver", "cvxopt")),
+            "max_seconds": (
+                float(recon_cfg["max_seconds"]) if recon_cfg.get("max_seconds") is not None else None
+            ),
+            "cad_constraints": cad_constraints,
+            "shape_prior": recon_cfg.get("shape_prior", {}),
+            "tensor_trust_region": recon_cfg.get("tensor_trust_region", {}),
+            "central_moment_prior": recon_cfg.get("central_moment_prior", {}),
+        }
+        configured_method = str(recon_cfg.get("method", "nullspace")).lower().strip()
+        effective_recon_method = (
+            "sdp" if configured_method in ("sdp", "auto") and sdp_available else "nullspace"
+        )
+        if configured_method in ("sdp", "auto") and not sdp_available:
+            print(
+                "[identify_arm] WARN: 未安装 picos，reconstruction.method="
+                + configured_method
+                + " 本次退回 nullspace；nullspace 不施加物理约束，结果可能非物理而被 "
+                "require_physical 拒绝。安装 picos+cvxopt 后可走 SDP（见 README）。"
+            )
+        if ignored_recon_options:
+            print(
+                "[identify_arm] WARN: 本仓库 vendored 的 FIGAROH 不接受 "
+                + ", ".join(ignored_recon_options)
+                + "；这些配置本次不生效（升级 third_party/figaroh-plus 后自动启用）"
+            )
         recon = reconstruct_full_parameters(
             base_result,
-            method=str(recon_cfg.get("method", "nullspace")),
-            params_std_prior=params_std,
-            prior_source=str(recon_cfg.get("prior_source", "dict")),
-            model=model,
-            weights=reconstruction_weights,
-            joint_names=list(model.names[1:]),
-            mass_min=float(recon_cfg.get("mass_min", 1e-6)),
-            psd_eig_tol=float(recon_cfg.get("psd_eig_tol", -1e-10)),
-            strict_base_constraints=bool(recon_cfg.get("strict_base_constraints", True)),
-            base_residual_weight=float(recon_cfg.get("base_residual_weight", 1.0e6)),
-            solver=str(recon_cfg.get("solver", "cvxopt")),
-            max_seconds=float(recon_cfg["max_seconds"]) if recon_cfg.get("max_seconds") is not None else None,
-            cad_constraints=cad_constraints,
-            shape_prior=recon_cfg.get("shape_prior", {}),
-            tensor_trust_region=recon_cfg.get("tensor_trust_region", {}),
-            central_moment_prior=recon_cfg.get("central_moment_prior", {}),
+            **{
+                name: value
+                for name, value in recon_options.items()
+                if name in accepted_recon_options
+            },
         )
         full_parameters.update(recon.as_dict())
         reconstruction_status = recon.status
@@ -258,6 +318,9 @@ def identify(
         "rmse": float(np.sqrt(np.mean(residual * residual))),
         "correlation": _correlation(tau_reduced, tau_estimated),
         "reconstruction_status": reconstruction_status,
+        "reconstruction_method_configured": configured_method,
+        "reconstruction_method_effective": effective_recon_method,
+        "sdp_solver_available": sdp_available,
         "reconstruction_residual_norm": reconstruction_residual,
         "reconstruction_objective": reconstruction_objective,
         "reconstruction_base_residual_after_projection": reconstruction_base_residual_after_projection,
@@ -271,6 +334,9 @@ def identify(
             reconstruction_weights,
             recon_cfg.get("prior_weights", {}),
         ) if bool(recon_cfg.get("enabled", True)) else None,
+        # vendored FIGAROH 不支持的重建开关（见 identify() 开头的签名裁剪）：
+        # 列出来，避免报告让人以为这些约束已经生效。
+        "inactive_reconstruction_options": ignored_recon_options or None,
         "shape_prior": _shape_prior_summary(recon_cfg.get("shape_prior", {})),
         "tensor_trust_region": _tensor_trust_region_summary(recon_cfg.get("tensor_trust_region", {})),
         "central_moment_prior": _central_moment_prior_summary(
