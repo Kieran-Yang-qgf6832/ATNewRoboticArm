@@ -44,11 +44,13 @@
 - **保持命令必须锁存**。`latch_joint_position()` 只在**进入保持时调用一次**，之后每周期
   下发同一个固定目标；若每周期重读实测值，位置误差恒为 0，`kp` 再大也不产生恢复力，
   机械臂会在重力下坠落（`docs/bugs.md` F1）。
-- **`reset` / `idel` 带重力前馈**。用 RNEA 在 `dq = ddq = 0` 下算出重力力矩写入
-  `command.torque`，否则零位姿下 joint4 的静差约 0.124 rad、远超 `reset_tolerance`，
-  复位永远不达标（O6）。开关是参数 `gravity_compensation`，**必须先在
-  `ArmController::on_init` 里 `auto_declare`**，否则 YAML 里写了也读不到（C6）。
-  注意 `write_hold_command()` 这条通用保持路径**还没有**补偿（未修的 O7）。
+- **所有保持路径共用重力前馈**（`HoldGravityFeedforward`，`arm_fsm.hpp`）。用 RNEA 在
+  `dq = ddq = 0` 下算出重力力矩写入 `command.torque`：没有它时 `reset` / `idel` 在
+  零位姿下 joint4 的静差约 0.124 rad、远超 `reset_tolerance`，复位永远不达标（O6）；
+  `cart_traj` / `joint_traj` / `admittance` 的保持路径则会在等待轨迹到达的约 0.9 s 里
+  塌陷约 0.089 rad，笛卡尔运动的起点因此不是指令要求的位姿（O7）。开关是参数
+  `gravity_compensation`，**必须先在 `ArmController::on_init` 里 `auto_declare`**，
+  否则 YAML 里写了也读不到（C6）。buffer 只在状态构造阶段分配，`run()` 内不分配内存。
 - **笛卡尔轨迹下发前先做可达性预检**。`cart_traj` 在 MOVING 的首个周期对轨迹**终点**
   做一次逆解，不收敛就整条拒绝、**一个运动指令都不下发**（O2）。只查终点是因为单次
   逆解最坏约 386 µs，而控制周期是 2 ms。

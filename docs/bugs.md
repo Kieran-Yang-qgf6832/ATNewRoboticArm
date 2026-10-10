@@ -19,7 +19,7 @@
 | §6 / §7 | O1 / O5 两轮专项排查的完整记录 |
 
 **当前状态**：F1–F12 全部已修；O1 已证伪；O5 已修（数值影响可忽略）；
-O2 / O3 / O4 / O6 已修；**唯一未修的是 O7**。
+O2 / O3 / O4 / O6 / O7 已修——**台账当前没有未修缺陷**。
 
 > 说明：本文件承接已删除的旧 `bugs.md`。原文件中的 A1/A4/A5/A7 已修复，
 > A2 已复现并修复，B3 确认为设计约束。
@@ -48,7 +48,7 @@ O2 / O3 / O4 / O6 已修；**唯一未修的是 O7**。
 | **O3** | `ArmRealInterfaces` 硬编码关节名与关节数，越界读写 | **严重** | **已修** | `dbb7fe0` |
 | **O4** | launch 经 `/robot_description` 话题取 URDF，易静默加载错模型 | 中 | **已修** | `ac474f0` |
 | **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | **已修** | `c7abf73` |
-| **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | 未修 | — |
+| **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | **已修** | `14810bf` |
 
 ---
 
@@ -364,8 +364,8 @@ bool AdmittanceState::exit(const std::string& next_state) {
 
 ## 2. O 系列条目正文
 
-> **本节标题原为「未修复（已搁置）」，现已不准确**：O2 / O3 / O4 / O6 已修，
-> O1 已证伪，只有 O7 未修。**最新状态以 §0 总览表为准。**
+> **本节标题原为「未修复（已搁置）」，现已不准确**：O2 / O3 / O4 / O6 / O7 已修，
+> O1 已证伪——本节条目已全部闭环。**最新状态以 §0 总览表为准。**
 >
 > 已修条目的正文刻意保留，因为其中的实测数据与推理过程仍是理解这些问题的依据。
 
@@ -719,7 +719,7 @@ RViz 的 RobotModel 显示同步指向新话题。三个会拉起 controller_man
 比只做关节运动的序列在 joint4 上多了 **0.089 rad（5.1°）**。追下去发现与 O2 无关。
 
 **根因**：O6 只给 `reset` 和 `idel` 加了重力前馈，但**通用的保持路径
-`write_hold_command()` 仍然写 `command.torque = 0`**（`arm_fsm.cpp:134`）。
+`write_hold_command()` 仍然写 `command.torque = 0`**（修复前位于 `arm_fsm.cpp:134`）。
 `cart_traj` / `joint_traj` / `admittance` 等状态在等待轨迹到达、以及轨迹结束回到
 `STOP` 期间，走的都是这条路径。
 
@@ -742,14 +742,54 @@ RViz 的 RobotModel 显示同步指向新话题。三个会拉起 controller_man
   整个笛卡尔轨迹的绝对位置也跟着偏。
 - 与 O6 同源（保持刚度不足），也与 F1 同源（F1 是保持**没有**刚度）。
 
-**建议方向**
+**修复**（`14810bf`，即当初建议的方向）
 
-把重力前馈下沉到 `write_hold_command()`，让所有保持路径共用。O6 引入的
-`gravity_compensation` 参数与 `try/catch + allFinite()` 兜底逻辑应一并复用。
-注意 `arm_fsm.hpp` 里 `FSMArmControlFactory` 只有前置声明，helper 需要放在
-`.cpp` 的匿名命名空间或改用指针参数的独立类型。
+把补偿下沉为 `HoldGravityFeedforward`（`arm_fsm.hpp`），`reset` / `idel` 与
+`write_hold_command()` **共用同一份实现**。O6 当初只补了 `reset` / `idel` 两条路径，
+这次把同一根因的第三条路径并进来，避免它们再次分叉：
 
-**状态**：未修。O2 的验证已排除它对结论的干扰（两条被拒序列的终止姿态一致）。
+- `write_hold_command()` 增加 `gravity` 参数，每周期 `refresh()` 后写
+  `command.torque`；`CartTrajState` / `JointTrajState` / `AdmittanceState` 各持有一个
+  实例，在构造阶段 `initialize()`（读参数 + 分配 buffer）；
+- `reset` / `idel` 原来各自复制的 4 个成员与 `refresh_gravity_torque()` 一并删除，
+  改走同一个类——**这是本次改动的重点：让「还有谁走这条路」在类型层面不再成立**；
+- 实时约束不变：buffer 只在构造阶段分配，`refresh()` 只读写已分配内存，
+  `run()` 中无动态分配；
+- 复用 `gravity_compensation` 开关与 `compute_gravity_torque` 的
+  `try/catch + allFinite()` 兜底，失败时退回 `torque = 0`（有静差但不会失控）。
+
+> 实现细节：helper 是 `HoldGravityFeedforward` 的成员函数（声明在头文件、定义在
+> `.cpp` 匿名命名空间之后），因此既能被各状态按值持有，又能调用 `.cpp` 内的
+> `compute_gravity_torque`——绕开了 `FSMArmControlFactory` 只有前置声明的限制。
+
+**验证（MuJoCo 仿真，`ROS_DOMAIN_ID=74`，A/B 对照）**
+
+启动日志新增 5 行 `gravity_compensation=... (param found=yes)`（`idel` / `reset` /
+`cart_traj` / `joint_traj` / `admittance`），可直接确认新路径已接入；修复前只有前两行。
+
+| 条件 | `cart_traj` 起始位姿 x | `ready` 正解 | 复位告警 | 序列结果 |
+| --- | --- | --- | --- | --- |
+| `gravity_compensation: true` | **−0.148** | −0.1479 | 无 | `ready_then_cart` 退出码 0，末端误差 0.0004 m |
+| `gravity_compensation: false` | **−0.185** | −0.1479 | joint4 静差 0.0992 rad | 复现修复前的塌陷与 O6 静差 |
+
+两次测量都在 `exp_state -> cart_traj` 之后约 **0.90 s** 取起点位姿——正是上面那条
+时间线里的窗口。关闭补偿时复现的 −0.185 与修复前记录的 −0.186 一致，说明这个差值
+确实来自这条保持路径，而不是环境或时序变化。
+
+回归（补偿开启）：`reset_only` / `reset_then_joint` / `pick_demo` 退出码均为 0，
+`pick_demo` 的笛卡尔段起始位姿同样是 −0.148、末端误差 0.0007 m；`unreachable_far`
+按预期退出码 1（下发前被拒绝）。控制器日志除该反例的两条预期 ERROR 外无 WARN/ERROR，
+`reset did not reach the target` 一次都没出现。
+
+**遗留**
+
+- 补偿依赖模型参数，静差不会完全归零（`idel` 稳态仍有约 −0.0050 rad，见 O6）；
+- `admittance` 的保持阶段现在也带前馈，但该状态本身仍没有序列覆盖（见 CLAUDE.md
+  「已知问题」），本次只验证到「能进入并保持」这一层；
+- 实机未验证。这是实机上第二处主动输出力矩的路径，怀疑模型质量或力矩符号时先关掉
+  `gravity_compensation`（与 O6 同一个开关）。
+
+**状态**：已修（`14810bf`）。O2 的验证曾排除它对结论的干扰（两条被拒序列的终止姿态一致）。
 
 ---
 
@@ -845,6 +885,7 @@ reset:  gravity_compensation=true (param found=no)
 | `c7abf73` | reset / idel 加入重力前馈（O6） |
 | `214ad60` | 不可达目标下发前拒绝 + 三态诊断（O2） |
 | `ac474f0` | robot_description 话题隔离到本工作区专用名（O4） |
+| `14810bf` | 通用保持路径加入重力前馈，消除笛卡尔起点塌陷（O7） |
 
 ---
 
@@ -868,7 +909,8 @@ reset:  gravity_compensation=true (param found=no)
    只有 1.046e-3——**同一个目标，不同初值给出不同的"距离"**。
 9. **修复要覆盖同一根因的所有路径**（O6 → O7）。给 `reset`/`idel` 加完重力前馈就以为
    完事了，但通用保持路径 `write_hold_command()` 是**另一条**同类路径，它仍然塌陷。
-   找根因时要问「还有谁走这条路」。
+   找根因时要问「还有谁走这条路」。（O7 已修：现在两条路径共用
+   `HoldGravityFeedforward`，见 §2。）
 10. **A/B 对照能同时暴露被测项之外的问题**（O6 → O7）。验证 O2 时顺手对比两条序列的
     终止姿态，才发现 joint4 差了 0.089 rad——那个差值跟 O2 毫无关系，却是真缺陷。
 11. **对照实验必须能失败**（O3）。新增的校验工具如果永远返回 PASS，它就毫无价值。

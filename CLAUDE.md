@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）和唯一一条未修缺陷 O7。
+> `auto_declare` 等）。F/O 系列缺陷已全部处理（O1 已证伪）。
 
 ## 常用命令
 
@@ -143,10 +143,6 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
-- **O7（唯一未修缺陷，高）**：通用保持路径 `write_hold_command()` 没有重力前馈
-  （只写了 `command.torque = 0`），而 O6 只给 `reset`/`idel` 加了补偿。后果是进入
-  `cart_traj` 后等待轨迹到达的约 0.9 s 里 joint4 塌陷 0.089 rad（5.1°），
-  **笛卡尔运动的起点不是指令要求的位姿且没有提示**。详见 `docs/bugs.md` O7。
 - `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
@@ -164,9 +160,11 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   取 URDF 的，同 ROS domain 内任何其他 `robot_state_publisher` 都会让它静默加载错模型。
   因此发布端与订阅端一起重映射到了 **`/arm_robot_description`**（RViz 配置已同步）。
   用 `ros2 topic echo /robot_description` 看不到东西是正常的。
-- **`gravity_compensation` 参数**（`ros2_controller.yaml`，默认 `true`）是 `reset`/`idel`
-  的重力前馈开关。这是实机上唯一一处**主动输出力矩**的保持路径，怀疑模型质量或力矩
-  符号时先关掉它（关掉后复位会有约 0.124 rad 静差并触发 WARN）。
+- **`gravity_compensation` 参数**（`ros2_controller.yaml`，默认 `true`）是**所有保持
+  路径**的重力前馈开关：`reset` / `idel` 与 `write_hold_command()`（`cart_traj` /
+  `joint_traj` / `admittance` 的保持阶段）共用 `HoldGravityFeedforward`（`arm_fsm.hpp`）。
+  这是实机上唯一一处**主动输出力矩**的保持路径，怀疑模型质量或力矩符号时先关掉它
+  （关掉后复位会有约 0.124 rad 静差并触发 WARN）。
 
 ### 修改控制器接口时
 
