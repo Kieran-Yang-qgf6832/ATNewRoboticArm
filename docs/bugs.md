@@ -29,7 +29,7 @@
 | O2 | `IKSolver` 不检测不可达目标，投影到最近可达位姿 | 高 | 未修 | — |
 | **O3** | `ArmRealInterfaces` 硬编码关节名与关节数，越界读写 | **严重** | **已修** | `dbb7fe0` |
 | O4 | launch 经 `/robot_description` 话题取 URDF，易静默加载错模型 | 中 | 未修 | — |
-| **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | 未修 | — |
+| **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | **已修** | `c7abf73` |
 
 ---
 
@@ -534,6 +534,45 @@ std::vector<std::string> joint_names_{"joint1",...,"joint6"};
 3. 让 `reset` 的放弃路径**报告失败**而不是静默回退，至少让任务层能区分；
 4. **不要**用放宽 `reset_tolerance` 来掩盖——那只是把 12.4° 的偏置合法化。
 
+**修复**（`c7abf73`，采用方向 2 的重力前馈）
+
+`reset` / `idel` 用 RNEA 在 `dq = ddq = 0` 下算出重力力矩，写入 `command.torque`
+作为力矩前馈。这与 `teach_pendant` 已有的机制完全一致（同一份模型、同一个前馈字段），
+不必把 `kp` 加大到可能振荡的程度，也不引入积分饱和风险。
+
+新增参数 `gravity_compensation`（默认 `true`）作为关闭开关：这是实机上唯一一处
+**主动输出力矩**的保持路径，怀疑模型质量或力矩符号时应当能立即关掉。计算包在
+`try/catch` 中并检查 `allFinite()`，失败时退回 `torque = 0` 并打限流 WARN——
+即退化为修复前的行为（有静差但不会失控），不会把 FSM 拖进故障路径。
+
+所有 buffer 在构造阶段分配，`run()` 中无内存分配，满足实时约束。
+
+**验证（A/B 对照，MuJoCo 仿真）**
+
+| 条件 | `reset` 告警 | joint4 稳态位置 | 序列结果 |
+| --- | --- | --- | --- |
+| `gravity_compensation: false` | **出现**，误差 0.0960 rad | 0.2171 rad（12.4°） | — |
+| `gravity_compensation: true` | 无 | **−0.0050 rad** | 见下 |
+
+`true` 时静差 −0.0050 rad，落在 `reset_tolerance = 0.01` 之内。关闭时复现的
+0.0960 rad 与修复前实测的 0.0953 / 0.0961 rad 一致，说明开关确实控制住了这条路径。
+
+端到端（`gravity_compensation: true`）：
+
+| 序列 | 退出码 | 末端位置误差 | 控制器 WARN/ERROR |
+| --- | --- | --- | --- |
+| `ready_then_cart` | 0 | 0.0003 m | 无 |
+| `pick_demo` | 0 | 0.0004 m | 无 |
+
+**遗留**
+
+- 静差 −0.0050 rad 而非 0，残差来自模型参数与实际动力学（含摩擦）的差异，
+  由 `kp` 兜住。若模型参数经辨识后更新，这个残差还会变小。
+- 任务层仍然无法区分「复位成功」与「复位放弃」（上面的方向 3 未做）。当前
+  开启补偿后不再触发放弃路径，但**换个位姿或模型失配时仍可能触发**，
+  那时任务层依旧会带着偏置继续执行。
+- `default_kp[5] = 1.0` 使 joint6 近乎自由，实机上风险更大，未单独处理。
+
 ---
 
 ## 3. 设计约束（非缺陷，但必须遵守）
@@ -558,7 +597,30 @@ std::vector<std::string> joint_names_{"joint1",...,"joint6"};
 
 ### C5 `yaml_cpp_vendor` 的 CMake 定位不可靠
 
+
 本机 `yaml_cpp_vendor` 的 ExternalProject 未构建，其 `extras.cmake` 会把 `yaml-cpp_DIR` 指向不存在的路径。必须显式 `find_package(yaml-cpp REQUIRED)` 并链接 `yaml-cpp::yaml-cpp`；且因 `ament_target_dependencies` 使用 plain 签名调用 `target_link_libraries`，不能混用 `PUBLIC`/`PRIVATE`。
+
+### C6 控制器参数必须在 `on_init` 中 `auto_declare`，否则 YAML 里的键被静默忽略
+
+`ArmController::on_init` 用 `auto_declare<...>()` 逐个声明参数（`controller.cpp:126` 起），
+之后各处才用 `get_parameter()` 读取。**未声明的键即使写在 YAML 里也读不到**，
+`get_parameter()` 返回 `false`，代码取的是 `auto_declare` 里的默认值，
+而且**没有任何警告**。
+
+修 O6 时踩到过：第一版只在 YAML 里加了 `gravity_compensation: false` 而没有声明它，
+结果开关看起来完全无效，`joint4` 依然停在 −0.005 rad。加一行诊断才看清：
+
+```
+idel:   gravity_compensation=true (param found=no)
+reset:  gravity_compensation=true (param found=no)
+```
+
+**影响**：任何控制器参数写错名字（或改名前忘了同步）都会静默退回默认值。
+调 `reset_tolerance` / `default_kp` 这类安全相关参数时，这会导致「改了但没生效」
+却毫无提示。
+
+**对策**：新增参数时三处同步——`auto_declare`、YAML、读取处；关键参数建议像
+`gravity_compensation` 一样在构造阶段打一行 INFO 把实际生效值打出来。
 
 ---
 
@@ -572,6 +634,8 @@ std::vector<std::string> joint_names_{"joint1",...,"joint6"};
 | `393598d` | 修复保持命令失去刚度（F1）+ 对齐 MJCF 关节限位（F3、F8） |
 | `729df71` | 修复旋转向量 \|rv\|≈π 奇异（F2） |
 | `7519118` | 逆解器改为信赖域 + LM 并离线定参（F4、F5、F6） |
+| `dbb7fe0` | 修复实机接口硬编码关节名与关节数（O3） |
+| `c7abf73` | reset / idel 加入重力前馈（O6） |
 
 ---
 
