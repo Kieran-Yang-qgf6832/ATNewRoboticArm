@@ -27,8 +27,9 @@
 | **O1** | ~~TF 与控制器正运动学不一致~~ **已证伪**（二者完全一致，见 §6） | — | 已排查 | — |
 | **O5** | `jacobian_map` 把几何雅可比直接当任务雅可比，姿态用旋转向量时在 \|rv\|=π 处线性化失效 | **高** | **已定位，未修** | — |
 | O2 | `IKSolver` 不检测不可达目标，投影到最近可达位姿 | 高 | 未修 | — |
-| O3 | `ArmRealInterfaces` 硬编码关节数 6，越界读写 | **严重** | 未修（缺实机条件） | — |
+| **O3** | `ArmRealInterfaces` 硬编码关节名与关节数，越界读写 | **严重** | **已修** | `dbb7fe0` |
 | O4 | launch 经 `/robot_description` 话题取 URDF，易静默加载错模型 | 中 | 未修 | — |
+| **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | 未修 | — |
 
 ---
 
@@ -394,18 +395,62 @@ bool AdmittanceState::exit(const std::string& next_state) {
 
 ---
 
-### O3 `ArmRealInterfaces` 硬编码关节数 6，越界读写【严重】
+### O3 `ArmRealInterfaces` 硬编码关节名与关节数，越界读写【严重】
 
-**位置**：`src/arm_controller/controller/src/arm_real_interfaces.cpp:151` 与 `:176`
+**位置**：`src/arm_controller/controller/src/arm_real_interfaces.cpp`
+
+**现象**（原记录只写到一半，实际有两个层次）
+
+第一层是原记录写的问题：
 
 ```cpp
-const auto joint_count = 6;
+const auto joint_count = 6;                          // write() 与 on_pack_praser()
 for (std::size_t i = 0; i < joint_count; ++i) { ... commands_[i] ... }
 ```
 
-而 `commands_` / `received_states_` 是按 `joint_names_.size()` 分配的（同文件 `:38`）。**URDF 关节数不为 6 时越界读写，会把垃圾数据当指令发给电机。**
+而 `commands_` / `received_states_` 是按 `joint_names_.size()` 分配的（同文件 `:38`）。
+关节数不为 6 时：
 
-**状态**：未修 —— 当前不具备实机验证条件。**上实机前必须修复。**
+- 关节数 **少于** 6：`on_pack_praser` 写 `received_states_[5]` —— **越界写**，破坏堆内存；
+  `write` 读 `commands_[5]` —— 越界读，把垃圾数据当指令发给电机。
+- 关节数 **多于** 6：第 7 个及以后的关节被静默丢弃，既不收也不发。
+
+第二层是排查时才发现的更深原因：**`joint_names_` 本身就是硬编码的**
+
+```cpp
+std::vector<std::string> joint_names_{"joint1",...,"joint6"};
+```
+
+它从未从 `hardware_info` 读取，所以无论 URDF 怎么写，导出的接口名永远是
+`joint1..joint6`。URDF 里把关节改名后，`export_state_interfaces()` 导出的接口名
+和 URDF 对不上，而**报错信息完全指不到真正原因**。这也解释了为什么第一层
+的硬编码 `6` 一直"碰巧"没炸——因为数组大小也恒为 6。
+
+**修复**（`dbb7fe0`）
+
+1. `joint_names_` 改由 `on_init` 从 `hardware_info.joints` 读取；
+2. `on_init` 校验关节数必须等于 MCU 通信帧电机数，否则**拒绝启动**并打印明确原因；
+3. 通信帧长度从 `data_pack.h` 的结构体定义反推（`sizeof(MCUTarget2Pack::motor)/sizeof(...)`），
+   并加 `static_assert` 防止收发帧失配；
+4. `write()` / `on_pack_praser()` 的循环边界收敛为 `min(容器大小, 帧电机数)`，作为纵深防御。
+
+**验证**
+
+新增离线工具 `tools/arm_real_joint_count_test.cpp`（不安装、不连硬件、不开 USB），
+构造 5 / 6 / 7 关节的 URDF 走 `on_init` 与接口导出路径：
+
+| 情况 | 断言 | 结果 |
+| --- | --- | --- |
+| 5 关节（少于帧） | `on_init` 拒绝启动 | PASS |
+| 7 关节（多于帧） | `on_init` 拒绝启动 | PASS |
+| 6 关节、关节名为 `arm_joint_1..6` | `on_init` 成功 | PASS |
+| 同上 | 导出 18 个状态接口 | PASS |
+| 同上 | 导出 36 个命令接口 | PASS |
+| 同上 | 首个关节名取自 URDF（`arm_joint_1`） | PASS |
+
+**负向对照**：把两个文件还原为修复前的版本重新构建，同样的工具在
+「5 关节拒绝启动」「7 关节拒绝启动」「首个关节名取自 URDF」三项上**失败**
+（实际导出 `joint1`），证明该工具确实能捕获此缺陷，而不是恒真断言。
 
 ---
 
@@ -425,6 +470,69 @@ for (std::size_t i = 0; i < joint_count; ++i) { ... commands_[i] ... }
 **建议方向**
 
 在 launch 中显式等待/校验 `robot_description` 来源，或让 controller_manager 直接读 URDF 文件而非话题。
+
+---
+
+### O6 复位静差超容差后回退 `idel`，重力静差被叠加成 12.4° 偏置【高】
+
+**发现经过**：修 O3 时跑仿真冒烟测试，每次控制器激活都稳定出现：
+
+```
+[WARN] [arm_controller]: reset did not reach the target within 5.00 s
+       (reset_duration=3.00 s, reset_settle=2.00 s):
+       max joint error 0.0953 rad on joint4 (tolerance 0.0100 rad);
+       forcing the switch to idel, check reset_tolerance / default_kp (gravity sag)
+       if the offset persists
+```
+
+**已确认不是 O3 引入的**：把两个源文件还原为修复前的版本重新构建，同样的 WARN
+以同样数值出现（`0.0961 rad`，与 `0.0953` 的差别只是噪声）。`ArmRealInterfaces`
+在仿真里根本不会被实例化（仿真 URDF 用的是 `mujoco_ros2_control/MujocoSystemInterface`），
+所以与本次修改无关。
+
+**这不是"复位没做准"，而是两个误差在叠加**
+
+`reset` 因静差超容差放弃 → 强制切 `idel` → `IDELState::enter()` **锁存当前位置** →
+`idel` 用同一组增益保持，重力把关节**再压低一段**。
+
+实测（`ready` 以外的零位姿，仿真 `ROS_DOMAIN_ID=74`）：
+
+| 量 | 值 |
+| --- | --- |
+| `reset` 放弃时的 joint4 误差 | 0.0953 rad |
+| `idel` 稳态下 joint4 的力矩（`/joint_states.effort`） | 1.2438 N·m |
+| `default_kp[3]` | 10.0 |
+| 预期附加静差 `τ/kp` | 0.12438 rad |
+| **预期最终误差** | **0.2197 rad** |
+| **实测最终 joint4 位置** | **0.2171 rad（12.4°）** |
+
+预测与实测差 1.2%，机制成立。最终关节速度约 `1.7e-13 rad/s`，是稳态而非还在下沉。
+此时 `/arm_controller/state` 为 `idel`，机械臂**静默停在偏离零位 12.4° 的位置**。
+
+**为什么这个偏置没有被任务层发现**
+
+`task_runner` 的 `reset` 步骤只等 `idel`，而"复位成功"和"复位放弃后回退"都会到达
+`idel`，两者不可区分。任务因此继续执行，带着 12.4° 的初始偏置。
+
+**为什么只有零位姿暴露**
+
+`default_kp = [200, 200, 200, 10, 10, 1]`。零位姿下 joint4 承担的力矩最大，
+`kp = 10` 撑不住；而 `ready` 位姿（joint2=0.3, joint3=−0.3, joint5=0.3）下 joint4
+力矩很小，所以 `joint_move` 到 `ready` 能到 0.0001 rad。**静差是位姿相关的**，
+换个姿态就可能突然超标。
+
+**影响**
+
+- 任何以"复位完成 = 回到零位"为前提的任务都带着这个偏置，且**没有任何提示**
+- `default_kp[5] = 1.0` 使 joint6 近乎自由，实机上风险更大
+- 与 F1 同源：F1 是保持命令**没有**刚度，这里是有刚度但**不足**
+
+**建议方向**（未定，需与用户确认）
+
+1. 提高 joint4/5/6 的 `default_kp`——最直接，但可能引入振荡，需重新验证全部序列；
+2. 加积分项 `ki` 或重力前馈补偿——能消静差而不必加大 `kp`，但要防积分饱和；
+3. 让 `reset` 的放弃路径**报告失败**而不是静默回退，至少让任务层能区分；
+4. **不要**用放宽 `reset_tolerance` 来掩盖——那只是把 12.4° 的偏置合法化。
 
 ---
 
