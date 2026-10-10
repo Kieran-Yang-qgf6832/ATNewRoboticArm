@@ -41,9 +41,13 @@ arm_controller:
     exp_state: reset
     default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
     default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
-    # reset / idel 的重力前馈补偿（docs/bugs.md O6）。
+    # 所有保持路径的重力前馈补偿（docs/bugs.md O6 / O7）：reset / idel 与
+    # write_hold_command()（cart_traj / joint_traj / admittance 的保持阶段）共用
+    # HoldGravityFeedforward（arm_fsm.hpp）。
     # 关闭时只用 default_kp 保持：零位姿下 joint4 的重力静差约 0.124 rad，远超
-    # reset_tolerance，复位会一直不达标并静默回退 idel，最终停在偏离零位约 12.4° 的位置。
+    # reset_tolerance，复位会一直不达标并静默回退 idel，最终停在偏离零位约 12.4° 的位置；
+    # cart_traj 等状态在等待轨迹到达的约 0.9 s 里 joint4 还会塌陷约 0.089 rad，
+    # 笛卡尔运动的起点因此不是指令要求的位姿（实测末端 x 由 -0.148 偏到 -0.185）。
     # 打开时用 RNEA 在 dq = ddq = 0 下算出重力力矩作为力矩前馈，静差被直接补掉。
     # 这是实机上唯一一处主动输出力矩的保持路径，怀疑模型质量或力矩符号时先关掉它。
     gravity_compensation: true

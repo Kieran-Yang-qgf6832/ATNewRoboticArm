@@ -43,6 +43,54 @@
 class FSMArmControlFactory;
 
 /**
+ * @brief 保持路径的重力前馈（docs/bugs.md O6 / O7）
+ *
+ * \c reset / \c idel 与所有 \c write_hold_command() 保持路径共用同一套补偿：用 RNEA
+ * 在 \c dq = ddq = 0 下算出重力力矩，写入 \c command.torque 作为力矩前馈。
+ *
+ * 没有它时保持只剩 kp 的刚度，静差为 τ/kp：零位姿下 joint4 约 0.124 rad，复位永远
+ * 达不到 \c reset_tolerance（O6）；\c cart_traj / \c joint_traj / \c admittance 在
+ * 等待轨迹到达的约 0.9 s 里 joint4 会先塌陷约 0.089 rad（5.1°），**笛卡尔运动的
+ * 起点因此不是指令要求的位姿且没有任何提示**（O7）。
+ *
+ * 实时约束：buffer 只在 \c initialize()（构造阶段）分配；\c refresh() 只读写已分配
+ * 内存、不做动态分配，可在 \c run() 中每周期调用。求解失败（模型不可用 / 抛异常 /
+ * 结果非有限值）时 \c refresh() 返回 false 并打限流 WARN，调用方退回 \c torque = 0
+ * ——即退化为无补偿的行为，有静差但不会失控。
+ *
+ * @see compute_gravity_torque
+ */
+class HoldGravityFeedforward {
+public:
+    /**
+     * @brief 构造阶段调用一次：读参数、打诊断日志、按关节数分配 buffer
+     * @param factory     状态机工厂
+     * @param joint_count 关节数
+     * @param state_name  状态名，仅用于日志
+     */
+    void initialize(FSMArmControlFactory* factory, std::size_t joint_count, const char* state_name);
+
+    /**
+     * @brief 按当前实测关节角重算重力力矩
+     * @return 补偿可用返回 true；否则调用方应退回 torque = 0
+     */
+    bool refresh(FSMArmControlFactory* factory, std::size_t joint_count, const char* state_name);
+
+    /// 第 index 个关节的重力前馈力矩；补偿不可用时返回 0
+    float torque(std::size_t index) const;
+
+    /// 是否启用（控制器参数 gravity_compensation）
+    bool enabled() const { return enabled_; }
+
+private:
+    bool enabled_{true};        ///< 是否启用，来自参数 gravity_compensation
+    bool available_{false};     ///< 最近一次 refresh 是否成功
+    Eigen::VectorXd joint_pos_; ///< 当前关节角，RNEA 输入
+    Eigen::VectorXd zero_;      ///< 全零向量，充当 RNEA 的 dq / ddq
+    Eigen::VectorXd torque_;    ///< 重力补偿力矩，RNEA 输出
+};
+
+/**
  * @brief 机械臂空闲状态
  *
  * 机械臂锁定在当前位置，不执行任何动作。所有关节保持位置控制，
@@ -103,17 +151,8 @@ private:
     std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
 
-    /// 重力补偿（docs/bugs.md O6）。三者均在构造阶段分配，run() 中不再分配内存。
-    bool gravity_compensation_{true}; ///< 是否启用，来自参数 gravity_compensation
-    Eigen::VectorXd gravity_joint_pos_;  ///< 当前关节角，RNEA 输入
-    Eigen::VectorXd gravity_zero_;       ///< 全零向量，充当 RNEA 的 dq / ddq
-    Eigen::VectorXd gravity_torque_;     ///< 重力补偿力矩，RNEA 输出
-
-    /**
-     * @brief 刷新重力补偿力矩
-     * @return 可用（已启用且求解成功）返回 true；否则调用方应退回 torque = 0
-     */
-    bool refresh_gravity_torque();
+    /// 重力补偿（docs/bugs.md O6）。buffer 在构造阶段分配，run() 中不再分配内存。
+    HoldGravityFeedforward gravity_;
 };
 
 /**
@@ -187,17 +226,8 @@ private:
     bool reset_done_{false};                     ///< 复位完成标志
     bool give_up_warned_{false};                 ///< 是否已就「超时仍未到位」告警（只告警一次）
 
-    /// 重力补偿（docs/bugs.md O6）。三者均在构造阶段分配，run() 中不再分配内存。
-    bool gravity_compensation_{true}; ///< 是否启用，来自参数 gravity_compensation
-    Eigen::VectorXd gravity_joint_pos_;  ///< 当前关节角，RNEA 输入
-    Eigen::VectorXd gravity_zero_;       ///< 全零向量，充当 RNEA 的 dq / ddq
-    Eigen::VectorXd gravity_torque_;     ///< 重力补偿力矩，RNEA 输出
-
-    /**
-     * @brief 刷新重力补偿力矩
-     * @return 可用（已启用且求解成功）返回 true；否则调用方应退回 torque = 0
-     */
-    bool refresh_gravity_torque();
+    /// 重力补偿（docs/bugs.md O6）。buffer 在构造阶段分配，run() 中不再分配内存。
+    HoldGravityFeedforward gravity_;
 };
 
 /**
@@ -275,6 +305,9 @@ private:
     std::size_t joint_count_{0};       ///< 关节数量
     std::size_t task_dof_{6};          ///< 任务空间自由度
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
+
+    /// 保持路径的重力前馈（docs/bugs.md O7）。等待轨迹到达期间用它补掉重力静差。
+    HoldGravityFeedforward gravity_;
 
     /// 下发前可达性预检（docs/bugs.md O2）。全部在构造阶段分配，run() 中不再分配内存。
     /// 不做预检时，手臂会先沿轨迹走到工作空间边界、再因逆解失败中止（实测末端走约 0.40 m）。
@@ -367,6 +400,9 @@ private:
     std::vector<double> default_kd_param_; ///< 速度增益参数原始值
     std::size_t joint_count_{0};       ///< 关节数量
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
+
+    /// 保持路径的重力前馈（docs/bugs.md O7）。等待轨迹到达期间用它补掉重力静差。
+    HoldGravityFeedforward gravity_;
 
     rclcpp::Subscription<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_trajectory_cmd_sub_; ///< 关节轨迹指令订阅
 };
@@ -532,6 +568,9 @@ private:
     std::vector<float> hold_position_;                ///< 锁存的保持位置（轨迹未激活时使用）
     std::vector<double> default_kp_param_;            ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;            ///< 速度增益参数原始值
+
+    /// 保持路径的重力前馈（docs/bugs.md O7）。轨迹未激活时用它补掉重力静差。
+    HoldGravityFeedforward gravity_;
 
     rclcpp::Subscription<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_cmd_sub_; ///< 导纳指令订阅
 };

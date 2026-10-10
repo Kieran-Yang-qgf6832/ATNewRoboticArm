@@ -113,25 +113,35 @@ void latch_joint_position(
  *
  * 位置指令取锁存值（固定不变），kp 才会产生真实的恢复力。
  *
+ * 同时复用重力前馈（docs/bugs.md O7）：只写 torque = 0 时，进入 cart_traj /
+ * joint_traj / admittance 后等待轨迹到达的这段时间里，手臂只剩 kp 的刚度，joint4
+ * 会按 τ/kp 塌陷约 0.089 rad（5.1°）——笛卡尔运动的起点因此不是指令要求的位姿，
+ * 而且没有任何提示。O6 只给 reset / idel 补了前馈，这里补上同一根因的另一条路径。
+ *
  * @param factory       状态机工厂
  * @param joint_count   关节数
  * @param hold_position 锁存的目标位置
  * @param default_kp    位置增益
  * @param default_kd    速度增益
+ * @param gravity       保持路径共用的重力前馈；nullptr 表示不做补偿（torque = 0）
+ * @param state_name    状态名，仅用于补偿失败的日志
  */
 void write_hold_command(
     FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& hold_position,
-    const std::vector<float>& default_kp, const std::vector<float>& default_kd) {
+    const std::vector<float>& default_kp, const std::vector<float>& default_kd, HoldGravityFeedforward* gravity,
+    const char* state_name) {
     if (factory == nullptr || factory->command_.size() != joint_count || hold_position.size() != joint_count
         || default_kp.size() != joint_count || default_kd.size() != joint_count) {
         return;
     }
 
+    const bool gravity_ok = gravity != nullptr && gravity->refresh(factory, joint_count, state_name);
+
     for (std::size_t i = 0; i < joint_count; ++i) {
         auto& command    = factory->command_[i];
         command.position = hold_position[i];
         command.velocity = 0.0f;
-        command.torque   = 0.0f;
+        command.torque   = gravity_ok ? gravity->torque(i) : 0.0f;
         command.kp       = default_kp[i];
         command.kd       = default_kd[i];
         command.ki       = 0.0f;
@@ -196,6 +206,42 @@ bool load_trajectory_from_message(
 
 } // namespace
 
+void HoldGravityFeedforward::initialize(FSMArmControlFactory* factory, std::size_t joint_count, const char* state_name) {
+    if (factory == nullptr || factory->node_ == nullptr) {
+        return;
+    }
+
+    // 只在构造阶段读参数与分配内存，run() 里不再碰参数（实时约束）。
+    bool gravity_compensation_param       = true;
+    const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
+    enabled_                              = gravity_compensation_param;
+    RCLCPP_INFO(
+        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", state_name != nullptr ? state_name : "?",
+        enabled_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
+
+    const auto dof = static_cast<Eigen::Index>(joint_count);
+    joint_pos_.resize(dof);
+    zero_.setZero(dof);
+    torque_.resize(dof);
+    available_ = false;
+}
+
+bool HoldGravityFeedforward::refresh(FSMArmControlFactory* factory, std::size_t joint_count, const char* state_name) {
+    if (!enabled_ || factory == nullptr) {
+        available_ = false;
+        return false;
+    }
+    available_ = compute_gravity_torque(factory, joint_count, &joint_pos_, zero_, &torque_, state_name);
+    return available_;
+}
+
+float HoldGravityFeedforward::torque(std::size_t index) const {
+    if (!available_ || index >= static_cast<std::size_t>(torque_.size())) {
+        return 0.0f;
+    }
+    return static_cast<float>(torque_(static_cast<Eigen::Index>(index)));
+}
+
 void AdmittanceState::load_admittance_parameters(const char* name, const Eigen::VectorXd& fallback, Eigen::VectorXd& destination) {
     if (factory == nullptr || factory->node_ == nullptr || name == nullptr || destination.size() != fallback.size()) {
         return;
@@ -233,24 +279,7 @@ IDELState::IDELState(const std::string& name, std::any ctx)
     }
 
     // 重力补偿：只在构造阶段读参数与分配内存，run() 里不再碰参数（实时约束）。
-    bool gravity_compensation_param = true;
-    const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
-    gravity_compensation_                 = gravity_compensation_param;
-    RCLCPP_INFO(
-        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", name.c_str(),
-        gravity_compensation_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
-    const auto dof        = static_cast<Eigen::Index>(joint_count_);
-    gravity_joint_pos_.resize(dof);
-    gravity_zero_.setZero(dof);
-    gravity_torque_.resize(dof);
-}
-
-bool IDELState::refresh_gravity_torque() {
-    if (!gravity_compensation_ || factory == nullptr) {
-        return false;
-    }
-    return compute_gravity_torque(
-        factory, joint_count_, &gravity_joint_pos_, gravity_zero_, &gravity_torque_, "idel");
+    gravity_.initialize(factory, joint_count_, name.c_str());
 }
 
 bool IDELState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -262,15 +291,15 @@ bool IDELState::enter(const std::string& last_state, const rclcpp::Time& time) {
         return false;
     }
 
-    const bool gravity_ok = refresh_gravity_torque();
+    // 重力前馈：只靠 kp 保持时静差为 τ/kp，零位姿下 joint4 会偏出 0.1 rad 以上（O6）。
+    gravity_.refresh(factory, joint_count_, fsm_name_.c_str());
 
     for (std::size_t i = 0; i < hold_position_.size(); ++i) {
         hold_position_[i] = factory->state_[i].position;
         auto& command     = factory->command_[i];
         command.position  = hold_position_[i];
         command.velocity  = 0.0f;
-        // 重力前馈：只靠 kp 保持时静差为 τ/kp，零位姿下 joint4 会偏出 0.1 rad 以上。
-        command.torque    = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
+        command.torque    = gravity_.torque(i);
         command.kp        = default_kp_[i];
         command.kd        = default_kd_[i];
         command.ki        = 0.0f;                                // 只要i的值改变，底层会立即清空积分项
@@ -299,13 +328,14 @@ bool IDELState::run(const rclcpp::Time& time) {
         return false;
     }
 
-    const bool gravity_ok = refresh_gravity_torque();
+    // 重力前馈：只靠 kp 保持时静差为 τ/kp，零位姿下 joint4 会偏出 0.1 rad 以上（O6）。
+    gravity_.refresh(factory, joint_count_, fsm_name_.c_str());
 
     for (std::size_t i = 0; i < hold_position_.size(); ++i) {
         auto& command    = factory->command_[i];
         command.position = hold_position_[i];
         command.velocity = 0.0f;
-        command.torque   = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
+        command.torque   = gravity_.torque(i);
         command.kp       = default_kp_[i];
         command.kd       = default_kd_[i];
         command.ki       = 0.0f;
@@ -353,24 +383,7 @@ ResetState::ResetState(const std::string& name, std::any ctx)
     }
 
     // 重力补偿：只在构造阶段读参数与分配内存，run() 里不再碰参数（实时约束）。
-    bool gravity_compensation_param = true;
-    const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
-    gravity_compensation_                 = gravity_compensation_param;
-    RCLCPP_INFO(
-        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", name.c_str(),
-        gravity_compensation_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
-    const auto dof        = static_cast<Eigen::Index>(joint_count_);
-    gravity_joint_pos_.resize(dof);
-    gravity_zero_.setZero(dof);
-    gravity_torque_.resize(dof);
-}
-
-bool ResetState::refresh_gravity_torque() {
-    if (!gravity_compensation_ || factory == nullptr) {
-        return false;
-    }
-    return compute_gravity_torque(
-        factory, joint_count_, &gravity_joint_pos_, gravity_zero_, &gravity_torque_, "reset");
+    gravity_.initialize(factory, joint_count_, name.c_str());
 }
 
 bool ResetState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -415,15 +428,15 @@ bool ResetState::run(const rclcpp::Time& time) {
     bool joint_reached = true;
     float max_error    = 0.0f;
     std::size_t worst  = 0;
-    const bool gravity_ok = refresh_gravity_torque();
+    // 重力前馈：否则零位姿下 joint4 的静差约 0.124 rad，远超 reset_tolerance，
+    // 复位永远不达标，只能静默回退 idel（docs/bugs.md O6）。
+    gravity_.refresh(factory, joint_count_, fsm_name_.c_str());
     for (std::size_t i = 0; i < joint_count_; ++i) {
         const float delta          = reset_joint_pos_[i] - start_joint_pos_[i];
         auto& command              = factory->command_[i];
         command.position           = start_joint_pos_[i] + delta * progress_;
         command.velocity           = progress_ < 1.0f ? delta / reset_duration_ : 0.0f;
-        // 重力前馈：否则零位姿下 joint4 的静差约 0.124 rad，远超 reset_tolerance，
-        // 复位永远不达标，只能静默回退 idel（docs/bugs.md O6）。
-        command.torque             = gravity_ok ? static_cast<float>(gravity_torque_(static_cast<Eigen::Index>(i))) : 0.0f;
+        command.torque             = gravity_.torque(i);
         command.kp                 = default_kp_[i];
         command.kd                 = default_kd_[i];
         command.ki                 = 0.0f;
@@ -468,6 +481,7 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     task_force_.setZero(static_cast<Eigen::Index>(task_dof_));
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
     hold_position_.resize(joint_count_);
+    gravity_.initialize(factory, joint_count_, name.c_str());
     precheck_target_.resize(static_cast<Eigen::Index>(task_dof_));
     precheck_seed_.resize(static_cast<Eigen::Index>(joint_count_));
     precheck_solution_.resize(static_cast<Eigen::Index>(joint_count_));
@@ -527,7 +541,7 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
     // 进入时锁存一次当前位置。保持命令必须基于固定目标：若每个周期重新读取实测值，
     // 位置误差恒为 0，kp 再大也不产生恢复力，机械臂会在重力下缓慢坠落。
     latch_joint_position(factory, joint_count_, &hold_position_);
-    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
+    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
     return true;
 }
 
@@ -555,7 +569,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     }
 
     if (state == TrajPhase::STOP) {
-        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
         return true;
     }
 
@@ -692,6 +706,7 @@ JointTrajState::JointTrajState(const std::string& name, std::any ctx)
     torque.resize(static_cast<Eigen::Index>(joint_count_));
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
     hold_position_.resize(joint_count_);
+    gravity_.initialize(factory, joint_count_, name.c_str());
 
     joint_trajectory_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::JointTrajCmd>(
         "arm_joint_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::JointTrajCmd& msg) {
@@ -718,7 +733,7 @@ bool JointTrajState::enter(const std::string& last_state, const rclcpp::Time& ti
     traj.stop();
     // 进入时锁存一次当前位置（理由同 CartTrajState::enter）。
     latch_joint_position(factory, joint_count_, &hold_position_);
-    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
+    write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
     return true;
 }
 
@@ -743,7 +758,7 @@ bool JointTrajState::run(const rclcpp::Time& time) {
     }
 
     if (state == TrajPhase::STOP) {
-        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
         return true;
     } else if (state == TrajPhase::MOVING) {
         traj.update(time, point);
@@ -943,6 +958,7 @@ AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
     velocity_error_.resize(static_cast<Eigen::Index>(task_dof_));
     torque_.resize(static_cast<Eigen::Index>(joint_count_));
     hold_position_.resize(joint_count_);
+    gravity_.initialize(factory, joint_count_, name.c_str());
     admittance_mass_.resize(static_cast<Eigen::Index>(task_dof_));
     admittance_damping_.resize(static_cast<Eigen::Index>(task_dof_));
     admittance_stiffness_.resize(static_cast<Eigen::Index>(task_dof_));
@@ -1030,7 +1046,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
     }
 
     if (!trajectory_active_) {
-        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
+        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
         return true;
     }
 
