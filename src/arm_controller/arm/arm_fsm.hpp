@@ -276,6 +276,23 @@ private:
     std::size_t task_dof_{6};          ///< 任务空间自由度
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
 
+    /// 下发前可达性预检（docs/bugs.md O2）。全部在构造阶段分配，run() 中不再分配内存。
+    /// 不做预检时，手臂会先沿轨迹走到工作空间边界、再因逆解失败中止（实测末端走约 0.40 m）。
+    ///
+    /// 只查**终点**：终点不可达是绝大多数实际情况，而且单次逆解实测最坏约 386 us
+    /// （200 次迭代），一个控制周期是 2 ms——查 8 个途经点就可能超周期。
+    bool precheck_pending_{false};    ///< 是否有一条新轨迹等待预检
+    Eigen::VectorXd precheck_target_; ///< 待检终点（6 维）
+    Eigen::VectorXd precheck_seed_;   ///< 预检用的关节角种子（当前实测关节角）
+    Eigen::VectorXd precheck_solution_; ///< 预检的解算结果
+
+    /**
+     * @brief 对 @ref precheck_target_ 做一次逆解，确认终点可达
+     * @param[out] residual 不可达时写入「最近可达位姿到终点还有多远」，否则写 0
+     * @return 终点可达返回 true
+     */
+    bool check_target_reachable(double* residual);
+
     rclcpp::Subscription<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_cmd_sub_; ///< 笛卡尔轨迹指令订阅
 };
 

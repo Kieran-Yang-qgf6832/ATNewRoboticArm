@@ -153,7 +153,7 @@ int main(int argc, char** argv) {
         }
 
         Eigen::VectorXd solution = guess;
-        const bool ok            = solver.solve(item.target, solution);
+        const bool ok            = solver.solve(item.target, solution) == IKSolver::SolveResult::Converged;
         const double error_norm  = solver.last_error_norm();
         iterations += solver.last_iterations();
         worst_error = std::max(worst_error, error_norm);

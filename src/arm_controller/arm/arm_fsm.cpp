@@ -468,17 +468,49 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     task_force_.setZero(static_cast<Eigen::Index>(task_dof_));
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
     hold_position_.resize(joint_count_);
+    precheck_target_.resize(static_cast<Eigen::Index>(task_dof_));
+    precheck_seed_.resize(static_cast<Eigen::Index>(joint_count_));
+    precheck_solution_.resize(static_cast<Eigen::Index>(joint_count_));
 
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
             if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, task_dof_, &traj)) {
                 return;
             }
+            // 记下终点供 run() 做可达性预检。这里只做拷贝，不开新轨迹：预检失败时
+            // 必须保证一个运动指令都没下发过。
+            const auto& final_waypoint = msg.position.back().pos;
+            for (Eigen::Index row = 0; row < precheck_target_.size(); ++row) {
+                precheck_target_(row) = final_waypoint[static_cast<std::size_t>(row)];
+            }
+            precheck_pending_ = true;
+
             const auto now = factory->node_->get_clock()->now();
             traj.start(now);
             traj_start_time_ = now;
             state            = TrajPhase::MOVING;
         });
+}
+
+bool CartTrajState::check_target_reachable(double* residual) {
+    if (factory == nullptr || factory->arm_solve_ == nullptr || residual == nullptr) {
+        return false;
+    }
+
+    // 用当前实测关节角作初值：终点通常离当前位姿不远，这个初值比零位形好得多。
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        precheck_seed_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+    }
+
+    precheck_solution_ = precheck_seed_;
+    if (!factory->arm_solve_->inverse_kinamic(precheck_target_, &precheck_solution_)
+        || !precheck_solution_.allFinite()) {
+        *residual = factory->arm_solve_->last_ik_error_norm();
+        return false;
+    }
+
+    *residual = 0.0;
+    return true;
 }
 
 bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -503,6 +535,8 @@ bool CartTrajState::exit(const std::string& next_state) {
     (void)next_state;
     traj.stop();
     state = TrajPhase::STOP;
+    // 清掉未消费的预检请求：否则下一次进入本状态时会拿旧轨迹的途经点做预检。
+    precheck_pending_ = false;
     return true;
 }
 
@@ -523,6 +557,38 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     if (state == TrajPhase::STOP) {
         write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_);
         return true;
+    }
+
+    // 下发前可达性预检（docs/bugs.md O2）：在**下发任何运动指令之前**确认整条轨迹可达。
+    // 不做这一步时，手臂会先沿轨迹一路走到工作空间边界（实测末端走约 0.40 m），
+    // 再因逆解失败中止——那时运动已经发生，安全语义上已经晚了。
+    if (precheck_pending_) {
+        precheck_pending_ = false;
+
+        double residual = 0.0;
+        if (!check_target_reachable(&residual)) {
+            state = TrajPhase::STOP;
+            traj.stop();
+            set_fault_stage("Cartesian target reachability pre-check");
+
+            if (factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable) {
+                // 这是「目标不可达」，不是「求解器坏了」：报出最近可达位姿离终点还有多远，
+                // 让操作者知道该改目标，而不是去查逆解器。
+                RCLCPP_ERROR(
+                    factory->node_->get_logger(),
+                    "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
+                    "pose is still %.6f away from it (IK tolerance is %.1e). Without this pre-check the arm would have "
+                    "walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
+                    residual, IKSolver::tuning().tolerance);
+            } else {
+                RCLCPP_ERROR(
+                    factory->node_->get_logger(),
+                    "Cartesian trajectory REJECTED before any motion: inverse kinematics failed numerically "
+                    "(residual %.6f); reachability is unknown.",
+                    residual);
+            }
+            return false;
+        }
     }
 
     traj.update(time, point);
@@ -564,11 +630,15 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                 }
                 RCLCPP_WARN_THROTTLE(
                     factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
-                    "Cartesian IK failed at t=%.3f s: ik_err=%.3e (iters=%d), tracking_err=%.6f\n"
+                    "Cartesian IK failed at t=%.3f s: %s, ik_err=%.3e (iters=%d), tracking_err=%.6f\n"
                     "  target (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
                     "  seed   (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
                     "  fk(seed)     = [%.4f %.4f %.4f | %.4f %.4f %.4f]",
-                    (time - traj_start_time_).seconds(), factory->arm_solve_->last_ik_error_norm(),
+                    (time - traj_start_time_).seconds(),
+                    factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable
+                        ? "target is UNREACHABLE (iteration stalled at the edge of the reachable set)"
+                        : "solver failed numerically (reachability unknown)",
+                    factory->arm_solve_->last_ik_error_norm(),
                     factory->arm_solve_->last_ik_iterations(), error_norm, point.pos(0), point.pos(1), point.pos(2),
                     point.pos(3), point.pos(4), point.pos(5), seed_joints(0), seed_joints(1), seed_joints(2),
                     seed_joints(3), seed_joints(4), seed_joints(5), measured_task(0), measured_task(1), measured_task(2),

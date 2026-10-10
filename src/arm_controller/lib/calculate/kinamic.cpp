@@ -90,12 +90,16 @@ bool IKSolver::evaluate_error(
     return task_mapping_->error_map(target, workspace_.current, error);
 }
 
-bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) {
+IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) {
     const Tuning& config = tuning();
+
+    // 默认按「数值失败」处理：只有确实停滞在局部极小时才升级为「不可达」，
+    // 避免在输入非法等情况下给出关于可达性的错误结论。
+    last_result_ = SolveResult::Failed;
 
     const int joint_count = robot_->dof();
     if (target.size() != 6 || joint_pos.size() != joint_count) {
-        return false;
+        return SolveResult::Failed;
     }
 
     last_error_norm_ = 0.0;
@@ -103,7 +107,7 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
 
     workspace_.solution = joint_pos;
     if (!workspace_.solution.allFinite()) {
-        return false;
+        return SolveResult::Failed;
     }
 
     const Eigen::VectorXd& lower = robot_->lower_joint_limit();
@@ -124,13 +128,14 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
     }
 
     if (!evaluate_error(target, workspace_.solution, &workspace_.error)) {
-        return false;
+        return SolveResult::Failed;
     }
     double current_norm = workspace_.error.norm();
     if (current_norm < config.tolerance) {
         joint_pos        = workspace_.solution;
         last_error_norm_ = current_norm;
-        return true;
+        last_result_     = SolveResult::Converged;
+        return SolveResult::Converged;
     }
 
     double lambda       = config.lambda_initial;
@@ -142,7 +147,7 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
 
         if (!jacobian(workspace_.solution, workspace_.error, &workspace_.task_jacobian)) {
             last_error_norm_ = current_norm;
-            return false;
+            return SolveResult::Failed;
         }
 
         // Levenberg-Marquardt 步：(JᵀJ + λI)⁻¹ Jᵀ e
@@ -153,7 +158,7 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
         workspace_.joint_step = workspace_.ldlt.solve(workspace_.rhs);
         if (!workspace_.joint_step.allFinite()) {
             last_error_norm_ = current_norm;
-            return false;
+            return SolveResult::Failed;
         }
 
         // 信赖域：限制步长范数。接近奇异时 LM 步会非常大，硬截断到某个固定上限会让
@@ -172,7 +177,7 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
         workspace_.trial = workspace_.solution + workspace_.joint_step;
         if (!evaluate_error(target, workspace_.trial, &workspace_.trial_error)) {
             last_error_norm_ = current_norm;
-            return false;
+            return SolveResult::Failed;
         }
         const double trial_norm = workspace_.trial_error.norm();
 
@@ -184,7 +189,8 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
             if (current_norm < config.tolerance) {
                 joint_pos        = workspace_.solution;
                 last_error_norm_ = current_norm;
-                return true;
+                last_result_     = SolveResult::Converged;
+                return SolveResult::Converged;
             }
             lambda       = std::max(lambda * config.lambda_down, config.lambda_min);
             trust_radius = std::min(trust_radius * config.trust_grow, config.trust_max);
@@ -198,15 +204,24 @@ bool IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) 
             // max_iterations，拖慢控制周期、让机械臂跟不上轨迹。
             if (++consecutive_rejections >= kMaxConsecutiveRejections) {
                 last_error_norm_ = current_norm;
-                return current_norm < config.tolerance;
+                // 连续多次找不到下降方向 = 已经停在局部极小。误差降不到判据以内，
+                // 说明目标不在可达集内（可达集边界到目标的距离就是 current_norm）。
+                last_result_ = current_norm < config.tolerance ? SolveResult::Converged : SolveResult::Unreachable;
+                return last_result_;
             }
         }
     }
 
     last_error_norm_ = current_norm;
     if (current_norm < config.tolerance) {
-        joint_pos = workspace_.solution;
-        return true;
+        joint_pos    = workspace_.solution;
+        last_result_ = SolveResult::Converged;
+        return SolveResult::Converged;
     }
-    return false;
+    // 迭代次数用尽仍未达标。实测目标远远超出工作空间时（如 +X 平移 2 m，残余 1.2 m）
+    // 就是这种情况：每步都能略微下降，因此连续拒绝计数永远攒不满，只能靠次数上限退出。
+    // 从调用方的角度看这与「停滞」是同一件事——**目标没有达到**，所以同样报 Unreachable，
+    // 而不是含糊的「数值失败」。残余由 last_error_norm() 给出，量级自会说明差多远。
+    last_result_ = SolveResult::Unreachable;
+    return SolveResult::Unreachable;
 }

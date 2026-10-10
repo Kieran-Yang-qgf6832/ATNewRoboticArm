@@ -62,6 +62,19 @@ public:
     /// @return 全局迭代参数（可修改，用于离线调参）
     static Tuning& tuning();
 
+    /**
+     * @brief 逆解结果
+     *
+     * 只返回 `bool` 时无法区分「目标不可达」与「数值失败」：两者在日志里都表现为
+     * 一句「逆解失败」，操作者看不出是哪一种，也就无从判断该改目标还是该查求解器
+     * （docs/bugs.md O2）。
+     */
+    enum class SolveResult {
+        Converged,   ///< 残余已在 @ref Tuning::tolerance 以内
+        Unreachable, ///< 迭代结束（停滞或次数用尽）时残余仍超判据：目标没有达到，通常意味着落在可达集之外
+        Failed,      ///< 数值失败（输入非法、雅可比不可用、步长非有限），可达性未知
+    };
+
     IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping> task_mapping);
 
     /**
@@ -69,9 +82,12 @@ public:
      * @param target    任务空间目标（6 维）
      * @param joint_pos 既作输入又作输出：输入为迭代初值（应传当前实测关节角），
      *                  求解失败时内容保持不变
-     * @return true 收敛到 @ref Tuning::tolerance 以内
+     * @return @ref SolveResult，只有 Converged 表示残余已进入判据
+     * @note 判据是任务空间误差范数。目标落在可达集之外时误差降不到零，迭代会在
+     *       可达集边界停滞，此时返回 @ref SolveResult::Unreachable 并用
+     *       @ref last_error_norm 给出「最近可达位姿离目标还有多远」。
      */
-    bool solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos);
+    SolveResult solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos);
 
     /**
      * @brief 任务误差的 Gauss-Newton 雅可比
@@ -97,6 +113,9 @@ public:
     /// @return 上一次 solve() 实际使用的迭代次数，用于诊断
     int last_iterations() const { return last_iterations_; }
 
+    /// @return 上一次 solve() 的结果，用于区分「不可达」与「数值失败」
+    SolveResult last_result() const { return last_result_; }
+
 private:
     /// 计算给定关节角下的任务空间误差
     bool evaluate_error(const Eigen::VectorXd& target, const Eigen::VectorXd& joint_pos, Eigen::VectorXd* error);
@@ -121,4 +140,5 @@ private:
     Workspace workspace_;
     double last_error_norm_{0.0};
     int last_iterations_{0};
+    SolveResult last_result_{SolveResult::Failed};
 };

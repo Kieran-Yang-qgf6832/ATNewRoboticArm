@@ -39,7 +39,11 @@ bool ArmSolve::inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd*
     // 让迭代从离目标最近的位形出发。若从零位形起步，当目标位姿远离零位形或接近奇异时，
     // 阻尼最小二乘迭代会在迭代上限内不收敛而返回 false，进而让控制器 update() 报错。
     // 初值的限幅（关节限位）与有限性检查由 IKSolver::solve 负责。
-    return ik_solver_->solve(task_pos, *joint_pos);
+    return ik_solver_->solve(task_pos, *joint_pos) == IKSolver::SolveResult::Converged;
+}
+
+IKSolver::SolveResult ArmSolve::last_ik_result() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_result() : IKSolver::SolveResult::Failed;
 }
 
 bool ArmSolve::forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_pos) {

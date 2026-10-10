@@ -74,3 +74,27 @@ sequences:
       - {type: wait, duration: 1.5}
       - {type: cart_move, offset: [0.0, 0.0, -0.05], duration: 2.0}
       - {type: idel}
+
+  # **反例**：从 ready 位姿沿 +Z 抬升 5 cm。ready 已在最大高度（z ≈ 1.233 m），
+  # 该目标不可达。用于验证 O2：不可达目标应被明确报告为「不可达」，且不得
+  # 产生大幅意外运动。预期本序列**失败**，退出码非 0。
+  #
+  # 注意这是**临界**不可达：6 个差异极大的初值都收敛到同一残余 1.045997e-3，
+  # 只比 1e-3 的判据高 4.6%——所以日志里的 ik_err 看上去像「差一点点没收敛」，
+  # 实际含义是「目标落在可达集之外 1.046 mm」。这正是 O2 诊断困难的根源。
+  unreachable_near:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: idel}
+
+  # **反例**：从 ready 位姿沿 +X 平移 2 m，远远超出工作空间。
+  # 实测：手臂会先沿轨迹走到工作空间边界（joint2 转 -0.404 rad、joint4 转 +0.428 rad，
+  # 末端走了约 0.40 m），再因逆解失败中止——这才是 O2 要消除的「大幅意外运动」。
+  unreachable_far:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: cart_move, offset: [2.0, 0.0, 0.0], duration: 2.0}
+      - {type: idel}

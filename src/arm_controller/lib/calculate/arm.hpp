@@ -40,6 +40,9 @@ public:
     /// @return 上一次 inverse_kinamic() 实际使用的迭代次数，用于诊断
     int last_ik_iterations() const;
 
+    /// @return 上一次 inverse_kinamic() 的结果，用于区分「不可达」与「数值失败」
+    IKSolver::SolveResult last_ik_result() const;
+
 private:
     struct Workspace {
         Eigen::VectorXd finite_joint_pos;

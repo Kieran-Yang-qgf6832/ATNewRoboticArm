@@ -13,6 +13,7 @@
 #include "kinamic.hpp"
 #include "model_from_urdf.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
@@ -39,12 +40,31 @@ int main(int argc, char** argv) {
         seed(i) = std::atof(argv[8 + i]);
     }
 
-    Eigen::VectorXd solution = seed;
-    const bool converged     = solver.solve(target, solution);
+    // 重复求解以便测出单次耗时：预检要在 500 Hz 控制周期里跑，必须知道它有多贵。
+    constexpr int kRepeatCount = 200;
+    Eigen::VectorXd solution   = seed;
+    const auto started_at      = std::chrono::steady_clock::now();
+    auto result                = solver.solve(target, solution);
+    for (int repeat = 1; repeat < kRepeatCount; ++repeat) {
+        solution = seed;
+        result   = solver.solve(target, solution);
+    }
+    const double microseconds_per_solve =
+        std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started_at).count() / kRepeatCount;
+    const bool converged     = result == IKSolver::SolveResult::Converged;
+
+    const char* result_name = "Failed (numerical, reachability unknown)";
+    if (result == IKSolver::SolveResult::Converged) {
+        result_name = "Converged";
+    } else if (result == IKSolver::SolveResult::Unreachable) {
+        result_name = "Unreachable (target not reached; residual = distance to the nearest reachable pose)";
+    }
 
     printf("converged  = %s\n", converged ? "yes" : "NO");
+    printf("result     = %s\n", result_name);
     printf("ik_err     = %.6e\n", solver.last_error_norm());
     printf("iterations = %d\n", solver.last_iterations());
+    printf("solve_time = %.1f us/次（%d 次平均）\n", microseconds_per_solve, kRepeatCount);
     printf("solution   = [");
     for (int i = 0; i < dof; ++i) {
         printf("%s%.9f", i == 0 ? "" : ", ", solution(i));

@@ -427,12 +427,12 @@ bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
 
     sleep_with_spin(node_, step.duration);
 
-    // 控制器若因求解失败回退到 idel，说明这次运动没有走完，必须上报。
+    // 控制器若回退到 idel，说明这次运动没有走完，必须上报。
     const std::string state = ctx_->controller_state(2.0);
     if (state != "joint_traj") {
         return fail(
             "arm_controller left joint_traj (now '" + (state.empty() ? std::string("<unknown>") : state)
-            + "'), likely a solve failure");
+            + "'); see the controller log for the failing stage (inverse kinematics / inverse dynamics)");
     }
 
     if (ctx_->have_joint_states() && ctx_->joint_positions().size() == step.target.size()) {
@@ -504,11 +504,14 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
 
     sleep_with_spin(node_, step.duration);
 
+    // 控制器若回退到 idel，说明这次运动没有走完，必须上报。具体原因（目标不可达 /
+    // 逆解数值失败）由控制器在日志里给出：笛卡尔轨迹在**下发前**就会做可达性预检，
+    // 目标不可达时一个运动指令都不会下发（docs/bugs.md O2）。
     const std::string state = ctx_->controller_state(2.0);
     if (state != state_name) {
         return fail(
             "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
-            + "'), likely a solve failure");
+            + "'); check the controller log — an unreachable Cartesian target is rejected before any motion");
     }
 
     std::vector<double> current_pose;
