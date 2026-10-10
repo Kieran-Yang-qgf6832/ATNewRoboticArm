@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）。F/O 系列缺陷已全部处理（O1 已证伪）。
+> `auto_declare` 等）。F 系列与 O1–O7 已闭环，**O8（参数辨识数据一致性）未修**。
 
 ## 常用命令
 
@@ -146,6 +146,11 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
+- **O8（唯一未修缺陷，高）**：参数辨识链路已跑通，但**当前这份测量数据辨识不出物理可行的
+  模型**。辨识出的基参数距 URDF 先验 18.5%（`0.365 / 1.98`），且出了物理可行集：`sdp` 直接
+  不可行，投影路线虽能写出文件却把连杆退化成质点（joint3 惯量 `1e-3 → 1e-10`）。已排除
+  picos 缺失、CAD 约束、URDF/MJCF 不一致、关节阻尼；主嫌疑是**记录到的力矩不是关节实际输出
+  力矩**。详见 `docs/bugs.md` O8 与 `src/parameter_identify/README.md`。
 - `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
