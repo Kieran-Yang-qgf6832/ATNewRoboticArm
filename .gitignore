@@ -9,3 +9,5 @@
 # Python 编译产物：以前被误提交过（含 Python 版本号，跨环境无意义）
 __pycache__/
 *.pyc
+# 参数辨识测量输出：默认落在项目根目录（见 launch_pack/arm_measure_sim.launch.py）
+/measured_for_identification.csv

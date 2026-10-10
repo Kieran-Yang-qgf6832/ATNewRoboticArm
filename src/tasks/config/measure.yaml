@@ -1,0 +1,27 @@
+# 参数辨识（measure）专用任务配置——与 tasks.yaml 分开，改这里不会影响其它序列。
+#
+# 完整启动方式见 launch_pack/launch/arm_measure_sim.launch.py：
+#     ros2 launch launch_pack arm_measure_sim.launch.py
+# 该 launch 会起仿真并把本文件里的 measure_only 序列跑完，随后整个 launch 退出。
+#
+# 步骤类型说明见 tasks.yaml 顶部；measure 只能从 idel 进出，所以首尾各留一步。
+#
+# 关于 duration：它是**任务层等待的上界**，不是测量时长本身。控制器侧 measure
+# 状态的总耗时约为
+#     measure_move_to_start_duration + measure_trajectory_period x repeat_cnt
+# （默认 3 + 10 x 1 = 13 s，另加激励轨迹的生成时间）。测量结束后状态停在
+# HoldingEnd 等 idel 请求，所以 duration 略大于实际测量即可：取小了不会丢数据，
+# 只是让随后的 wait_for_idel 多等一会儿（step_timeout 默认 30 s）；取大了则是
+# 空等。改了 ros2_controller.yaml 里的 measure_* 参数后记得同步这里。
+
+sequences:
+  measure_only:
+    steps:
+      # 控制器被激活时会按 ros2_controller.yaml 的 exp_state: reset 先做一次启动复位，
+      # 所以不能一上来就切 measure。先用 idel 步骤等它回到空闲——wait_for_idel 会一直
+      # 等到 current_state 真的变成 idel（step_timeout 默认 30 s），复位后的零位就是
+      # 本次测量的起点。少了这一步，紧跟 spawner 之后启动的 task_runner 会在控制器
+      # 仍处于 reset 时被拒绝（reset/measure 都要求从 idel 进入）。
+      - {type: idel}
+      - {type: measure, duration: 20.0}
+      - {type: idel}

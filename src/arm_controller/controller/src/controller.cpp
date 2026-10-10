@@ -136,7 +136,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
-    auto_declare<std::string>("measure_csv_file_path", "/tmp/measured_for_identification.csv");
+    auto_declare<std::string>("measure_csv_file_path", "measured_for_identification.csv");
     auto_declare<double>("measure_record_sample_rate", 500.0);
     auto_declare<std::vector<double>>("admittance_mass", {1.0, 1.0, 1.0, 0.1, 0.1, 0.1});
     auto_declare<std::vector<double>>("admittance_damping", {20.0, 20.0, 20.0, 2.0, 2.0, 2.0});

@@ -61,7 +61,11 @@ arm_controller:
     measure_trajectory_period: 10.0
     measure_move_to_start_duration: 3.0
     measure_trajectory_repeat_cnt: 1
-    measure_csv_file_path: /tmp/measured_for_identification.csv
+    # 辨识测量 CSV 的输出路径。相对路径按启动进程的工作目录解析。
+    # 通过 launch_pack/arm_measure_sim.launch.py 启动时，launch 会把它覆盖成
+    # <项目根目录>/measured_for_identification.csv 的绝对路径（不再写 /tmp）。
+    # 控制器在**构造阶段**读这个参数，只改这里必须重启控制器才生效（docs/bugs.md C6）。
+    measure_csv_file_path: measured_for_identification.csv
     measure_record_sample_rate: 500.0
     admittance_mass: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
     admittance_damping: [20.0, 20.0, 20.0, 2.0, 2.0, 2.0]

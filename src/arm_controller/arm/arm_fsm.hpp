@@ -721,7 +721,7 @@ private:
     Eigen::VectorXd measured_torque_;
     rclcpp::Time measure_start_time_;
     rclcpp::Time phase_start_time_;
-    std::string measure_csv_file_path_{"/tmp/measured_for_identification.csv"};
+    std::string measure_csv_file_path_{"measured_for_identification.csv"};
     double trajectory_period_{10.0};
     double move_to_start_duration_{3.0};
     double measure_record_sample_rate_{500.0};

@@ -1310,7 +1310,7 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     move_to_start_duration_     = move_to_start_duration_ > 0.0 ? move_to_start_duration_ : 3.0;
     measure_record_sample_rate_ = measure_record_sample_rate_ > 0.0 ? measure_record_sample_rate_ : 500.0;
     if (measure_csv_file_path_.empty()) {
-        measure_csv_file_path_ = "/tmp/measured_for_identification.csv";
+        measure_csv_file_path_ = "measured_for_identification.csv";
     }
     for (std::size_t i = 0; i < joint_count_; ++i) {
         default_kp_[i] = i < default_kp_param_.size() ? static_cast<float>(default_kp_param_[i]) : 0.0f;
