@@ -146,11 +146,13 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
-- **O8（唯一未修缺陷，高）**：参数辨识链路已跑通，但**当前这份测量数据辨识不出物理可行的
-  模型**。辨识出的基参数距 URDF 先验 18.5%（`0.365 / 1.98`），且出了物理可行集：`sdp` 直接
-  不可行，投影路线虽能写出文件却把连杆退化成质点（joint3 惯量 `1e-3 → 1e-10`）。已排除
-  picos 缺失、CAD 约束、URDF/MJCF 不一致、关节阻尼；主嫌疑是**记录到的力矩不是关节实际输出
-  力矩**。详见 `docs/bugs.md` O8 与 `src/parameter_identify/README.md`。
+- **O8（唯一未修缺陷，高）**：参数辨识链路已跑通，但辨识不出物理可行的模型。**根因已定位**：
+  辨识用的加速度是对 500 Hz 记录速度二次求导得到的，相对误差 **31.5%**（换任何平滑参数都
+  只能到 20~34%）。模型与力矩都验证无误——反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`，
+  用模型正演的完美力矩能精确复原真值（残差 5.5e-14），`cond(W_base) = 138` 激励也充分。
+  后果：基参数偏离先验 18.5%，`sdp` 不可行；投影路线虽能写出文件却把连杆退化成质点。
+  **修法**：让 measure 把加速度记录进 CSV（`acc_*` 列 + `acceleration_source: recorded`，
+  格式与 loader 都已支持）。详见 `docs/bugs.md` O8。
 - `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
