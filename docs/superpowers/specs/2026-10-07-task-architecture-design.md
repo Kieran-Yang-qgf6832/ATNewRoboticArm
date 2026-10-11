@@ -4,7 +4,7 @@
 > 范围：`src/arm_controller`（控制器/状态机）、`src/tasks`（任务层）
 > 状态：**已实施完毕**——同目录 plan 的六个阶段全部完成，旧任务层已在阶段 6 删除
 > （`f112272`）。**本文档是历史设计记录**，描述当时的设计意图；当前实现与最新状态请以
-> [`docs/bugs.md`](../../bugs.md) 与 [`CLAUDE.md`](../../CLAUDE.md) 为准。
+> [`docs/bugs.md`](../../bugs.md) 与 [`CLAUDE.md`](../../../CLAUDE.md) 为准。
 
 ---
 

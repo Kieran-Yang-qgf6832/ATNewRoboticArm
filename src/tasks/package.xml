@@ -2,7 +2,7 @@
 <package format="3">
   <name>tasks</name>
   <version>0.1.0</version>
-  <description>Task-level clients for the robotic arm: joint space demo plus a task-layer state machine runner.</description>
+  <description>Configuration-driven task layer for the robotic arm: reads YAML step sequences (config/tasks.yaml, config/measure.yaml) and drives the controller through the exp_state parameter and trajectory topics. Entry point: task_runner.</description>
   <maintainer email="cloud1202@qq.com">lyz</maintainer>
   <license>TODO</license>
 

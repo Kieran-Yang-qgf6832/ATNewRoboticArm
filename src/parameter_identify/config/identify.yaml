@@ -2,7 +2,10 @@ model:
   active_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
 
 data:
-  sample_time: 0.02
+  # 必须与 CSV 实际采样周期一致。实测 CSV 是 500 Hz（0.002），原来写的 0.02（50 Hz）差了 10 倍。
+  # 当前链路不读它（build_regressor_basic / QRDecomposer 都不读 ts），但 vendored FIGAROH 的
+  # 滤波工具会读（cutoff = ts * cut_off_frequency_butterworth / 2），一旦启用就会静默出错。
+  sample_time: 0.002
   decimate: false
   decimation_factor: 10
   max_samples: 0
@@ -23,12 +26,18 @@ reconstruction:
   # auto：装了 picos 走 sdp，没装退回 nullspace。
   # 本项目**当前这份测量数据**用 sdp 会判定不可行（辨识出的基参数 phi_base 距物理可行集
   # 约 0.37，而 ‖phi_base‖≈1.98；只留 PSD 可行、只留等式可行、两者同时不可行），
-  # 这是数据/模型一致性问题，不是缺依赖，所以这里保持"失败就报错"，不静默降级。
+  # 根因已定位：辨识用的**加速度**由 500 Hz 记录速度二次求导得到，相对误差 31.5%
+  # （模型与力矩都验证无误——反解加速度满足 ‖M·a + bias − τ‖ = 1.4e-16，详见 docs/bugs.md O8）。
+  # 所以这里保持"失败就报错"，不静默降级。
   # 想强行拿到一个物理可行的模型可以改成 method: nullspace + physical_projection: true，
   # 但实测那样会把连杆投影成质点（惯量从 1e-3 塌到 1e-10），不是可用模型——详见 README。
   method: auto
   prior_source: urdf
   physical_projection: false
+  # 下面这几组开关（strict_base_constraints / base_residual_weight / shape_prior /
+  # central_moment_prior / tensor_trust_region）是**更新版 FIGAROH** 才有的；本仓库 vendored
+  # 的是 0.6.0，重建入口不接受它们。identify_arm 会按实际签名裁剪、打 WARN，并记进报告的
+  # inactive_reconstruction_options——即"配了但当前不生效"，升级 figaroh 后自动启用。
   strict_base_constraints: false
   base_residual_weight: 1.0e6
   mass_min: 1.0e-3
