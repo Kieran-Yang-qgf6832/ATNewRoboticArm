@@ -34,7 +34,7 @@ pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
 | `nullspace` | `false` | 只做零空间重建，**不施加物理约束**，结果通常非物理，会被 `require_physical` 拒绝 |
 | `nullspace` | `true` | 先零空间重建，再用 LMI 把每个连杆投影到物理可行集。**能写出文件，但本项目数据下会退化**（见下） |
 
-### ⚠️ 当前这份测量数据辨识不出可用模型
+### ⚠️ 当前辨识不出可用模型——根因是加速度估计，**不是**测量数据
 
 **症状**：`method: auto`（→ sdp）直接报 `status=error`，提示"问题不可行"。
 
@@ -132,6 +132,9 @@ time,pos_0,pos_1,...,vel_0,vel_1,...,torque_0,torque_1,...
 
 ## 生成辨识结果
 
+> ⚠️ 在当前这份 CSV 上，下面这条命令会**以退出码 1 失败**（`status=error`，SDP 判定不可行），
+> 这是 O8 的表现、不是命令写错。诊断用可把 `require_physical` 设为 `false`。
+
 ```bash
 cd <项目根目录>
 ros2 run parameter_identify identify_arm \
@@ -161,7 +164,13 @@ PYTHONPATH=src/parameter_identify:$PYTHONPATH python3 -m parameter_identify.iden
 
 ## 常见参数
 
-- `config/identify.yaml` 中的 `model.active_joints` 必须与 URDF 中参与辨识的关节名一致。
-- `data.sample_time` 建议与 CSV 采样周期一致。例如 500 Hz 采样时为 `0.002`。
-- `data.acceleration_source` 默认为 `computed`，会根据速度列计算加速度。
-- `reconstruction.method: sdp` 需要可用的 SDP 求解依赖；如果只想先看诊断结果，可按需要调整 `reconstruction` 配置。
+- `config/identify.yaml` 的 `model.active_joints` 必须与 URDF 中参与辨识的关节名一致。
+- `data.acceleration_source`：`computed` 由速度列求导（**当前精度不足，见上**）；
+  `recorded` 读取 CSV 的 `acc_*` 列（**修 O8 后应改用这个**）。
+- `data.sample_time`：**应与 CSV 实际采样周期一致**。当前配置写的是 `0.02`（50 Hz），而实测
+  CSV 是 500 Hz（`0.002`），**差了 10 倍**。这条链路暂时不读它（`build_regressor_basic` /
+  `QRDecomposer` 都不读 `ts`），但 vendored FIGAROH 的滤波工具会读
+  （`cutoff = ts * cut_off_frequency_butterworth / 2`），一旦启用那条路径就会静默出错。
+- `reconstruction.method` / `physical_projection`：见上面的三条路线表。
+- 只想先看诊断结果（rmse / 相关性 / 参数值）时，把 `reconstruction.require_physical` 设为
+  `false`，但**不要**把这样得到的 URDF 用于控制。

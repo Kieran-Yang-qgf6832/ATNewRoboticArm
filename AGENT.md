@@ -28,6 +28,8 @@
 - `lib/calculate/`：运动学、动力学、轨迹工具。
 - `lib/cdc_trans/`：USB CDC 通信封装。
 - `lib/fsm/`：轻量 FSM 基类与工厂。
+- `lib/paramter_identify/`：激励轨迹生成（`ExcitationTrajectory` / `FourierTrajectory`）
+  与测量记录（`ParamterIdentify`）。
 - `lib/executer/`：DAG 组件执行器实验代码，当前未接入主库。
 
 ## 计算库
@@ -54,6 +56,19 @@
 - **笛卡尔轨迹下发前先做可达性预检**。`cart_traj` 在 MOVING 的首个周期对轨迹**终点**
   做一次逆解，不收敛就整条拒绝、**一个运动指令都不下发**（O2）。只查终点是因为单次
   逆解最坏约 386 µs，而控制周期是 2 ms。
+
+## 参数辨识（measure 状态）——当前结果不可用
+
+`ParamterMeasureState`（`measure`）生成傅里叶激励轨迹、跟踪它并把
+`position/velocity/torque` 记进 CSV。链路本身已跑通（见 `docs/bugs.md` O8），但
+**辨识结果非物理**，根因是**加速度**：CSV 里没有加速度列，离线辨识只能对 500 Hz 的记录速度
+做二次求导，相对误差 31.5%（换任何平滑参数只能到 20~34%）。记录力矩本身与刚体动力学在机器
+精度上一致（反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`）。
+
+**要修的话**：让本状态把加速度一起写进 CSV——`FourierTrajectory::acceleration(t)` 已经有解析
+值，只需给 `ExcitationTrajectory` 加一个取值接口并在 `run()` 里写入 `acc_*` 列；离线侧的
+`csv_loader` 与 `acceleration_source: recorded` 已经支持。注意解析加速度是**指令值**，
+精度取决于跟踪质量。详见 `docs/bugs.md` O8。
 
 ## 离线排查工具
 

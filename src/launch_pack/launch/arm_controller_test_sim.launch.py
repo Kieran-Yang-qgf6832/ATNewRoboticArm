@@ -19,8 +19,11 @@
 用法：
     ros2 launch launch_pack arm_controller_test_sim.launch.py
     ros2 launch launch_pack arm_controller_test_sim.launch.py show_rviz:=false
-    # 起好之后另开终端跑任务链
-    ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="[reset, cart_traj]"
+    # 起好之后另开终端跑任务链（task_sequence 是**序列名**，不是步骤列表）
+    ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="ready_then_cart"
+    # 参数辨识用专门的一份配置（见 arm_measure_sim.launch.py）
+    ros2 run tasks task_runner --ros-args -p use_sim_time:=true \
+        -p tasks_config:=$(ros2 pkg prefix tasks)/share/tasks/config/measure.yaml -p task_sequence:="measure_only"
 
 @note 状态：可用。依赖（arm_model / arm_controller / mujoco_ros2_control / launch_pack）
       均在本工作区；控制器参数取自 config/ros2_controller.yaml。
@@ -207,8 +210,8 @@ def generate_launch_description():
     # /joint_states 各有两个发布者、时间基准互相回退，robot_state_publisher 会刷
     # "Moved backwards in time, re-publishing joint transforms!"，所以这里先给一句提示。
     double_sim_hint = LogInfo(
-        msg="[提示] 本 launch 会启动 MuJoCo + 控制器；若已有仿真/控制器在运行，请改用 "
-        "start_sim:=false 只跑任务，否则两个 /clock 与 /joint_states 发布者会造成时间戳回退刷屏。"
+        msg="[提示] 本 launch 会启动 MuJoCo + 控制器；若已有仿真/控制器在运行，请先停掉它再启动，"
+        "否则两个 /clock 与 /joint_states 发布者会造成时间戳回退刷屏（本文件没有只跑任务的开关）。"
     )
 
     return LaunchDescription(

@@ -1,9 +1,12 @@
 # RoboticArm
 
-基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层、以及动力学参数辨识（FIGAROH + CMA-ES）的完整工作流。
+基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流——**辨识部分当前不可用，见下方「当前状态」**。
 
 > **当前状态**：仿真链路已端到端跑通并验证；**实机从未运行过**。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)。
+> **参数辨识暂不可用**：测量链路已跑通，但辨识用的加速度由 500 Hz 速度二次求导得到
+> （相对误差 31.5%），辨识结果非物理——见 [O8](docs/bugs.md) 与
+> [`src/parameter_identify/README.md`](src/parameter_identify/README.md)。
 
 ## 特性
 
@@ -16,6 +19,7 @@
 - **基于 Pinocchio 的刚体动力学**：正运动学、几何雅可比、RNEA 逆动力学、关节限位。
 - **轨迹插值**：五次 Hermite/Bezier 段插值，保证位置、速度、加速度连续。
 - **动力学参数辨识**：激励轨迹生成（傅里叶级数）、CSV 测量记录、离线辨识与 URDF 回写。
+  **注意：当前辨识结果不可用**（加速度估计误差 31.5%，见 O8）。
 - **实时安全约束**：控制热路径严格无 ROS 参数读写、无动态内存分配。
 - **失效安全**：逆解失败只保持并回退 `idel`，绝不使控制器链失活；不可达的笛卡尔目标在下发前就被拒绝。
 
@@ -74,7 +78,7 @@ ATNewRoboticArm/
 │   │       ├── paramter_identify/ # 激励轨迹生成与测量（C++ 侧）
 │   │       └── executer/       #   DAG 组件执行器实验代码（未接入主库）
 │   ├── tasks/                  # 任务层：配置驱动的执行器 + task_runner 入口
-│   │   ├── config/tasks.yaml   #   任务定义（目标点、序列、末端执行器）
+│   │   ├── config/             #   任务定义：tasks.yaml（通用）+ measure.yaml（参数辨识）
 │   │   ├── executor/           #   步骤类型表与执行器
 │   │   ├── context/            #   与控制器交互的 ROS 接口封装
 │   │   └── src/task_runner.cpp #   节点入口
@@ -86,7 +90,9 @@ ATNewRoboticArm/
 ├── third_party/
 │   ├── libcmaes/               # CMA-ES 优化库
 │   └── figaroh-plus/           # FIGAROH 动力学参数辨识库
-├── docs/bugs.md                # 缺陷台账与设计约束（重要）
+├── docs/
+│   ├── bugs.md                 # 缺陷台账与设计约束（重要）
+│   └── superpowers/            # 任务层重构的历史设计与实施记录（已完成）
 ├── CLAUDE.md                   # 面向 AI 助手的项目指引
 ├── AGENT.md                    # arm_controller 包的开发笔记
 └── README.md
@@ -127,6 +133,9 @@ ATNewRoboticArm/
 | `teach_pendant` | 示教器，支持外力拖动、可配置阻尼与重力补偿 |
 | `measure` | 系统参数辨识（激励轨迹执行 + 数据记录） |
 
+> `idel` / `reset` 与 `cart_traj` / `joint_traj` / `admittance` 的**保持阶段**都带重力前馈
+> （共用 `HoldGravityFeedforward`，见 O6 / O7）；开关是控制器参数 `gravity_compensation`。
+
 运行时切换示例：
 
 ```bash
@@ -135,7 +144,8 @@ ros2 param set /arm_controller exp_state reset
 
 ## 任务层（配置驱动）
 
-任务定义在 `src/tasks/config/tasks.yaml`，**新增目标点或任务类型只需编辑该文件**。
+任务定义在 `src/tasks/config/tasks.yaml`（参数辨识另有 `src/tasks/config/measure.yaml`）。
+**新增目标点或新任务只需编辑 YAML**；但新增**步骤类型**要改 C++——下面的词汇表是封闭集合。
 
 ### 步骤类型（封闭集合，共 9 类）
 
@@ -165,6 +175,7 @@ ros2 param set /arm_controller exp_state reset
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
+| `measure_only` | 正常 | **在 `measure.yaml` 里**（不在 `tasks.yaml`）：`idel → measure → idel`，参数辨识测量 |
 
 ```bash
 # 跑一条序列（退出码反映成败）
@@ -192,7 +203,9 @@ ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p
 - `kdl_parser` / `orocos_kdl`
 - `yaml-cpp`（任务层配置解析）
 - `MuJoCo`（仿真）
-- Python：`numpy`、`scipy`、`pinocchio`、`pyyaml`
+- Python：`numpy`、`scipy`、`pinocchio`、`pyyaml`；物理一致性重建还需要
+  `picos` + `cvxopt`（缺了会退回 `nullspace`，结果可能非物理，见
+  `src/parameter_identify/README.md`）
 
 ## 构建
 
@@ -257,6 +270,13 @@ ros2 launch launch_pack arm_real.launch.py
 
 ## 参数辨识工作流
 
+> ⚠️ **当前不可用（O8）**：测量链路已跑通、CSV 能正常产出，但**辨识结果非物理**。
+> 根因已定位：辨识用的加速度是对 500 Hz 记录速度二次求导得到的，相对误差 **31.5%**
+> （换任何平滑参数只能到 20~34%）；记录力矩本身与刚体动力学在机器精度上一致
+> （反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`）。修法是让 `measure` 把加速度记录进
+> CSV（格式与 loader 都已支持 `acc_*` / `acceleration_source: recorded`）。
+> 详见 [`docs/bugs.md` O8](docs/bugs.md) 与 `src/parameter_identify/README.md`。
+
 参数辨识由三部分协同完成，详细说明见 `src/parameter_identify/README.md`：
 
 1. **激励轨迹生成 + 测量**：控制器 `measure` 状态（`ParamterMeasureState`）生成傅里叶激励轨迹并记录测量数据 CSV；
@@ -286,7 +306,8 @@ ros2 run parameter_identify identify_arm \
 - 修改控制器接口时，同步检查 controller YAML、URDF `ros2_control` 接口与插件 XML。
 - **新增控制器参数时三处同步**：`ArmController::on_init` 里的 `auto_declare`、controller YAML、读取处。
   控制器只读取**已声明**的参数，YAML 里未声明的键会被静默忽略并取默认值，写错名字不会有任何提示。
-- 修改后优先构建验证：`colcon build --packages-select arm_controller tasks`。
+- 修改后优先构建验证：`colcon build --packages-select arm_controller tasks`；
+  改动涉及参数辨识时再加上 `parameter_identify`。
 
 ### ros2_control 实时约束
 

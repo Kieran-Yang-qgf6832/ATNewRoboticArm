@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层、以及动力学参数辨识（FIGAROH + CMA-ES）完整工作流。
+基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流——**辨识部分当前不可用（O8）**。
 
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
@@ -153,7 +153,11 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   后果：基参数偏离先验 18.5%，`sdp` 不可行；投影路线虽能写出文件却把连杆退化成质点。
   **修法**：让 measure 把加速度记录进 CSV（`acc_*` 列 + `acceleration_source: recorded`，
   格式与 loader 都已支持）。详见 `docs/bugs.md` O8。
-- `src/launch_pack/launch/arm_real.launch.py` 和 `arm_static_display.launch.py` 引用了不存在的包（`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，当前不可用。**实机路径尚未打通。**
+- `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
+  `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
+  `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
+  **实机路径尚未打通**。可用入口只有 `arm_controller_test_sim.launch.py` 与
+  `arm_measure_sim.launch.py`。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
