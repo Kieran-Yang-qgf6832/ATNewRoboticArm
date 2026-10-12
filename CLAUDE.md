@@ -9,7 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）。F 系列与 O1–O7、O9 已闭环，**O8（参数辨识数据一致性）未修**。
+> `auto_declare` 等）。F 系列与 O1–O7、O9 已闭环，**O8（辨识数据一致性）与 O10（激励轨迹
+> 不可复现）未修**。
 
 ## 常用命令
 
@@ -158,6 +159,12 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
   `OpaqueFunction` 生成 node key 为 `arm_controller` 的补充文件。**验证参数是否生效要查
   目标节点（`ros2 param get /arm_controller <name>`）或结果（CSV 行数），不能只看"文件里写了"。**
+- **O10（未修，高）**：激励轨迹生成不可复现——`excitation_trajectory.cpp` 里
+  `CMAParameters(..., /*seed=*/0, ...)` 的 0 在 libcmaes 里表示"用当前时间当种子"，
+  且 `k_max_fevals = 600` 对 36 维优化变量严重欠收敛。后果：同一套模型/控制器，
+  辨识残差在 **2.66 ~ 18.01 N·m** 之间随机波动，激励轨迹偶尔还会把关节甩出模型限位
+  （joint3 到 −3.30 rad，URDF 限位 ±2.9）。**做迭代对比实验前必须先固定种子。**
+  详见 `docs/bugs.md` O10。
 - `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
   `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
