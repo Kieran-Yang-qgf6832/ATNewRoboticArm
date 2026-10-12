@@ -52,6 +52,7 @@ O2 / O3 / O4 / O6 / O7 已修；**唯一未修的是 O8**——参数辨识链�
 | **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | **已修** | `c7abf73` |
 | **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | **已修** | `14810bf` |
 | **O8** | 辨识用加速度由 500 Hz 速度二次求导得到（误差 31%），导致辨识结果非物理 | **高** | **根因已定位，未修** | — |
+| **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `cc72155` |
 
 ---
 
@@ -902,6 +903,51 @@ CSV 的时间列**不均匀**：`dt` 均值 0.002000 s（≈500 Hz），但 std 
 
 ---
 
+### O9 measure launch 的覆盖参数全部静默失效【中】
+
+**现象**：下面这条命令**看起来一切正常**——launch 起得来、测量跑得完、退出码 0——
+但 CSV 仍然落在 `ros2_controller.yaml` 的默认路径，测量时长仍然是默认的 10 s：
+
+```bash
+ros2 launch launch_pack arm_measure_sim.launch.py \
+    csv_file_path:=/tmp/foo.csv trajectory_period:=120.0
+```
+
+**根因**：launch 把这些覆盖项拼成一个字典传给 `Node(parameters=[...])`。launch_ros 会把
+字典序列化成 **node key 为 `/**`** 的 params 文件：
+
+```yaml
+/**:
+  ros__parameters:
+    measure_csv_file_path: /tmp/foo.csv
+    measure_trajectory_period: 120.0
+```
+
+而 `controller_manager` 只把**本节点参数里 `arm_controller.*` 前缀**的项转给控制器
+（`ros2_controller.yaml` 用的正是 `arm_controller:` + `ros__parameters:` 这种显式 node key）。
+`/**` 下的裸参数只会留在 `controller_manager` 自己身上——`ros2 param dump /controller_manager`
+**能看到**它们，控制器却读不到，于是 `auto_declare` 取默认值，**没有任何警告**。
+
+**实测证据（2026-10-12）**
+
+| 传入 | 生成的 params 文件 | 控制器实际生效值 |
+| --- | --- | --- |
+| `csv_file_path:=identify_loop2/meas_smoke.csv` | `/**` 下有该键 | 仍是 `measured_for_identification.csv`（写在进程 CWD） |
+| `trajectory_period:=12.0` | `/**` 下有 `12.0` | 仍是 10.0（CSV 4998 行 ≈ 10 s） |
+| 改为 node key = `arm_controller` 的补充 params 文件 | — | **6000 行 = 12 s，CSV 落在指定路径** ✔ |
+
+**修法**：launch 改用 `OpaqueFunction`，在启动时生成一份 node key 为 `arm_controller` 的补充
+params 文件，放在 `ParameterFile(ros2_controller.yaml)` **之后**（同名参数后者优先）。
+见 `src/launch_pack/launch/arm_measure_sim.launch.py`。
+
+**为什么值得单独记一条**：这是 C6 / 教训 12 的又一实例，而且比 C6 更隐蔽——C6 是"参数没声明"，
+这次**参数声明了、YAML 里也写了、params 文件内容也完全正确**，错的只是 params 文件的 node key。
+只检查"我传进去了"永远发现不了，必须查"目标节点读到了什么"（`ros2 param get`）。
+
+**状态**：已修（`cc72155`）。
+
+---
+
 ## 3. 设计约束（非缺陷，但必须遵守）
 
 ### C1 零位形处于工作空间边界，不要从那里直接做笛卡尔运动
@@ -997,6 +1043,7 @@ reset:  gravity_compensation=true (param found=no)
 | `14810bf` | 通用保持路径加入重力前馈，消除笛卡尔起点塌陷（O7） |
 | `f8b61c1` | `identify_arm` 适配 vendored FIGAROH 0.6.0 的签名，不再 TypeError（O8 的前置缺陷） |
 | `52cc021` | 修复包内绝对导入被误判为"求解器缺失"、PSD 校验容差过严（O8 的前置缺陷） |
+| `cc72155` | measure launch 的覆盖参数改为 arm_controller 专属 params 文件，不再静默失效（O9） |
 
 ---
 
@@ -1042,6 +1089,15 @@ reset:  gravity_compensation=true (param found=no)
     用管线算出的 `dq̈` 正演出完美力矩再跑辨识，残差 5.5e-14——这证明了回归器、QR 分解、
     基参数机制都对，却**看不见** `dq̈` 本身 31% 的误差，因为正演和辨识用的是同一个错的
     `dq̈`。要验证一个输入，必须找**不依赖它**的参照（这里是反解得到的加速度）。
+
+### O9 补充的教训
+
+16. **"我传进去了"不是判据，"目标节点读到了什么"才是**（O9）。这次传给 launch 的 params 文件
+    内容**逐字正确**（`/**` 下 `measure_trajectory_period: 12.0` 写得明明白白），
+    但控制器读到的仍是 YAML 默认值——错的只是 params 文件的 **node key**。
+    验证方式必须落到目标节点上：`ros2 param get <node> <param>`，或者干脆用**结果**验证
+    （这里是 CSV 行数：12 s 应该 6000 行，实测 4998 行 ≈ 10 s）。
+    只检查中间产物（"文件里写了"）等于没检查。
 
 ---
 

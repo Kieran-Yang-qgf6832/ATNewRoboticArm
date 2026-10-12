@@ -14,3 +14,6 @@ __pycache__/
 # 迭代辨识实验的产物（30 次迭代的 URDF 与报告，见 identify_loop/）
 /identified_iter_*.urdf
 /identify_loop/
+# 第二轮迭代（激励轨迹重测 + 辨识，见 identify_loop2/）
+/identified_r2_*.urdf
+/identify_loop2/
