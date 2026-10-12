@@ -52,7 +52,7 @@ O2 / O3 / O4 / O6 / O7 已修；**唯一未修的是 O8**——参数辨识链�
 | **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | **已修** | `c7abf73` |
 | **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | **已修** | `14810bf` |
 | **O8** | 辨识用加速度由 500 Hz 速度二次求导得到（误差 31%），导致辨识结果非物理 | **高** | **根因已定位，未修** | — |
-| **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `cc72155` |
+| **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `00001b8` |
 
 ---
 
@@ -944,7 +944,7 @@ params 文件，放在 `ParameterFile(ros2_controller.yaml)` **之后**（同名
 这次**参数声明了、YAML 里也写了、params 文件内容也完全正确**，错的只是 params 文件的 node key。
 只检查"我传进去了"永远发现不了，必须查"目标节点读到了什么"（`ros2 param get`）。
 
-**状态**：已修（`cc72155`）。
+**状态**：已修（`00001b8`）。
 
 ---
 
@@ -1043,7 +1043,7 @@ reset:  gravity_compensation=true (param found=no)
 | `14810bf` | 通用保持路径加入重力前馈，消除笛卡尔起点塌陷（O7） |
 | `f8b61c1` | `identify_arm` 适配 vendored FIGAROH 0.6.0 的签名，不再 TypeError（O8 的前置缺陷） |
 | `52cc021` | 修复包内绝对导入被误判为"求解器缺失"、PSD 校验容差过严（O8 的前置缺陷） |
-| `cc72155` | measure launch 的覆盖参数改为 arm_controller 专属 params 文件，不再静默失效（O9） |
+| `00001b8` | measure launch 的覆盖参数改为 arm_controller 专属 params 文件，不再静默失效（O9） |
 
 ---
 
