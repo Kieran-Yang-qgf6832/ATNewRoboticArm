@@ -291,8 +291,12 @@ def identify(
         else:
             hint = (
                 "SDP 求解失败。最常见的原因是问题不可行：辨识出的基参数与逐杆物理约束"
-                "（伪惯量 PSD）无法同时满足，属数据/模型一致性问题，不是缺依赖。"
-                "可改用 method: nullspace + physical_projection: true 走 LMI 投影，"
+                "（伪惯量 PSD）无法同时满足——不是缺依赖。"
+                "本项目已定位过这个现象：根因是辨识用的**加速度**不准（CSV 无加速度列，"
+                "只能对 500 Hz 记录速度二次求导，相对误差 31.5%），惯量项被污染后把参数"
+                "推出了可行集，详见 docs/bugs.md O8。"
+                "可改用 method: nullspace + physical_projection: true 走 LMI 投影拿到一个"
+                "物理可行解（但实测会退化成质点，只能当诊断），"
                 "并检查报告里的 physical_projection 与 reconstruction_base_residual_after_projection。"
             )
         raise RuntimeError(
