@@ -290,6 +290,10 @@ ros2 launch launch_pack arm_real.launch.py
 #    （任务序列定义在 tasks/config/measure.yaml，控制器侧由 measure 状态执行）
 ros2 launch launch_pack arm_measure_sim.launch.py
 
+#    常用参数：csv_file_path / trajectory_period / trajectory_repeat_cnt /
+#    move_to_start_duration / controller_urdf_path（控制器内部模型，只影响激励轨迹
+#    生成，被控对象仍是真值 URDF）/ step_timeout（测量变长时要放大）
+
 # 2) 离线辨识
 ros2 run parameter_identify identify_arm \
   --csv measured_for_identification.csv \

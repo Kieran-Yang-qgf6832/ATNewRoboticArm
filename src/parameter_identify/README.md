@@ -111,8 +111,32 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 ```
 
 CSV 默认落在**项目根目录**的 `measured_for_identification.csv`（launch 会算出绝对路径并
-传给控制器）。换位置用 `csv_file_path:=/path/to/foo.csv`；只想起仿真、测量另行触发用
-`run_measure:=false`，然后：
+传给控制器）。常用 launch 参数：
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `csv_file_path` | `<项目根>/measured_for_identification.csv` | 测量 CSV 输出路径 |
+| `controller_urdf_path` | `arm_model` 里的真值 URDF | **控制器内部模型**（激励轨迹生成用）；被控对象仍由 `robot_description` 决定 |
+| `trajectory_period` | `10.0` | 激励轨迹周期（秒） |
+| `trajectory_repeat_cnt` | `1` | 重复次数；测量时长 = `move_to_start_duration + period × repeat_cnt` |
+| `move_to_start_duration` | `3.0` | 移动到激励轨迹起点的时长 |
+| `step_timeout` | `30.0` | 任务层单步骤超时；测量比 `measure.yaml` 的 `duration` 长时**必须放大** |
+
+例：用上一轮辨识的模型生成 120 s 激励轨迹：
+
+```bash
+ros2 launch launch_pack arm_measure_sim.launch.py \
+    controller_urdf_path:=$PWD/identified_iter_30.urdf \
+    trajectory_period:=120.0 csv_file_path:=$PWD/identify_loop2/csv/meas_01.csv \
+    step_timeout:=900.0
+```
+
+> 这些参数一度**全部静默失效**（params 文件的 node key 写成了 `/**`，controller_manager
+> 只转发 `arm_controller.*` 前缀的项）——见 [docs/bugs.md O9](../../docs/bugs.md)。
+> 改完参数请用 `ros2 param get /arm_controller measure_trajectory_period` 或 CSV 行数
+> （500 Hz 下 120 s 应约 60000 行）验证它真的生效。
+
+只想起仿真、测量另行触发用 `run_measure:=false`，然后：
 
 ```bash
 ros2 run tasks task_runner --ros-args \

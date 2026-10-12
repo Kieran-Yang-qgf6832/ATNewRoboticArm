@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）。F 系列与 O1–O7 已闭环，**O8（参数辨识数据一致性）未修**。
+> `auto_declare` 等）。F 系列与 O1–O7、O9 已闭环，**O8（参数辨识数据一致性）未修**。
 
 ## 常用命令
 
@@ -153,6 +153,11 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   后果：基参数偏离先验 18.5%，`sdp` 不可行；投影路线虽能写出文件却把连杆退化成质点。
   **修法**：让 measure 把加速度记录进 CSV（`acc_*` 列 + `acceleration_source: recorded`，
   格式与 loader 都已支持）。详见 `docs/bugs.md` O8。
+- **O9 已修**（`00001b8`）：`arm_measure_sim.launch.py` 的覆盖参数（`csv_file_path` /
+  `trajectory_period` / …）一度**全部静默失效**——launch 把它们写成 node key 为 `/**` 的
+  params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
+  `OpaqueFunction` 生成 node key 为 `arm_controller` 的补充文件。**验证参数是否生效要查
+  目标节点（`ros2 param get /arm_controller <name>`）或结果（CSV 行数），不能只看"文件里写了"。**
 - `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
   `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
@@ -165,7 +170,10 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 7 条序列只用到
   `reset` / `idel` / `joint_move` / `cart_move` / `tool` / `wait` 六类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
-  **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录）。
+  **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
+  2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。
+  该 launch 支持 `csv_file_path` / `controller_urdf_path` / `trajectory_period` /
+  `trajectory_repeat_cnt` / `move_to_start_duration` / `step_timeout` 覆盖（见 O9）。
   仍未验证的是 `admittance`（对应 `admittance_move` 步骤）与 `teach_pendant`（`teach`）；
   `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入。
 
