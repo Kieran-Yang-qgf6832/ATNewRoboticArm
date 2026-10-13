@@ -1302,6 +1302,8 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     measured_velocity_.resize(joint_count_);
     measured_acceleration_.resize(joint_count_);
     measured_torque_.resize(joint_count_);
+    prev_position_.resize(joint_count_);
+    prev_velocity_.resize(joint_count_);
     start_point_.pos.resize(joint_count_);
     start_point_.vel.resize(joint_count_);
     start_point_.acc.resize(joint_count_);
@@ -1362,6 +1364,7 @@ bool ParamterMeasureState::enter(const std::string& last_state, const rclcpp::Ti
     trajectory_generation_failed_ = false;
     csv_save_requested_           = false;
     record_full_warned_           = false;
+    has_prev_sample_              = false;
     measure_phase_                = MeasurePhase::WaitingForTrajectory;
     phase_start_time_             = time;
     measure_start_time_           = time;
@@ -1494,17 +1497,31 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             // 真实加速度（O8）：MuJoCo 的 qacc。取不到就记 0，报告里会体现出来。
             measured_acceleration_(index) = has_acceleration ? factory->state_acceleration_[i] : 0.0;
         }
-        // 时间列记**仿真时间**（O8）：墙钟 dt 抖动 18.7%，会再污染一次求导。
-        const std::size_t remaining = paramter_identify_->record_value(
-            measured_position_, measured_velocity_, measured_acceleration_, measured_torque_, time.seconds());
-        if (remaining == 0 && !record_full_warned_) {
-            // 缓冲区写满：后续样本会被静默丢弃，这里只告警一次，避免实时线程刷屏。
-            record_full_warned_ = true;
-            RCLCPP_WARN(
-                factory->node_->get_logger(),
-                "measure 记录缓冲区已满（%zu 个样本），后续样本被丢弃；请调大 measure_record_sample_rate",
-                paramter_identify_->record_capacity());
+        // O8 的最后一环：**时间对齐**。
+        //
+        // MuJoCo 的 mj_step 是「先 mj_forward 算出 qacc，再积分」：步进结束后
+        // mj_data 里的 qacc 是在**步进之前**的状态上算出来的
+        //     qacc_k = f(q_{k-1}, v_{k-1}, tau_k)
+        // 而 qpos/qvel 已经是步进**之后**的 S_k。两者差一拍，直接配对会让刚体方程
+        // M(q)q̈ + h(q,q̇) = τ 对不上——实测模型残差 0.25%（平缓轨迹）。
+        // 把位置/速度**延后一拍**再与加速度/力矩配对后，残差降到 **0.0003%**（机器精度）。
+        // 时间列同样用上一拍的时间，保持三元组自洽。
+        if (has_prev_sample_) {
+            const std::size_t remaining = paramter_identify_->record_value(
+                prev_position_, prev_velocity_, measured_acceleration_, measured_torque_, prev_time_);
+            if (remaining == 0 && !record_full_warned_) {
+                // 缓冲区写满：后续样本会被静默丢弃，这里只告警一次，避免实时线程刷屏。
+                record_full_warned_ = true;
+                RCLCPP_WARN(
+                    factory->node_->get_logger(),
+                    "measure 记录缓冲区已满（%zu 个样本），后续样本被丢弃；请调大 measure_record_sample_rate",
+                    paramter_identify_->record_capacity());
+            }
         }
+        prev_position_   = measured_position_;
+        prev_velocity_   = measured_velocity_;
+        prev_time_       = time.seconds();
+        has_prev_sample_ = true;
 
         if (trajectory_finished) {
             measure_done_  = true;

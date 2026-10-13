@@ -17,3 +17,6 @@ __pycache__/
 # 第二轮迭代（激励轨迹重测 + 辨识，见 identify_loop2/）
 /identified_r2_*.urdf
 /identify_loop2/
+# 第三轮迭代（O8 + O10 修好后重跑，见 identify_loop3/）
+/identified_r3_*.urdf
+/identify_loop3/

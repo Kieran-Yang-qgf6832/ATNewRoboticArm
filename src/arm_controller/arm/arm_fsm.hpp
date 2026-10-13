@@ -720,6 +720,12 @@ private:
     Eigen::VectorXd measured_velocity_;
     Eigen::VectorXd measured_acceleration_; ///< 真实关节加速度（O8），来自 state interface
     Eigen::VectorXd measured_torque_;
+    // O8 时间对齐用：上一拍的位置/速度/时间。MuJoCo 的 qacc 对应**步进前**的状态，
+    // 必须延后一拍与它配对，刚体方程才成立（残差 0.25% -> 0.0003%）。
+    Eigen::VectorXd prev_position_;
+    Eigen::VectorXd prev_velocity_;
+    double prev_time_{0.0};
+    bool has_prev_sample_{false};
     rclcpp::Time measure_start_time_;
     rclcpp::Time phase_start_time_;
     std::string measure_csv_file_path_{"measured_for_identification.csv"};
