@@ -154,6 +154,14 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   −0.151 → −1.1e-10（物理校验通过）。
   注意 SDP 仍会判不可行——真值模型本身贴在可行集边界上（link5 伪惯量最小特征值 6.4e-6），
   所以默认 `physical_projection: true`。详见 `docs/bugs.md` O8。
+  收尾还修了一处**采样时刻对齐**（`e08d942`）：MuJoCo 的 `qacc` 对应**步进前**的状态，
+  而 `qpos/qvel` 是步进后的，直接配对让模型残差停在 0.25%；把位置/速度延后一拍配对后
+  降到 **0.0003%**。
+- **C7（做参数辨识前必读）**：**不要把辨识输出当成下一轮辨识的先验。** 可辨识的只有 36 个
+  基参数，剩下 24 维落在零空间、完全由先验填充，所以把输出喂回去等于把误差原样搬运且只增
+  不减。30 轮实测参数误差 **0.29% → 272.7%**、总质量 6.80 → 18.39 kg，而 **rmse 全程都很好**
+  （1e-4 ~ 2.2），光看 rmse 发现不了。同一份数据换成"真值 URDF 当先验"只差 **0.0002%**。
+  详见 `docs/bugs.md` C7。
 - **O9 已修**（`00001b8`）：`arm_measure_sim.launch.py` 的覆盖参数（`csv_file_path` /
   `trajectory_period` / …）一度**全部静默失效**——launch 把它们写成 node key 为 `/**` 的
   params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
