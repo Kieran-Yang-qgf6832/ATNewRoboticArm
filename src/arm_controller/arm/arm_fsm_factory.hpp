@@ -132,6 +132,16 @@ public:
     std::vector<robot_msgs::msg::MotorState> state_;
 
     /**
+     * @brief 当前关节加速度缓存（只读）
+     * @note 由 ArmController::update() 从 state interface 的 acceleration 读到；
+     *       MuJoCo 仿真里是真实 qacc，实机若不上报则恒为 0。
+     *       参数辨识用它替代"对记录速度二次求导"（docs/bugs.md O8）。
+     * @see ArmController::update
+     * @see ParamterMeasureState
+     */
+    std::vector<double> state_acceleration_;
+
+    /**
      * @brief 当前关节指令数组
      * @note 由各状态的 run() 方法写入，最终下发到硬件或仿真器
      * @see robot_msgs::msg::MotorCmd

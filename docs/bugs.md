@@ -51,7 +51,7 @@ O2 / O3 / O4 / O6 / O7 已修；**唯一未修的是 O8**——参数辨识链�
 | **O4** | launch 经 `/robot_description` 话题取 URDF，易静默加载错模型 | 中 | **已修** | `ac474f0` |
 | **O6** | 复位静差超容差后回退 idel，重力静差被叠加成 12.4° 偏置 | **高** | **已修** | `c7abf73` |
 | **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | **已修** | `14810bf` |
-| **O8** | 辨识用加速度由 500 Hz 速度二次求导得到（误差 31%），导致辨识结果非物理 | **高** | **根因已定位，未修** | — |
+| **O8** | 辨识用加速度由 500 Hz 速度二次求导得到（误差 31%），导致辨识结果非物理 | **高** | **已修** | `COMMIT_O8` |
 | **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `00001b8` |
 | **O10** | 激励轨迹不可复现、质量波动极大（CMA-ES 随机种子取自时钟、600 次评估对 36 维欠收敛） | **高** | **已修** | `06af06d` |
 
@@ -899,8 +899,48 @@ CSV 的时间列**不均匀**：`dt` 均值 0.002000 s（≈500 Hz），但 std 
      注意解析加速度是**指令值**，其精度取决于跟踪质量。
 2. 降低激励带宽或提高采样率——治标，且会牺牲激励信息量。
 
-**状态**：已定位根因（加速度估计），**未修**。修法是让 measure 记录加速度（见上）；
-在此之前 `identify.yaml` 保持"失败就报错"，不默认切到投影路线。
+### 修法（2026-10-13 已实施，commit `COMMIT_O8`）
+
+思路：**别再去"算"加速度，直接把它记下来**。仿真里 MuJoCo 每步都算出了真实的
+`qacc`，只是从来没导出过；同时把时间列从墙钟换成**仿真时间**（墙钟 dt 抖动 18.7%，
+按它求导会再污染一次）。
+
+1. **`mujoco_ros2_control` 导出关节加速度**
+   - `ControlState` 增加 `qacc`，物理循环里随 `qpos/qvel` 一起快照；
+   - `MuJoCoActuatorData` / `URDFJointData` 各加一个 `acceleration_interface`，
+     在 `read()` 里从快照填、在 `actuator_state_to_joint_state()` 里随其它状态一起传；
+   - `export_state_interfaces()` 增加 `HW_IF_ACCELERATION` 分支。
+2. **URDF**：6 个关节各加 `<state_interface name="acceleration"/>`。
+3. **`arm_controller`**
+   - `state_interface_configuration()` 追加 `<joint>/acceleration`；
+   - `update()` 的步长从写死的 3 改成 `state_interfaces_.size() / joints_name.size()`
+     （加了第 4 个接口同一套代码仍然成立），并把加速度存进
+     `FSMArmControlFactory::state_acceleration_`；
+   - `ParamterIdentify` 增加 `acc` 缓冲，`record_value()` 收加速度与**仿真时间**，
+     CSV 表头写成 `time,pos_*,vel_*,acc_*,torque_*`；缓冲区写满时告警一次
+     （原来 `record_value()` 的返回值被直接丢掉，会静默丢样本）。
+4. **配置**：`acceleration_source: recorded`；`physical_projection: true`。
+5. **`identify_arm`**：投影成功且物理校验通过时不再因为"原始 SDP 报 error"而拒绝写文件
+   （旧逻辑会在投影已经修好之后仍然抛错），并改掉那段已经过时的报错文案。
+
+**验证（2026-10-13，120 s 测量 / seed=20261013）**
+
+| 指标 | 修前 | 修后 |
+| --- | --- | --- |
+| 加速度来源 | 对 vel 二次求导 | CSV `acc_*` 列（MuJoCo `qacc`） |
+| 记录的 qacc vs 记录速度的数值微分 | — | **0.93%**（自洽，说明记的就是真值） |
+| CSV 时间列 dt 抖动 | std 18.7% | **1.4%**（改用仿真时间） |
+| 模型残差 ‖M·q̈+h−τ‖/‖τ‖ | **31.5%** | **0.37%** |
+| 辨识残差 rmse | 1.06 N·m | **0.018 N·m**（corr 0.999998） |
+| 参数误差 ‖θ−θ_true‖/‖θ_true‖ | **11.56%** | **0.39%** |
+| 伪惯量最小特征值 | −0.151（非物理） | **−1.1e-10**（`physical_validation: passed: true`） |
+
+**顺带查清的一件事**：修好加速度之后 SDP 仍然判不可行——**不是数据错**，而是这台机器人的
+真值模型本身就贴在物理可行集边界上（link5 的伪惯量最小特征值只有 **6.4e-6**）。任何估计
+误差都会把最小二乘解推到可行集之外。所以默认配置打开 `physical_projection`：LMI 投影把
+它拉回可行集内，实测投影后与真值只差 **0.39%**，**不会**退化成质点（旧数据下才会）。
+
+**状态**：已修（`COMMIT_O8`）。
 
 ---
 
@@ -1175,6 +1215,7 @@ reset:  gravity_compensation=true (param found=no)
 | `52cc021` | 修复包内绝对导入被误判为"求解器缺失"、PSD 校验容差过严（O8 的前置缺陷） |
 | `00001b8` | measure launch 的覆盖参数改为 arm_controller 专属 params 文件，不再静默失效（O9） |
 | `06af06d` | 激励轨迹：种子可固定、提高 CMA-ES 评估次数、加可行缩放兜底（O10） |
+| `COMMIT_O8` | measure 记录 MuJoCo 真实 qacc 与仿真时间，辨识参数误差 11.6% → 0.39%（O8） |
 
 ---
 

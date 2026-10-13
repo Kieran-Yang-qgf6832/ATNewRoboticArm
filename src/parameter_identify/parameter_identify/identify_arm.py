@@ -282,26 +282,27 @@ def identify(
         physical_module=physical_module,
     )
     require_physical = bool(recon_cfg.get("require_physical", True))
-    if reconstruction_status != "ok" and require_physical:
+    # 物理投影成功后模型已经物理可行——此时 reconstruction_status 仍是原始 SDP 的
+    # "error"，但那只是"SDP 没直接给出解"，不该再据此拒绝写文件（docs/bugs.md O8）。
+    projection_provided_physical_model = bool(physical_projection_report) and not physical_issues
+    if reconstruction_status != "ok" and require_physical and not projection_provided_physical_model:
         # 区分两种失败，别再把"求解器没装"和"SDP 不可行"混成一句话——后者才是常见情形，
         # 而它的含义是"辨识出的基参数不在物理可行集内"，与 picos 装没装无关
         # （docs/bugs.md 教训 7：错误信息必须指对方向）。
         if reconstruction_status == "solver_missing":
-            hint = "picos/cvxopt 未安装或不可用；装好后重试，或改用 method: nullspace + physical_projection: true。"
+            hint = "picos/cvxopt 未安装或不可用；装好后重试，或打开 reconstruction.physical_projection。"
         else:
             hint = (
-                "SDP 求解失败。最常见的原因是问题不可行：辨识出的基参数与逐杆物理约束"
-                "（伪惯量 PSD）无法同时满足——不是缺依赖。"
-                "本项目已定位过这个现象：根因是辨识用的**加速度**不准（CSV 无加速度列，"
-                "只能对 500 Hz 记录速度二次求导，相对误差 31.5%），惯量项被污染后把参数"
-                "推出了可行集，详见 docs/bugs.md O8。"
-                "可改用 method: nullspace + physical_projection: true 走 LMI 投影拿到一个"
-                "物理可行解（但实测会退化成质点，只能当诊断），"
-                "并检查报告里的 physical_projection 与 reconstruction_base_residual_after_projection。"
+                "SDP 求解失败：辨识出的基参数与逐杆物理约束（伪惯量 PSD）无法同时满足。"
+                "注意这**不一定是数据错**——本机器人的真值模型本身就贴在物理可行集的边界上"
+                "（link5 伪惯量最小特征值只有 6.4e-6），任何估计误差都会把最小二乘解推到"
+                "可行集之外。打开 reconstruction.physical_projection: true 走 LMI 投影即可："
+                "它把参数拉回可行集内，实测投影后与真值只差 1.6%，不会退化成质点。"
+                "详见 docs/bugs.md O8。"
             )
         raise RuntimeError(
             f"Physical reconstruction did not complete successfully: status={reconstruction_status}. {hint} "
-            "（诊断用：reconstruction.require_physical=false 只写报告、不写 URDF。）"
+            "（诊断用：reconstruction.require_physical=false 会照写 URDF，只把问题记进报告的 physical_validation。）"
         )
     if physical_issues and require_physical:
         issue_text = "; ".join(

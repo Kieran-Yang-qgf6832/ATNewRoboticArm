@@ -27,6 +27,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
     <joint name="joint2">
@@ -34,6 +37,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
     <joint name="joint3">
@@ -41,6 +47,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
     <joint name="joint4">
@@ -48,6 +57,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
     <joint name="joint5">
@@ -55,6 +67,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
     <joint name="joint6">
@@ -62,6 +77,9 @@
       <state_interface name="position"/>
       <state_interface name="velocity"/>
       <state_interface name="effort"/>
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration"/>
     </joint>
 
 </ros2_control>

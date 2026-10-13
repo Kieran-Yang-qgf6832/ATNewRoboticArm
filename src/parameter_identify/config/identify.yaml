@@ -9,7 +9,11 @@ data:
   decimate: false
   decimation_factor: 10
   max_samples: 0
-  acceleration_source: computed
+  # recorded：直接用 CSV 里的 acc_* 列（measure 记录的 MuJoCo 真实 qacc，docs/bugs.md O8）。
+  # 旧 CSV 没有 acc_* 列时会**显式报错**，不会静默退回求导——那时请显式改成 computed。
+  # computed：对 vel_* 做 Savitzky-Golay 平滑再求导，实测相对误差 ~31%，会把辨识结果
+  #           推出物理可行集，只在拿不到真实加速度时用。
+  acceleration_source: recorded
   acceleration_smoothing_window: 11
   acceleration_smoothing_polyorder: 3
 
@@ -24,16 +28,16 @@ identification:
 reconstruction:
   enabled: true
   # auto：装了 picos 走 sdp，没装退回 nullspace。
-  # 本项目**当前这份测量数据**用 sdp 会判定不可行（辨识出的基参数 phi_base 距物理可行集
-  # 约 0.37，而 ‖phi_base‖≈1.98；只留 PSD 可行、只留等式可行、两者同时不可行），
-  # 根因已定位：辨识用的**加速度**由 500 Hz 记录速度二次求导得到，相对误差 31.5%
-  # （模型与力矩都验证无误——反解加速度满足 ‖M·a + bias − τ‖ = 1.4e-16，详见 docs/bugs.md O8）。
-  # 所以这里保持"失败就报错"，不静默降级。
-  # 想强行拿到一个物理可行的模型可以改成 method: nullspace + physical_projection: true，
-  # 但实测那样会把连杆投影成质点（惯量从 1e-3 塌到 1e-10），不是可用模型——详见 README。
+  #
+  # 2026-10-13 更新（docs/bugs.md O8 修复后）：测量已经记录**真实加速度**，残差从 31.5%
+  # 降到 0.37%，辨识参数与真值只差 0.83%。但 sdp 仍会判不可行——**不是数据错**，而是这台
+  # 机器人的真值模型本身就贴在物理可行集边界上（link5 伪惯量最小特征值只有 6.4e-6），
+  # 任何估计误差都会把最小二乘解推到可行集之外。
+  # 所以默认打开 physical_projection：LMI 投影把它拉回可行集内，实测投影后与真值差 1.6%，
+  # **不会**退化成质点（旧数据下才会）。投影成功且物理校验通过时不再报错。
   method: auto
   prior_source: urdf
-  physical_projection: false
+  physical_projection: true
   # 下面这几组开关（strict_base_constraints / base_residual_weight / shape_prior /
   # central_moment_prior / tensor_trust_region）是**更新版 FIGAROH** 才有的；本仓库 vendored
   # 的是 0.6.0，重建入口不接受它们。identify_arm 会按实际签名裁剪、打 WARN，并记进报告的

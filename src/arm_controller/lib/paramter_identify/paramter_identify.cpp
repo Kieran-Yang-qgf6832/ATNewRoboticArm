@@ -26,17 +26,19 @@ void ParamterIdentify::application_memory(int param_num, int dof) {
     dof_         = dof > 0 ? dof : 0;
 
     if (param_num <= 0 || dof_ == 0) {
-        time_point.clear();
+        time_seconds.clear();
         pos.clear();
         vel.clear();
+        acc.clear();
         torque.clear();
         return;
     }
 
     const auto buffer_size = static_cast<std::size_t>(param_num);
-    time_point.assign(buffer_size, Clock::time_point{});
+    time_seconds.assign(buffer_size, 0.0);
     pos.assign(buffer_size, Eigen::VectorXd::Zero(dof_));
     vel.assign(buffer_size, Eigen::VectorXd::Zero(dof_));
+    acc.assign(buffer_size, Eigen::VectorXd::Zero(dof_));
     torque.assign(buffer_size, Eigen::VectorXd::Zero(dof_));
 }
 
@@ -51,19 +53,23 @@ bool ParamterIdentify::reset_recording() {
 
 size_t ParamterIdentify::record_value(const Eigen::VectorXd& pos,
                                       const Eigen::VectorXd& vel,
-                                      const Eigen::VectorXd& torque) {
+                                      const Eigen::VectorXd& acc,
+                                      const Eigen::VectorXd& torque,
+                                      double time_seconds) {
     if (save_requested_.load(std::memory_order_acquire) || record_index >= this->pos.size() || dof_ == 0) {
         return 0;
     }
 
-    if (pos.size() != dof_ || vel.size() != dof_ || torque.size() != dof_) {
+    if (pos.size() != dof_ || vel.size() != dof_ || acc.size() != dof_ || torque.size() != dof_) {
         return this->pos.size() - record_index;
     }
 
-    time_point[record_index]   = Clock::now();
-    this->pos[record_index]    = pos;
-    this->vel[record_index]    = vel;
-    this->torque[record_index] = torque;
+    // 时间列记仿真时间而不是墙钟（O8）：墙钟 dt 标准差 18.7%，按它求导会额外放大误差。
+    this->time_seconds[record_index] = time_seconds;
+    this->pos[record_index]          = pos;
+    this->vel[record_index]          = vel;
+    this->acc[record_index]          = acc;
+    this->torque[record_index]       = torque;
     ++record_index;
 
     return this->pos.size() - record_index;
@@ -98,6 +104,10 @@ bool ParamterIdentify::save_succeeded() const {
 
 std::size_t ParamterIdentify::record_count() const {
     return record_index;
+}
+
+std::size_t ParamterIdentify::record_capacity() const {
+    return pos.size();
 }
 
 void ParamterIdentify::save_worker_func() {
@@ -149,25 +159,34 @@ bool ParamterIdentify::write_csv_file(std::string_view file_name, std::size_t sa
     for (Eigen::Index joint = 0; joint < dof_; ++joint) {
         stream << ",vel_" << joint;
     }
+    // 真实加速度列（O8）：csv_loader 用 acceleration_source: recorded 直接读它们，
+    // 不再对速度做二次求导。
+    for (Eigen::Index joint = 0; joint < dof_; ++joint) {
+        stream << ",acc_" << joint;
+    }
     for (Eigen::Index joint = 0; joint < dof_; ++joint) {
         stream << ",torque_" << joint;
     }
     stream << '\n';
 
-    const std::size_t count = std::min({sample_count, time_point.size(), pos.size(), vel.size(), torque.size()});
+    const std::size_t count =
+        std::min({sample_count, time_seconds.size(), pos.size(), vel.size(), acc.size(), torque.size()});
     if (count == 0) {
         return static_cast<bool>(stream);
     }
 
-    const Clock::time_point start_time = time_point[0];
+    // 时间列以第一个样本为 0，单位秒，来自**仿真时间**（O8）。
+    const double start_time = time_seconds[0];
     for (std::size_t sample = 0; sample < count; ++sample) {
-        const double time_s = std::chrono::duration<double>(time_point[sample] - start_time).count();
-        stream << time_s;
+        stream << (time_seconds[sample] - start_time);
         for (Eigen::Index joint = 0; joint < dof_; ++joint) {
             stream << ',' << pos[sample](joint);
         }
         for (Eigen::Index joint = 0; joint < dof_; ++joint) {
             stream << ',' << vel[sample](joint);
+        }
+        for (Eigen::Index joint = 0; joint < dof_; ++joint) {
+            stream << ',' << acc[sample](joint);
         }
         for (Eigen::Index joint = 0; joint < dof_; ++joint) {
             stream << ',' << torque[sample](joint);

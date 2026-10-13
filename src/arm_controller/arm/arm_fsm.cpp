@@ -1300,6 +1300,7 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     excitation_end_position_.resize(joint_count_);
     measured_position_.resize(joint_count_);
     measured_velocity_.resize(joint_count_);
+    measured_acceleration_.resize(joint_count_);
     measured_torque_.resize(joint_count_);
     start_point_.pos.resize(joint_count_);
     start_point_.vel.resize(joint_count_);
@@ -1360,6 +1361,7 @@ bool ParamterMeasureState::enter(const std::string& last_state, const rclcpp::Ti
     measure_done_                 = false;
     trajectory_generation_failed_ = false;
     csv_save_requested_           = false;
+    record_full_warned_           = false;
     measure_phase_                = MeasurePhase::WaitingForTrajectory;
     phase_start_time_             = time;
     measure_start_time_           = time;
@@ -1483,13 +1485,26 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             return false;
         }
 
+        const bool has_acceleration = factory->state_acceleration_.size() == joint_count_;
         for (std::size_t i = 0; i < joint_count_; ++i) {
-            const auto index          = static_cast<Eigen::Index>(i);
-            measured_position_(index) = factory->state_[i].position;
-            measured_velocity_(index) = factory->state_[i].velocity;
-            measured_torque_(index)   = factory->state_[i].torque;
+            const auto index              = static_cast<Eigen::Index>(i);
+            measured_position_(index)     = factory->state_[i].position;
+            measured_velocity_(index)     = factory->state_[i].velocity;
+            measured_torque_(index)       = factory->state_[i].torque;
+            // 真实加速度（O8）：MuJoCo 的 qacc。取不到就记 0，报告里会体现出来。
+            measured_acceleration_(index) = has_acceleration ? factory->state_acceleration_[i] : 0.0;
         }
-        paramter_identify_->record_value(measured_position_, measured_velocity_, measured_torque_);
+        // 时间列记**仿真时间**（O8）：墙钟 dt 抖动 18.7%，会再污染一次求导。
+        const std::size_t remaining = paramter_identify_->record_value(
+            measured_position_, measured_velocity_, measured_acceleration_, measured_torque_, time.seconds());
+        if (remaining == 0 && !record_full_warned_) {
+            // 缓冲区写满：后续样本会被静默丢弃，这里只告警一次，避免实时线程刷屏。
+            record_full_warned_ = true;
+            RCLCPP_WARN(
+                factory->node_->get_logger(),
+                "measure 记录缓冲区已满（%zu 个样本），后续样本被丢弃；请调大 measure_record_sample_rate",
+                paramter_identify_->record_capacity());
+        }
 
         if (trajectory_finished) {
             measure_done_  = true;

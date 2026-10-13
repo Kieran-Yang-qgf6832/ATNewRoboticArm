@@ -1,11 +1,11 @@
 # RoboticArm
 
-基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流——**辨识部分当前不可用，见下方「当前状态」**。
+基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
 > **当前状态**：仿真链路已端到端跑通并验证；**实机从未运行过**。
-> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)。
-> **参数辨识暂不可用**：测量链路已跑通，但辨识用的加速度由 500 Hz 速度二次求导得到
-> （相对误差 31.5%），辨识结果非物理——见 [O8](docs/bugs.md) 与
+> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O10 已全部闭环。
+> **参数辨识链路可用**：measure 记录 MuJoCo 的真实关节加速度（`acc_*` 列）与仿真时间，
+> 辨识出的模型物理可行，参数误差 **0.39%**——见 [O8](docs/bugs.md) 与
 > [`src/parameter_identify/README.md`](src/parameter_identify/README.md)。
 
 ## 特性
@@ -18,8 +18,8 @@
 - **模型无关的计算库**：`ArmSolve → IKSolver → ModelBase + TaskMapping` 分层，任务空间语义与机器人模型数学解耦。
 - **基于 Pinocchio 的刚体动力学**：正运动学、几何雅可比、RNEA 逆动力学、关节限位。
 - **轨迹插值**：五次 Hermite/Bezier 段插值，保证位置、速度、加速度连续。
-- **动力学参数辨识**：激励轨迹生成（傅里叶级数）、CSV 测量记录、离线辨识与 URDF 回写。
-  **注意：当前辨识结果不可用**（加速度估计误差 31.5%，见 O8）。
+- **动力学参数辨识**：激励轨迹生成（傅里叶级数，可复现且保证关节限位可行）、CSV 测量
+  记录（含真实关节加速度）、离线辨识与 URDF 回写。实测参数误差 0.39%、物理校验通过。
 - **实时安全约束**：控制热路径严格无 ROS 参数读写、无动态内存分配。
 - **失效安全**：逆解失败只保持并回退 `idel`，绝不使控制器链失活；不可达的笛卡尔目标在下发前就被拒绝。
 
@@ -270,11 +270,9 @@ ros2 launch launch_pack arm_real.launch.py
 
 ## 参数辨识工作流
 
-> ⚠️ **当前不可用（O8）**：测量链路已跑通、CSV 能正常产出，但**辨识结果非物理**。
-> 根因已定位：辨识用的加速度是对 500 Hz 记录速度二次求导得到的，相对误差 **31.5%**
-> （换任何平滑参数只能到 20~34%）；记录力矩本身与刚体动力学在机器精度上一致
-> （反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`）。修法是让 `measure` 把加速度记录进
-> CSV（格式与 loader 都已支持 `acc_*` / `acceleration_source: recorded`）。
+> ✅ **O8 已修**：测量默认 headless 运行，CSV 直接记录 MuJoCo 的**真实关节加速度**
+> （`acc_*` 列）与**仿真时间**，不再对速度二次求导。实测模型残差 31.5% → **0.37%**，
+> 辨识参数与真值差 **0.39%**，`physical_validation: passed: true`。
 > 详见 [`docs/bugs.md` O8](docs/bugs.md) 与 `src/parameter_identify/README.md`。
 
 参数辨识由三部分协同完成，详细说明见 `src/parameter_identify/README.md`：

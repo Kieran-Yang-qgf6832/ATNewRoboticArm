@@ -535,6 +535,11 @@ std::vector<hardware_interface::StateInterface> MujocoSystemInterface::export_st
         {
           new_state_interfaces.emplace_back(joint.name, state_if.name, &joint.effort_interface.state_);
         }
+        else if (state_if.name == hardware_interface::HW_IF_ACCELERATION)
+        {
+          new_state_interfaces.emplace_back(joint.name, hardware_interface::HW_IF_ACCELERATION,
+                                            &joint.acceleration_interface.state_);
+        }
       }
     }
   }
@@ -924,6 +929,12 @@ hardware_interface::return_type MujocoSystemInterface::read(const rclcpp::Time& 
     actuator_state.position_interface.state_ = control_state_.qpos[actuator_state.mj_pos_adr];
     actuator_state.velocity_interface.state_ = control_state_.qvel[actuator_state.mj_vel_adr];
     actuator_state.effort_interface.state_ = control_state_.qfrc_actuator[actuator_state.mj_vel_adr];
+    // 真实关节加速度（docs/bugs.md O8）：快照在物理线程第一次填充之前可能是空的，
+    // 这里按尺寸保护一下，避免越界。
+    if (static_cast<std::size_t>(actuator_state.mj_vel_adr) < control_state_.qacc.size())
+    {
+      actuator_state.acceleration_interface.state_ = control_state_.qacc[actuator_state.mj_vel_adr];
+    }
     actuator_state_msg_.position.push_back(actuator_state.position_interface.state_);
     actuator_state_msg_.velocity.push_back(actuator_state.velocity_interface.state_);
     actuator_state_msg_.effort.push_back(actuator_state.effort_interface.state_);
@@ -1127,6 +1138,7 @@ void MujocoSystemInterface::actuator_state_to_joint_state()
         joint.position_interface.transmission_passthrough_ = actuator_interface.position_interface.state_;
         joint.velocity_interface.transmission_passthrough_ = actuator_interface.velocity_interface.state_;
         joint.effort_interface.transmission_passthrough_ = actuator_interface.effort_interface.state_;
+        joint.acceleration_interface.transmission_passthrough_ = actuator_interface.acceleration_interface.state_;
       }
     });
   }

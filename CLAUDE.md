@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流——**辨识部分当前不可用（O8）**。
+基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）。F 系列与 O1–O7、O9、O10 已闭环，**O8（辨识数据一致性）未修**。
+> `auto_declare` 等）。F 系列与 O1–O10 已全部闭环。
 
 ## 常用命令
 
@@ -146,13 +146,14 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
-- **O8（唯一未修缺陷，高）**：参数辨识链路已跑通，但辨识不出物理可行的模型。**根因已定位**：
-  辨识用的加速度是对 500 Hz 记录速度二次求导得到的，相对误差 **31.5%**（换任何平滑参数都
-  只能到 20~34%）。模型与力矩都验证无误——反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`，
-  用模型正演的完美力矩能精确复原真值（残差 5.5e-14），`cond(W_base) = 138` 激励也充分。
-  后果：基参数偏离先验 18.5%，`sdp` 不可行；投影路线虽能写出文件却把连杆退化成质点。
-  **修法**：让 measure 把加速度记录进 CSV（`acc_*` 列 + `acceleration_source: recorded`，
-  格式与 loader 都已支持）。详见 `docs/bugs.md` O8。
+- **O8 已修**（`COMMIT_O8`）：辨识用的加速度原本是对 500 Hz 记录速度二次求导得到的
+  （相对误差 31.5%），把辨识结果推出了物理可行集。现在 measure **直接记录 MuJoCo 的真实
+  `qacc`**（`mujoco_ros2_control` 新导出 `acceleration` 状态接口 → `ArmController` 读进
+  `state_acceleration_` → `ParamterIdentify` 写 `acc_*` 列），时间列也从墙钟换成**仿真时间**。
+  实测：模型残差 31.5% → **0.37%**，参数误差 11.56% → **0.39%**，伪惯量最小特征值
+  −0.151 → −1.1e-10（物理校验通过）。
+  注意 SDP 仍会判不可行——真值模型本身贴在可行集边界上（link5 伪惯量最小特征值 6.4e-6），
+  所以默认 `physical_projection: true`。详见 `docs/bugs.md` O8。
 - **O9 已修**（`00001b8`）：`arm_measure_sim.launch.py` 的覆盖参数（`csv_file_path` /
   `trajectory_period` / …）一度**全部静默失效**——launch 把它们写成 node key 为 `/**` 的
   params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
@@ -198,9 +199,9 @@ headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理�
 日志里是 `Running in HEADLESS mode.`（不再有 `Starting the MuJoCo rendering thread...`）。
 实测同一 seed 下 headless 与带界面生成**完全相同**的激励轨迹，数据链路不受影响。
 
-> `sim_speed_factor`（同一处的硬件参数，2.0 = 2 倍速）可以跑得比实时快，但**现在不能用**：
-> CSV 的 `time` 列是墙钟，跑快了 `csv_loader` 仍按墙钟求导，加速度会错。要先让 measure
-> 记录仿真时间（O8）。
+> `sim_speed_factor`（同一处的硬件参数，2.0 = 2 倍速）可以跑得比实时快。O8 修好之后
+> CSV 的 `time` 列已经是**仿真时间**、加速度也是直接记录的，所以它不再会污染辨识数据——
+> 但**尚未实测**（控制周期会从 2 ms 墙钟压到 1 ms，本来就偶发的丢拍可能变多）。
 
 ### 两个容易踩的运维细节
 

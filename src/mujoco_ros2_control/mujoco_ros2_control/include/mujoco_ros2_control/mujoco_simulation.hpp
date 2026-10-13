@@ -280,6 +280,7 @@ public:
     mjtNum time{ 0.0 };
     std::vector<mjtNum> qpos;
     std::vector<mjtNum> qvel;
+    std::vector<mjtNum> qacc;
     std::vector<mjtNum> act;
     std::vector<mjtNum> qfrc_actuator;
     std::vector<mjtNum> sensordata;

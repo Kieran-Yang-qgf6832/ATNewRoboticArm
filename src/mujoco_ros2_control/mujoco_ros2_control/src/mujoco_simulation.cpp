@@ -1379,6 +1379,8 @@ void MujocoSimulation::publish_control_state()
   control_state_.time = mj_data_->time;
   control_state_.qpos.assign(mj_data_->qpos, mj_data_->qpos + mj_model_->nq);
   control_state_.qvel.assign(mj_data_->qvel, mj_data_->qvel + mj_model_->nv);
+  // 关节加速度：MuJoCo 算出的真实 qacc（供参数辨识记录，见 docs/bugs.md O8）
+  control_state_.qacc.assign(mj_data_->qacc, mj_data_->qacc + mj_model_->nv);
   control_state_.act.assign(mj_data_->act, mj_data_->act + mj_model_->na);
   control_state_.qfrc_actuator.assign(mj_data_->qfrc_actuator, mj_data_->qfrc_actuator + mj_model_->nv);
   control_state_.sensordata.assign(mj_data_->sensordata, mj_data_->sensordata + mj_model_->nsensordata);

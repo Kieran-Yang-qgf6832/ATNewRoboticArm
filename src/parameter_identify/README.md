@@ -59,7 +59,7 @@ pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
 | 管线正确性 | 用模型正演出**完美力矩**再跑同一辨识 → 基参数残差 **5.5e-14**，管线本身正确 |
 | 激励条件数 | `cond(W_base) = 138`，激励充分，不是病态 |
 | 模型一致性 | URDF 与 MJCF 的逐杆质量/质心/惯量一致（<0.1%） |
-| **加速度** | 由数据反解 `M(q)·a = τ − bias`，与管线估计值相差 **31.5%** |
+| **加速度** | **已修（O8）**：measure 直接记录 MuJoCo 的真实 `qacc`，模型残差 31.5% → **0.37%** |
 
 反解出的加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`——记录力矩与刚体动力学在机器精度上完全一致。
 所以问题只剩一个：**管线怎么得到加速度**。目前是"对 500 Hz 的记录速度做 Savitzky-Golay
@@ -67,17 +67,33 @@ pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
 20%）。而 `M(q)·q̈` 正是激励过程中力矩的主要成分，20~31% 的加速度误差足以造成基拟合 7.2% 的
 残差、基参数偏离 18.5%，最终推出物理可行集。
 
-**修复方向**：把加速度**记录**进 CSV。CSV 格式与 `csv_loader` 已经支持 `acc_*` 列和
-`acceleration_source: recorded`，缺的只是控制器侧写出来：
+**修法（2026-10-13 已实施，commit `O8`）**：不再"算"加速度，直接把它记下来。
 
-1. 首选 MuJoCo 的真实 `qacc`——当前系统接口只导出 position/velocity/effort，需要给
-   `mujoco_ros2_control` 加状态接口（改动在第三方仓库）；
-2. 次选**激励轨迹的解析加速度**：`FourierTrajectory::acceleration(t)` 已存在，给
-   `ExcitationTrajectory` 加个取值接口、在 `ParamterMeasureState::run()` 里写入 `acc_*`
-   即可（改动全在本仓库）。注意解析值是**指令**加速度，精度取决于跟踪质量。
+1. `mujoco_ros2_control` 增加 `acceleration` 状态接口（`ControlState::qacc` →
+   `MuJoCoActuatorData` / `URDFJointData` → `export_state_interfaces()`）；
+2. URDF 的 6 个关节各加 `<state_interface name="acceleration"/>`；
+3. `ArmController` 声明并读取该接口（步长从写死的 3 改成动态推算），存进
+   `FSMArmControlFactory::state_acceleration_`；
+4. `ParamterIdentify` 把它连同**仿真时间**写进 CSV：`time,pos_*,vel_*,acc_*,torque_*`。
 
-修好之前，`identify.yaml` 保持"失败就报错"，**不静默降级**到投影路线——那样只会得到一个
-看起来 `passed: true`、实则退化的 URDF。
+> 次选方案（激励轨迹的**解析**加速度）实测**不可用**：跟踪误差太大，解析指令加速度与真值
+> 相差 **48.8%**，比原来的数值微分（30.8%）还差。必须用仿真器里的真实 `qacc`。
+
+**修好之后的实测（120 s 测量 / seed=20261013）**
+
+| 指标 | 修前 | 修后 |
+| --- | --- | --- |
+| CSV 时间列 dt 抖动 | std 18.7%（墙钟） | **1.4%**（仿真时间） |
+| 模型残差 ‖M·q̈+h−τ‖/‖τ‖ | 31.5% | **0.37%** |
+| 辨识残差 rmse | 1.06 N·m | **0.018 N·m**（corr 0.999998） |
+| 参数误差 ‖θ−θ_true‖/‖θ_true‖ | 11.56% | **0.39%** |
+| 伪惯量最小特征值 | −0.151（非物理） | **−1.1e-10**（物理校验通过） |
+
+**一个容易误解的点**：即使加速度修好了，SDP 仍然会判 `status=error`。这**不是数据错**——
+这台机器人的真值模型本身就贴在物理可行集边界上（link5 伪惯量最小特征值只有 **6.4e-6**），
+任何估计误差都会把最小二乘解推到可行集之外。所以 `identify.yaml` 默认打开
+`physical_projection: true`：LMI 投影把它拉回可行集内，实测投影后与真值只差 **0.39%**，
+**不会**退化成质点（那是旧数据的表现）。
 
 其他要点：
 
@@ -193,13 +209,18 @@ ros2 run tasks task_runner --ros-args \
 `measure` 状态完成激励轨迹后，会异步保存 CSV。CSV 表头格式为：
 
 ```text
-time,pos_0,pos_1,...,vel_0,vel_1,...,torque_0,torque_1,...
+time,pos_0..pos_5,vel_0..vel_5,acc_0..acc_5,torque_0..torque_5
 ```
+
+- `time` 是**仿真时间**（秒，首样本归零），不是墙钟；
+- `acc_*` 是 **MuJoCo 的真实关节加速度 `qacc`**（O8），不是对速度求导得到的。
+  旧 CSV 没有这几列，`acceleration_source: recorded` 会**显式报错**而不是静默退回求导。
 
 ## 生成辨识结果
 
-> ⚠️ 在当前这份 CSV 上，下面这条命令会**以退出码 1 失败**（`status=error`，SDP 判定不可行），
-> 这是 O8 的表现、不是命令写错。诊断用可把 `require_physical` 设为 `false`。
+> O8 修好后这条命令**正常退出并写出物理可行的 URDF**（报告里
+> `physical_validation.passed: true`）。注意报告里的 `reconstruction_status` 仍是 `error`：
+> 那是原始 SDP 的结果，物理可行性由 `physical_projection` 保证——见上文。
 
 ```bash
 cd <项目根目录>
@@ -231,12 +252,12 @@ PYTHONPATH=src/parameter_identify:$PYTHONPATH python3 -m parameter_identify.iden
 ## 常见参数
 
 - `config/identify.yaml` 的 `model.active_joints` 必须与 URDF 中参与辨识的关节名一致。
-- `data.acceleration_source`：`computed` 由速度列求导（**当前精度不足，见上**）；
-  `recorded` 读取 CSV 的 `acc_*` 列（**修 O8 后应改用这个**）。
-- `data.sample_time`：**应与 CSV 实际采样周期一致**。当前配置写的是 `0.02`（50 Hz），而实测
-  CSV 是 500 Hz（`0.002`），**差了 10 倍**。这条链路暂时不读它（`build_regressor_basic` /
-  `QRDecomposer` 都不读 `ts`），但 vendored FIGAROH 的滤波工具会读
-  （`cutoff = ts * cut_off_frequency_butterworth / 2`），一旦启用那条路径就会静默出错。
-- `reconstruction.method` / `physical_projection`：见上面的三条路线表。
+- `data.acceleration_source`：默认 `recorded`，读 CSV 的 `acc_*` 列（O8 修复后的正确做法）；
+  `computed` 由速度列求导，相对误差 ~31%，只在拿不到真实加速度时用。
+- `data.sample_time`：**应与 CSV 实际采样周期一致**（当前配置 `0.002` = 500 Hz）。这条链路
+  暂时不读它（`build_regressor_basic` / `QRDecomposer` 都不读 `ts`），但 vendored FIGAROH
+  的滤波工具会读（`cutoff = ts * cut_off_frequency_butterworth / 2`），一旦启用就会静默出错。
+- `reconstruction.method` / `physical_projection`：见上面的三条路线表。O8 修复后默认
+  `physical_projection: true`（真值模型贴在可行集边界上，投影只差 0.39%）。
 - 只想先看诊断结果（rmse / 相关性 / 参数值）时，把 `reconstruction.require_physical` 设为
   `false`，但**不要**把这样得到的 URDF 用于控制。

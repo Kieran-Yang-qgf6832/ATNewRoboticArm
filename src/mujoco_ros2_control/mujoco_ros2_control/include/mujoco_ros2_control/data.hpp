@@ -96,6 +96,8 @@ struct MuJoCoActuatorData
   InterfaceData position_interface{ hardware_interface::HW_IF_POSITION };
   InterfaceData velocity_interface{ hardware_interface::HW_IF_VELOCITY };
   InterfaceData effort_interface{ hardware_interface::HW_IF_EFFORT };
+  // 关节加速度（只读状态接口）：来自 MuJoCo 的 qacc，用于参数辨识记录真实加速度。
+  InterfaceData acceleration_interface{ hardware_interface::HW_IF_ACCELERATION };
   std::shared_ptr<control_toolbox::PidROS> pos_pid{ nullptr };
   std::shared_ptr<control_toolbox::PidROS> vel_pid{ nullptr };
   ActuatorType actuator_type{ ActuatorType::UNKNOWN };
@@ -119,6 +121,7 @@ struct MuJoCoActuatorData
     position_interface.transmission_passthrough_ = position_interface.state_;
     velocity_interface.transmission_passthrough_ = velocity_interface.state_;
     effort_interface.transmission_passthrough_ = effort_interface.state_;
+    acceleration_interface.transmission_passthrough_ = acceleration_interface.state_;
   }
 
   void copy_command_from_transmission()
@@ -156,6 +159,8 @@ struct URDFJointData
   InterfaceData position_interface{ hardware_interface::HW_IF_POSITION };
   InterfaceData velocity_interface{ hardware_interface::HW_IF_VELOCITY };
   InterfaceData effort_interface{ hardware_interface::HW_IF_EFFORT };
+  // 关节加速度（只读状态接口）：MuJoCo 的 qacc，见 docs/bugs.md O8。
+  InterfaceData acceleration_interface{ hardware_interface::HW_IF_ACCELERATION };
 
   std::vector<std::string> command_interfaces = {};
 
@@ -172,6 +177,7 @@ struct URDFJointData
     position_interface.state_ = position_interface.transmission_passthrough_;
     velocity_interface.state_ = velocity_interface.transmission_passthrough_;
     effort_interface.state_ = effort_interface.transmission_passthrough_;
+    acceleration_interface.state_ = acceleration_interface.transmission_passthrough_;
   }
 
   void copy_command_to_transmission()

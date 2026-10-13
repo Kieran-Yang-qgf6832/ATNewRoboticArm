@@ -405,6 +405,8 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     // 按关节数为状态与命令缓存一次性预分配，保证实时路径零分配。
     fsm_factory->state_.resize(joints_name.size());
     fsm_factory->command_.resize(joints_name.size());
+    // 关节加速度缓存（docs/bugs.md O8）：从 state interface 读，供 measure 记录。
+    fsm_factory->state_acceleration_.assign(joints_name.size(), 0.0);
     return controller_interface::ControllerInterface::CallbackReturn::SUCCESS;
 }
 
@@ -426,10 +428,13 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
  */
 controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lifecycle::State& previous_state) {
     (void)previous_state;
-    // 每个关节恰好暴露 position/velocity/effort 三个状态接口。
-    if (state_interfaces_.size() == joints_name.size() * 3 && fsm_factory->command_.size() == joints_name.size()) {
+    // 每个关节的状态接口：position/velocity/effort，可选 acceleration。
+    // 步长用「接口总数 / 关节数」推算，而不是写死 3——URDF 里加了 acceleration
+    // 之后同一套代码仍然成立（见 docs/bugs.md O8）。
+    const std::size_t state_stride = joints_name.empty() ? 0 : state_interfaces_.size() / joints_name.size();
+    if (state_stride >= 3 && fsm_factory->command_.size() == joints_name.size()) {
         for (std::size_t i = 0; i < joints_name.size(); ++i) {
-            fsm_factory->command_[i].position = static_cast<float>(state_interfaces_[i * 3 + 0].get_value());
+            fsm_factory->command_[i].position = static_cast<float>(state_interfaces_[i * state_stride + 0].get_value());
             fsm_factory->command_[i].velocity = 0.0f; // 上电初始速度指令清零
             fsm_factory->command_[i].torque   = 0.0f; // 上电初始力矩/前馈清零
             fsm_factory->command_[i].kp       = default_kp[i];
@@ -472,8 +477,9 @@ void ArmController::apply_safe_hold_and_idel(const char* reason) {
     // 同时写入状态机的命令缓存 command_：切回 idel 的那一周期，FSMFactory::run()
     // 只做 exit/enter 而不调用状态的 run()，update() 会直接下发 command_；若这里不更新，
     // 就会把故障前最后一次算出的陈旧指令写回硬件。
+    const std::size_t state_stride = joints_name.empty() ? 0 : state_interfaces_.size() / joints_name.size();
     for (std::size_t i = 0; i < joints_name.size(); i++) {
-        const double hold_position = state_interfaces_[i * 3 + 0].get_value();
+        const double hold_position = state_interfaces_[i * state_stride + 0].get_value();
         const double hold_kp       = static_cast<double>(default_kp[i]);
         const double hold_kd       = static_cast<double>(default_kd[i]);
 
@@ -569,11 +575,16 @@ int ArmController::first_joint_limit_violation() const {
 controller_interface::return_type ArmController::update(const rclcpp::Time& time, const rclcpp::Duration& period) {
     (void)period;
 
-    // 读取硬件反馈，刷新状态机工厂的关节状态缓存（每关节 3 个状态接口）。
+    // 读取硬件反馈，刷新状态机工厂的关节状态缓存（每关节 position/velocity/effort，
+    // 若 URDF 声明了 acceleration 再多一个——见 docs/bugs.md O8）。
+    const std::size_t state_stride = joints_name.empty() ? 0 : state_interfaces_.size() / joints_name.size();
     for (std::size_t i = 0; i < joints_name.size(); i++) {
-        fsm_factory->state_[i].position = static_cast<float>(state_interfaces_[i * 3 + 0].get_value());
-        fsm_factory->state_[i].velocity = static_cast<float>(state_interfaces_[i * 3 + 1].get_value());
-        fsm_factory->state_[i].torque   = static_cast<float>(state_interfaces_[i * 3 + 2].get_value());
+        fsm_factory->state_[i].position = static_cast<float>(state_interfaces_[i * state_stride + 0].get_value());
+        fsm_factory->state_[i].velocity = static_cast<float>(state_interfaces_[i * state_stride + 1].get_value());
+        fsm_factory->state_[i].torque   = static_cast<float>(state_interfaces_[i * state_stride + 2].get_value());
+        if (state_stride >= 4 && i < fsm_factory->state_acceleration_.size()) {
+            fsm_factory->state_acceleration_[i] = state_interfaces_[i * state_stride + 3].get_value();
+        }
     }
 
     // 关节越限检查：**只做诊断上报，不改变状态、不覆盖指令**。
@@ -676,6 +687,9 @@ controller_interface::InterfaceConfiguration ArmController::state_interface_conf
         cfg.names.push_back(name + "/position");
         cfg.names.push_back(name + "/velocity");
         cfg.names.push_back(name + "/effort");
+        // 关节加速度：mujoco_ros2_control 从 qacc 导出；实机接口若不上报则恒为 0，
+        // measure 会据此在 CSV 里写 acc_* 列（docs/bugs.md O8）。
+        cfg.names.push_back(name + "/acceleration");
     }
     return cfg;
 }

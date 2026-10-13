@@ -718,6 +718,7 @@ private:
     Eigen::VectorXd excitation_end_position_;
     Eigen::VectorXd measured_position_;
     Eigen::VectorXd measured_velocity_;
+    Eigen::VectorXd measured_acceleration_; ///< 真实关节加速度（O8），来自 state interface
     Eigen::VectorXd measured_torque_;
     rclcpp::Time measure_start_time_;
     rclcpp::Time phase_start_time_;
@@ -728,6 +729,7 @@ private:
     int trajectory_repeat_cnt_{1};
     bool measure_done_{false};
     bool csv_save_requested_{false};
+    bool record_full_warned_{false}; ///< 记录缓冲区写满只告警一次
     MeasurePhase measure_phase_{MeasurePhase::HoldingEnd};
 };
 
