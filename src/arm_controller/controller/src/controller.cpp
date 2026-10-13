@@ -151,6 +151,10 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("measure_end_effector_y_upper_limit", std::numeric_limits<double>::infinity());
     auto_declare<double>("measure_end_effector_z_lower_limit", -std::numeric_limits<double>::infinity());
     auto_declare<double>("measure_end_effector_z_upper_limit", std::numeric_limits<double>::infinity());
+    // 指令力矩可行性：|RNEA 力矩| <= rate * effortLimit。0 = 关闭。
+    auto_declare<double>("measure_traj_torque_limit_rate", 0.0);
+    // 工具最低点相对末端 frame 原点的偏移（沿 -z，米），地面净空卡在工具最低点上。
+    auto_declare<double>("measure_end_effector_tool_offset", 0.0);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("exp_state", "idel");
@@ -304,6 +308,22 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 if (param.as_int() < 0) {
                     result.successful = false;
                     result.reason     = "measure_trajectory_seed must be non-negative";
+                    return result;
+                }
+            } else if (name == "measure_traj_torque_limit_rate") {
+                // 0 = 关闭；打开时必须是 (0, 1] 的比例。
+                const double rate = param.as_double();
+                if (std::isnan(rate) || rate < 0.0 || rate > 1.0) {
+                    result.successful = false;
+                    result.reason     = "measure_traj_torque_limit_rate must be within [0, 1]";
+                    return result;
+                }
+            } else if (name == "measure_end_effector_tool_offset") {
+                // 工具偏移是长度，必须非负且有限（不允许 NaN/inf）。
+                const double offset = param.as_double();
+                if (!std::isfinite(offset) || offset < 0.0) {
+                    result.successful = false;
+                    result.reason     = "measure_end_effector_tool_offset must be finite and non-negative";
                     return result;
                 }
             } else if (name == "measure_end_effector_x_lower_limit"

@@ -1,6 +1,8 @@
 #include "excitation_trajectory.hpp"
 
 #include <Eigen/SVD>
+// 力矩可行性约束要用 RNEA（traj_constraint_violation 里）。
+#include <pinocchio/algorithm/rnea.hpp>
 
 #include <Eigen/src/Core/Matrix.h>
 #include <algorithm>
@@ -284,6 +286,26 @@ double ExcitationTrajectory::traj_constraint_violation(const FourierTrajectory& 
         q              = traj.position(t);
         dq             = traj.velocity(t);
 
+        // 指令力矩可行性：用 RNEA 算这条**指令**轨迹需要的关节力矩，超过
+        // effortLimit * traj_torque_limit_rate 就惩罚。放在位置/速度检查之前，
+        // 这样 CMA-ES 能同时看到"关节走得到"和"电机给得出"。
+        if (traj_torque_limit_rate > 0.0) {
+            ddq = traj.acceleration(t);
+            pinocchio::rnea(model_, data_, q, dq, ddq);
+            for (int j = 0; j < traj.dof(); ++j) {
+                const double effort_limit = model_.effortLimit[static_cast<Eigen::Index>(j)];
+                if (!std::isfinite(effort_limit) || effort_limit <= 0.0) {
+                    continue;
+                }
+                const double allowed = traj_torque_limit_rate * effort_limit;
+                const double needed  = std::fabs(data_.tau[static_cast<Eigen::Index>(j)]);
+                if (needed > allowed) {
+                    const double normalized_violation = (needed - allowed) / allowed;
+                    violation += normalized_violation * normalized_violation;
+                }
+            }
+        }
+
         for (int j = 0; j < traj.dof(); ++j) {
             // 位置软限位：将关节行程按软限位比例缩放到行程中点附近
             const double lower = model_.lowerPositionLimit[j];
@@ -313,7 +335,10 @@ double ExcitationTrajectory::traj_constraint_violation(const FourierTrajectory& 
         }
 
         pinocchio::framesForwardKinematics(model_, data_, q);
-        const Eigen::Vector3d& end_effector_position = data_.oMf[end_effector_frame_id_].translation();
+        Eigen::Vector3d end_effector_position = data_.oMf[end_effector_frame_id_].translation();
+        // 地面净空要卡在**工具最低点**上：工具比末端原点低 end_effector_tool_offset。
+        // 只卡原点会让工具网格钻进地面（实测 -4.6 mm），触发 MuJoCo 接触冲量。
+        end_effector_position[2] -= end_effector_tool_offset;
         if (!end_effector_position.allFinite()) {
             return std::numeric_limits<double>::infinity();
         }

@@ -59,7 +59,22 @@ public:
     double end_effector_y_upper_limit{std::numeric_limits<double>::infinity()};
     double end_effector_z_lower_limit{-std::numeric_limits<double>::infinity()};
     double end_effector_z_upper_limit{std::numeric_limits<double>::infinity()};
-    
+
+    /// 指令力矩可行性：RNEA 算出的 |关节目力矩| 不得超过 model_.effortLimit 的这个比例
+    /// （<= 0 表示关闭）。实机上力矩超限会直接导致跟踪失败；仿真里会把关节甩到高速，
+    /// 记录到的 qacc 出现尖峰（实测最大 7375 rad/s²），辨识数据报废。
+    double traj_torque_limit_rate{0.0};
+
+    /// 末端**工具最低点**相对末端 frame 原点的偏移（沿 -z，米）。
+    ///
+    /// 地面净空约束必须作用在工具最低点上，而不是末端原点：实测 link6 的工具网格比它的
+    /// frame 原点低 0.0569 m，只卡原点（z ≥ 0.1）时网格仍会钻进地面 4.6 mm，
+    /// MuJoCo 的接触冲量会带来 81.9 N·m 的模型残差——而 URDF 里没有地面，无法解释。
+    double end_effector_tool_offset{0.0};
+
+    /// 关节位置软限位比例（相对行程中点，0.7 = 只用中间 70%）。日志里会打出实际生效值。
+    double traj_pos_soft_limit_rate{0.7};
+
 private:
     std::atomic_bool trajectory_generatefinished{false};
     std::atomic_bool trajectory_generatefailed{false};
@@ -90,8 +105,6 @@ private:
     double svd_vel_upper{4.0};
     double svd_acc_upper{6.0};
     int svd_Y_stack_num{30};    //堆叠30个Y矩阵评估矩阵特性
-
-    double traj_pos_soft_limit_rate{0.7};    //关节软限位，默认70%
 
     // O10：随机种子与最近一次生成的诊断量（生成线程写、实时线程读，故用原子量）
     std::atomic<std::uint64_t> seed_{0};
