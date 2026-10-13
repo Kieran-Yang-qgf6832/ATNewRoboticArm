@@ -120,6 +120,7 @@ CSV 默认落在**项目根目录**的 `measured_for_identification.csv`（launc
 | `trajectory_period` | `10.0` | 激励轨迹周期（秒） |
 | `trajectory_repeat_cnt` | `1` | 重复次数；测量时长 = `move_to_start_duration + period × repeat_cnt` |
 | `move_to_start_duration` | `3.0` | 移动到激励轨迹起点的时长 |
+| `trajectory_seed` | `0` | 激励轨迹 CMA-ES 随机种子：**0 = 随机（不可复现）**，非 0 = 固定可复现 |
 | `step_timeout` | `30.0` | 任务层单步骤超时；测量比 `measure.yaml` 的 `duration` 长时**必须放大** |
 
 例：用上一轮辨识的模型生成 120 s 激励轨迹：
@@ -135,6 +136,26 @@ ros2 launch launch_pack arm_measure_sim.launch.py \
 > 只转发 `arm_controller.*` 前缀的项）——见 [docs/bugs.md O9](../../docs/bugs.md)。
 > 改完参数请用 `ros2 param get /arm_controller measure_trajectory_period` 或 CSV 行数
 > （500 Hz 下 120 s 应约 60000 行）验证它真的生效。
+
+### 激励轨迹的可复现与可行性（O10）
+
+控制器会在日志里打出一行：
+
+```text
+[arm_controller] 激励轨迹就绪：可辨识参数 36 个，seed=12345，原始违例 0.000e+00 rad，
+                 缩放 1.0000，最终违例 0.000e+00 rad，得分 2.1513
+```
+
+- **`seed`**：本次实际使用的种子。想重放某一次测量，把 `trajectory_seed:=` 设成这个值即可
+  （同一个 URDF + 同一个种子 → 逐位相同的轨迹）。默认 0 表示"每次按当前时间随机"。
+- **`最终违例`**：必须为 **0**。CMA-ES 交回的原始最优解经常仍违反关节软限位，代码会用
+  二分把系数整体缩放到可行域内（可行域是以 0 为内点的凸集）；若连 q≡0 都不可行，
+  生成直接判失败，不会把不可行轨迹发下去。
+- **`得分`**：激励质量（越大越好），可用于比较不同种子。
+
+> 修 O10 之前，21/21 次测量的指令轨迹都违反软限位（违例 0.119 ~ 6.675 rad），
+> 把关节甩出硬限位（joint6 行程 15.4 rad、速度峰值 1064 rad/s），测量数据直接报废。
+> 详见 [docs/bugs.md O10](../../docs/bugs.md)。
 
 只想起仿真、测量另行触发用 `run_measure:=false`，然后：
 

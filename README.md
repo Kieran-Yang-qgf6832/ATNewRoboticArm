@@ -292,7 +292,8 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 
 #    常用参数：csv_file_path / trajectory_period / trajectory_repeat_cnt /
 #    move_to_start_duration / controller_urdf_path（控制器内部模型，只影响激励轨迹
-#    生成，被控对象仍是真值 URDF）/ step_timeout（测量变长时要放大）
+#    生成，被控对象仍是真值 URDF）/ step_timeout（测量变长时要放大）/
+#    trajectory_seed（0 = 随机不可复现，非 0 = 固定；控制器日志会打出实际种子）
 
 # 2) 离线辨识
 ros2 run parameter_identify identify_arm \

@@ -70,12 +70,21 @@ void ExcitationTrajectory::calc_func() {
 
     constexpr int k_harmonics           = 3;
     constexpr double k_eval_dt          = 0.01;
-    constexpr int k_max_fevals          = 600;
+    // O10：原来 k_max_fevals = 600，而优化变量是 nq x 2 x harmonics = 36 维，
+    // 600 次评估只有 17 倍维度——CMA-ES 远未收敛，返回的基本是"随机可行解"。
+    // 同时 k_initial_sigma = 0.7 让初始种群几乎全部违反软限位（joint5 的软限位
+    // 只有 ±0.428 rad），目标函数被惩罚项淹没、优化信息全丢。
+    // 现在：1500 次评估（约 42 倍维度）+ 更小的初始 sigma，让初始种群落在可行域内。
+    constexpr int k_max_fevals          = 1500;
     constexpr int k_lambda              = 24;
     constexpr double k_coeff_bound      = 2.0;
-    constexpr double k_initial_sigma    = 0.7;
+    constexpr double k_initial_sigma    = 0.25;
     constexpr double k_infeasible_cost  = 1000.0;
     constexpr double k_violation_weight = 1000.0;
+    // 单次评估的采样步长：约束检查要够密，但长周期不能把评估次数放大到不可接受。
+    // T = 10 s 时仍是 0.01（1000 点/周期，与原实现一致）；T = 120 s 时放宽到 0.06
+    // （2000 点/周期，仍远密于最快谐波 3/T 的周期 40 s）。
+    const double eval_dt = std::max(k_eval_dt, period_s / 2000.0);
 
 
     while (1) {
@@ -136,7 +145,11 @@ void ExcitationTrajectory::calc_func() {
         std::vector<double> ubounds(coefficient_num, k_coeff_bound);
 
         libcmaes::GenoPheno<libcmaes::pwqBoundStrategy> gp(lbounds.data(), ubounds.data(), coefficient_num);
-        libcmaes::CMAParameters<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>> cma_params(x0, k_initial_sigma, k_lambda, 0, gp);
+        // O10：seed 为 0 时 libcmaes 会拿"当前时间"当种子（parameters.h:80），
+        // 于是每次启动的激励轨迹都不同、无法重放。这里透传 measure_trajectory_seed。
+        const std::uint64_t seed = seed_.load(std::memory_order_relaxed);
+        libcmaes::CMAParameters<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>> cma_params(
+            x0, k_initial_sigma, k_lambda, seed, gp);
         cma_params.set_algo(aCMAES);
         cma_params.set_max_fevals(k_max_fevals);
         cma_params.set_quiet(true);
@@ -145,7 +158,7 @@ void ExcitationTrajectory::calc_func() {
         double best_score = -std::numeric_limits<double>::infinity();
         Eigen::MatrixXd best_mat;
 
-        libcmaes::FitFunc objective = [this, &fourier_traj, &best_score, &best_mat, k_eval_dt,
+        libcmaes::FitFunc objective = [this, &fourier_traj, &best_score, &best_mat, eval_dt,
                                        k_infeasible_cost, k_violation_weight](const double* x, const int n) {
             if (n != fourier_traj.dof() * 2 * fourier_traj.harmonics()) {
                 return k_infeasible_cost;
@@ -153,12 +166,12 @@ void ExcitationTrajectory::calc_func() {
 
             fourier_traj.set_coefficients(x, n);
 
-            const double violation = traj_constraint_violation(fourier_traj, k_eval_dt);
+            const double violation = traj_constraint_violation(fourier_traj, eval_dt);
             if (violation > 0.0) {
                 return k_infeasible_cost + k_violation_weight * violation;
             }
 
-            const double score = traj_score(fourier_traj, k_eval_dt, identifiable_parameter_num_);
+            const double score = traj_score(fourier_traj, eval_dt, identifiable_parameter_num_);
             if (!std::isfinite(score)) {
                 return k_infeasible_cost;
             }
@@ -167,21 +180,95 @@ void ExcitationTrajectory::calc_func() {
 
         const libcmaes::CMASolutions cma_solutions =
             libcmaes::cmaes<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>>(objective, cma_params);
-        const Eigen::VectorXd best_x = cma_solutions.get_best_seen_candidate().get_x_pheno_dvec(cma_params);
+        Eigen::VectorXd best_x = cma_solutions.get_best_seen_candidate().get_x_pheno_dvec(cma_params);
         fourier_traj.set_coefficients(best_x);
+
+        // O10 的关键修正：CMA-ES 交回来的"最优"候选**经常仍然违反软限位**——实测 21 次
+        // 测量无一例外，违例 0.12 ~ 6.68 rad。指令远超行程时 PID 会在 20 N·m 上限饱和，
+        // 实际关节角被甩出硬限位（实测 joint6 行程 15.4 rad、速度峰值 1064 rad/s），
+        // 记录下来的数据直接报废。
+        // 可行域是以 0 为内点的凸集，所以按比例整体缩小一定能回到可行域：二分出最大的
+        // 可行缩放系数，**保证输出轨迹一定可行**，而不是把"最不违反"的样本发下去。
+        const double raw_violation = traj_constraint_violation(fourier_traj, eval_dt);
+        double scale               = 1.0;
+        if (!(raw_violation <= 0.0)) {
+            scale = find_feasible_scale(fourier_traj, best_x, eval_dt);
+            best_x *= scale;
+            fourier_traj.set_coefficients(best_x);
+        }
+
+        const double final_violation = traj_constraint_violation(fourier_traj, eval_dt);
+        const double final_score =
+            final_violation <= 0.0 ? traj_score(fourier_traj, eval_dt, identifiable_parameter_num_)
+                                   : std::numeric_limits<double>::quiet_NaN();
+
+        last_raw_violation_.store(raw_violation, std::memory_order_relaxed);
+        last_applied_scale_.store(scale, std::memory_order_relaxed);
+        last_final_violation_.store(final_violation, std::memory_order_relaxed);
+        last_final_score_.store(final_score, std::memory_order_relaxed);
 
         best_traj = std::make_shared<FourierTrajectory>(fourier_traj);
         if (std::isfinite(best_score)) {
             best_coefficients_ = best_mat;
         }
+        std::cout << "excitation: seed=" << seed << " raw_violation=" << raw_violation << " scale=" << scale
+                  << " violation=" << final_violation << " score=" << final_score << std::endl;
         std::cout << "best_x:" << best_x << std::endl;
-        trajectory_generatefailed   = best_traj == nullptr;
+        // 违例仍不为 0 只可能是连 q≡0 都不可行（例如末端箱式约束把原点排除），
+        // 这时必须**显式失败**，而不是把一条不可行的轨迹发下去。
+        trajectory_generatefailed   = best_traj == nullptr || !(final_violation <= 0.0);
         trajectory_generatefinished = true;
     }
 }
 
 int ExcitationTrajectory::get_available_param_num()const {
     return identifiable_parameter_num_;
+}
+
+void ExcitationTrajectory::set_seed(std::uint64_t seed) {
+    seed_.store(seed, std::memory_order_relaxed);
+}
+
+std::uint64_t ExcitationTrajectory::get_seed() const {
+    return seed_.load(std::memory_order_relaxed);
+}
+
+double ExcitationTrajectory::get_raw_violation() const {
+    return last_raw_violation_.load(std::memory_order_relaxed);
+}
+
+double ExcitationTrajectory::get_applied_scale() const {
+    return last_applied_scale_.load(std::memory_order_relaxed);
+}
+
+double ExcitationTrajectory::get_final_violation() const {
+    return last_final_violation_.load(std::memory_order_relaxed);
+}
+
+double ExcitationTrajectory::get_final_score() const {
+    return last_final_score_.load(std::memory_order_relaxed);
+}
+
+double ExcitationTrajectory::find_feasible_scale(FourierTrajectory& traj,
+                                                 const Eigen::VectorXd& coefficients,
+                                                 double dt) {
+    // λ = 0 时 q(t) ≡ 0，位置与速度约束必然满足；λ 增大时违例单调不减，
+    // 所以直接二分可行区间的右端。若连 λ = 0 都不可行（末端箱式约束把原点排除），
+    // 返回 0，由调用方判定生成失败。
+    double feasible   = 0.0;
+    double infeasible = 1.0;
+    for (int i = 0; i < 40; ++i) {
+        const double mid           = 0.5 * (feasible + infeasible);
+        const Eigen::VectorXd trial = mid * coefficients;
+        traj.set_coefficients(trial);
+        if (traj_constraint_violation(traj, dt) <= 0.0) {
+            feasible = mid;
+        } else {
+            infeasible = mid;
+        }
+    }
+    traj.set_coefficients(coefficients);
+    return feasible;
 }
 
 double ExcitationTrajectory::traj_constraint_violation(const FourierTrajectory& traj, double dt) {

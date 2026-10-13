@@ -122,6 +122,10 @@ def _write_controller_override_file(context):
                 "measure_move_to_start_duration": float(
                     context.perform_substitution(LaunchConfiguration("move_to_start_duration"))
                 ),
+                # O10：0 = 每次随机（不可复现），非 0 = 固定种子。
+                "measure_trajectory_seed": int(
+                    context.perform_substitution(LaunchConfiguration("trajectory_seed"))
+                ),
             }
         }
     }
@@ -340,6 +344,11 @@ def generate_launch_description():
                 "move_to_start_duration",
                 default_value="3.0",
                 description="从当前位形移动到激励轨迹起点的时长（秒）",
+            ),
+            DeclareLaunchArgument(
+                "trajectory_seed",
+                default_value="0",
+                description="激励轨迹 CMA-ES 随机种子：0 = 随机（不可复现），非 0 = 固定可复现",
             ),
             DeclareLaunchArgument(
                 "step_timeout",

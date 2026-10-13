@@ -138,6 +138,10 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
     auto_declare<std::string>("measure_csv_file_path", "measured_for_identification.csv");
     auto_declare<double>("measure_record_sample_rate", 500.0);
+    // 激励轨迹的 CMA-ES 随机种子（docs/bugs.md O10）：0 = 每次用当前时间（不可复现，
+    // 保持旧行为），非 0 = 固定，同一 URDF 必然生成同一条激励轨迹。实际使用的种子
+    // 会打进日志，可以照抄回来复现某一次测量。
+    auto_declare<int64_t>("measure_trajectory_seed", 0);
     auto_declare<std::vector<double>>("admittance_mass", {1.0, 1.0, 1.0, 0.1, 0.1, 0.1});
     auto_declare<std::vector<double>>("admittance_damping", {20.0, 20.0, 20.0, 2.0, 2.0, 2.0});
     auto_declare<std::vector<double>>("admittance_stiffness", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
@@ -293,6 +297,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 if (param.as_double() <= 0.0) {
                     result.successful = false;
                     result.reason     = "measure_record_sample_rate must be positive";
+                    return result;
+                }
+            } else if (name == "measure_trajectory_seed") {
+                // 种子允许为 0（= 随机），但不能为负——libcmaes 收的是 uint64。
+                if (param.as_int() < 0) {
+                    result.successful = false;
+                    result.reason     = "measure_trajectory_seed must be non-negative";
                     return result;
                 }
             } else if (name == "measure_end_effector_x_lower_limit"

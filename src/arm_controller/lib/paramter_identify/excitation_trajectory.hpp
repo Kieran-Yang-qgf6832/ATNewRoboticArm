@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <rclcpp/duration.hpp>
@@ -26,9 +27,31 @@ public:
     bool generate_is_finished();
     bool generate_failed() const;
 
+    /**
+     * @brief 固定 CMA-ES 的随机种子（docs/bugs.md O10）。
+     *
+     * libcmaes 的语义是「seed 为 0 就用当前时间当种子」，所以默认 0 意味着
+     * **每次启动生成的激励轨迹都不同、无法重放**。传入非 0 值即可复现同一条轨迹，
+     * 这是做任何"换一版模型再测一次"对比实验的前提。
+     *
+     * @param seed 0 = 随机（保持旧行为），非 0 = 固定。
+     */
+    void set_seed(std::uint64_t seed);
+
     bool get_target_position(const rclcpp::Duration &time,Eigen::VectorXd &pos);
 
     int get_available_param_num() const;
+
+    /// 最近一次生成实际使用的种子（0 表示由 libcmaes 按时间随机）。
+    std::uint64_t get_seed() const;
+    /// CMA-ES 原始最优解的软限位违例（缩放前），单位 rad；未生成时为 NaN。
+    double get_raw_violation() const;
+    /// 为满足约束而施加的整体缩放系数（1.0 = 无需缩放）。
+    double get_applied_scale() const;
+    /// 最终轨迹的软限位违例，应恒为 0；非 0 表示生成失败。
+    double get_final_violation() const;
+    /// 最终轨迹的激励得分（越大越好）；失败时为 NaN。
+    double get_final_score() const;
 
     double end_effector_x_lower_limit{-std::numeric_limits<double>::infinity()};
     double end_effector_x_upper_limit{std::numeric_limits<double>::infinity()};
@@ -45,6 +68,16 @@ private:
     double traj_score(const FourierTrajectory& traj,double dt,int identifiable_param_num);
     double traj_constraint_violation(const FourierTrajectory& traj,double dt);
 
+    /**
+     * @brief 求把系数整体缩放后仍满足全部约束的最大系数（二分）。
+     *
+     * 可行域是以 0 为内点的**凸集**：q(t) 对傅里叶系数线性，约束是逐关节箱式限位，
+     * 因此 λ·c 的违例随 λ∈[0,1] 单调不增。λ=0 必然可行，二分即可保证输出可行。
+     * @return 可行区间右端（≤1）；若连 λ=0 都不可行（例如末端箱式约束把原点排除）
+     *         则返回 0，调用方应据此判定生成失败。
+     */
+    double find_feasible_scale(FourierTrajectory& traj, const Eigen::VectorXd& coefficients, double dt);
+
     pinocchio::Model model_;
     pinocchio::Data data_;
     pinocchio::FrameIndex end_effector_frame_id_{0};
@@ -59,6 +92,13 @@ private:
     int svd_Y_stack_num{30};    //堆叠30个Y矩阵评估矩阵特性
 
     double traj_pos_soft_limit_rate{0.7};    //关节软限位，默认70%
+
+    // O10：随机种子与最近一次生成的诊断量（生成线程写、实时线程读，故用原子量）
+    std::atomic<std::uint64_t> seed_{0};
+    std::atomic<double> last_raw_violation_{std::numeric_limits<double>::quiet_NaN()};
+    std::atomic<double> last_applied_scale_{1.0};
+    std::atomic<double> last_final_violation_{std::numeric_limits<double>::quiet_NaN()};
+    std::atomic<double> last_final_score_{std::numeric_limits<double>::quiet_NaN()};
 
     //缓存
     Eigen::VectorXd q, dq, ddq;

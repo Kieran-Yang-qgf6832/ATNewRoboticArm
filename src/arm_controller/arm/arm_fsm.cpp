@@ -1273,6 +1273,9 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     factory->node_->get_parameter("measure_move_to_start_duration", move_to_start_duration_);
     factory->node_->get_parameter("measure_csv_file_path", measure_csv_file_path_);
     factory->node_->get_parameter("measure_record_sample_rate", measure_record_sample_rate_);
+    // O10：激励轨迹的随机种子。0 = 每次按当前时间随机（不可复现），非 0 = 固定可复现。
+    int64_t measure_trajectory_seed = 0;
+    factory->node_->get_parameter("measure_trajectory_seed", measure_trajectory_seed);
     double end_effector_x_lower_limit;
     double end_effector_x_upper_limit;
     double end_effector_y_lower_limit;
@@ -1319,6 +1322,7 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
 
     const std::string urdf_path                        = factory->node_->get_parameter("urdf_path").as_string();
     excitation_trajectory_                             = std::make_shared<ExcitationTrajectory>(urdf_path);
+    excitation_trajectory_->set_seed(static_cast<std::uint64_t>(measure_trajectory_seed));
     excitation_trajectory_->end_effector_x_lower_limit = end_effector_x_lower_limit;
     excitation_trajectory_->end_effector_x_upper_limit = end_effector_x_upper_limit;
     excitation_trajectory_->end_effector_y_lower_limit = end_effector_y_lower_limit;
@@ -1426,7 +1430,17 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
         move_to_start_trajectory_.add_point(end_point_, rclcpp::Duration::from_seconds(move_to_start_duration_));
         move_to_start_trajectory_.start(time);
         phase_start_time_ = time;
-        RCLCPP_INFO(factory->node_->get_logger(), "最小可辨识参数数量为:%d", excitation_trajectory_->get_available_param_num());
+        // O10：把实际生效的种子与可行性诊断一并打出来——种子用于复现，
+        // violation 必须为 0（不为 0 时 generate_failed() 已置位，run() 会直接失败）。
+        RCLCPP_INFO(
+            factory->node_->get_logger(),
+            "激励轨迹就绪：可辨识参数 %d 个，seed=%lu，原始违例 %.3e rad，缩放 %.4f，最终违例 %.3e rad，得分 %.4f",
+            excitation_trajectory_->get_available_param_num(),
+            static_cast<unsigned long>(excitation_trajectory_->get_seed()),
+            excitation_trajectory_->get_raw_violation(),
+            excitation_trajectory_->get_applied_scale(),
+            excitation_trajectory_->get_final_violation(),
+            excitation_trajectory_->get_final_score());
         measure_phase_ = MeasurePhase::MovingToStart;
     }
 

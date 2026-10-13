@@ -69,6 +69,10 @@ arm_controller:
     # 控制器在**构造阶段**读这个参数，只改这里必须重启控制器才生效（docs/bugs.md C6）。
     measure_csv_file_path: measured_for_identification.csv
     measure_record_sample_rate: 500.0
+    # 激励轨迹 CMA-ES 的随机种子（docs/bugs.md O10）。0 = 每次按当前时间随机，
+    # 生成的轨迹**不可复现**；填任意正整数即可复现同一条轨迹——控制器日志里的
+    # "seed=" 会打出实际使用的值，照抄回来即可重放某一次测量。
+    measure_trajectory_seed: 0
     admittance_mass: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
     admittance_damping: [20.0, 20.0, 20.0, 2.0, 2.0, 2.0]
     admittance_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
