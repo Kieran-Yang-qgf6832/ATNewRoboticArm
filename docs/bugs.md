@@ -53,7 +53,7 @@ O2 / O3 / O4 / O6 / O7 已修；**唯一未修的是 O8**——参数辨识链�
 | **O7** | `write_hold_command` 无重力前馈，在轨迹状态等待期间手臂塌陷 5° | **高** | **已修** | `14810bf` |
 | **O8** | 辨识用加速度由 500 Hz 速度二次求导得到（误差 31%），导致辨识结果非物理 | **高** | **根因已定位，未修** | — |
 | **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `00001b8` |
-| **O10** | 激励轨迹不可复现、质量波动极大（CMA-ES 随机种子取自时钟、600 次评估对 36 维欠收敛） | **高** | **已修** | `COMMIT_O10` |
+| **O10** | 激励轨迹不可复现、质量波动极大（CMA-ES 随机种子取自时钟、600 次评估对 36 维欠收敛） | **高** | **已修** | `06af06d` |
 
 ---
 
@@ -1037,7 +1037,7 @@ params 文件，放在 `ParameterFile(ros2_controller.yaml)` **之后**（同名
 照样写出 URDF——LMI 投影会把参数拉回物理可行集（代价是惯量被投影得很小）。
 （这条绕法是给 **O8** 的负质量兜底的，O10 修好后不再需要它来救"轨迹不可行"。）
 
-### 修法（2026-10-13 已实施，commit `COMMIT_O10`）
+### 修法（2026-10-13 已实施，commit `06af06d`）
 
 1. **可复现**：新增控制器参数 `measure_trajectory_seed`（`auto_declare<int64_t>`，
    默认 0 = 随机，保持旧行为）。`ExcitationTrajectory::set_seed()` 把它透传给
@@ -1074,7 +1074,7 @@ params 文件，放在 `ParameterFile(ros2_controller.yaml)` **之后**（同名
 注意：O10 修好只是让**数据可用**，辨识结果仍然非物理（`reconstruction_status: error`）——
 那是 O8（加速度由速度二次求导得到）的账，两者独立。
 
-**状态**：已修（`COMMIT_O10`）。
+**状态**：已修（`06af06d`）。
 
 ---
 
@@ -1174,7 +1174,7 @@ reset:  gravity_compensation=true (param found=no)
 | `f8b61c1` | `identify_arm` 适配 vendored FIGAROH 0.6.0 的签名，不再 TypeError（O8 的前置缺陷） |
 | `52cc021` | 修复包内绝对导入被误判为"求解器缺失"、PSD 校验容差过严（O8 的前置缺陷） |
 | `00001b8` | measure launch 的覆盖参数改为 arm_controller 专属 params 文件，不再静默失效（O9） |
-| `COMMIT_O10` | 激励轨迹：种子可固定、提高 CMA-ES 评估次数、加可行缩放兜底（O10） |
+| `06af06d` | 激励轨迹：种子可固定、提高 CMA-ES 评估次数、加可行缩放兜底（O10） |
 
 ---
 

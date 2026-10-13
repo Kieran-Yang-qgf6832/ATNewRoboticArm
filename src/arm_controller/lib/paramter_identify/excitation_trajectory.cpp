@@ -68,13 +68,13 @@ bool ExcitationTrajectory::get_target_position(const rclcpp::Duration& time, Eig
 
 void ExcitationTrajectory::calc_func() {
 
-    constexpr int k_harmonics           = 3;
-    constexpr double k_eval_dt          = 0.01;
     // O10：原来 k_max_fevals = 600，而优化变量是 nq x 2 x harmonics = 36 维，
     // 600 次评估只有 17 倍维度——CMA-ES 远未收敛，返回的基本是"随机可行解"。
     // 同时 k_initial_sigma = 0.7 让初始种群几乎全部违反软限位（joint5 的软限位
     // 只有 ±0.428 rad），目标函数被惩罚项淹没、优化信息全丢。
     // 现在：1500 次评估（约 42 倍维度）+ 更小的初始 sigma，让初始种群落在可行域内。
+    constexpr int k_harmonics           = 3;
+    constexpr double k_eval_dt          = 0.01;
     constexpr int k_max_fevals          = 1500;
     constexpr int k_lambda              = 24;
     constexpr double k_coeff_bound      = 2.0;
@@ -148,8 +148,7 @@ void ExcitationTrajectory::calc_func() {
         // O10：seed 为 0 时 libcmaes 会拿"当前时间"当种子（parameters.h:80），
         // 于是每次启动的激励轨迹都不同、无法重放。这里透传 measure_trajectory_seed。
         const std::uint64_t seed = seed_.load(std::memory_order_relaxed);
-        libcmaes::CMAParameters<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>> cma_params(
-            x0, k_initial_sigma, k_lambda, seed, gp);
+        libcmaes::CMAParameters<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>> cma_params(x0, k_initial_sigma, k_lambda, seed, gp);
         cma_params.set_algo(aCMAES);
         cma_params.set_max_fevals(k_max_fevals);
         cma_params.set_quiet(true);
@@ -158,8 +157,8 @@ void ExcitationTrajectory::calc_func() {
         double best_score = -std::numeric_limits<double>::infinity();
         Eigen::MatrixXd best_mat;
 
-        libcmaes::FitFunc objective = [this, &fourier_traj, &best_score, &best_mat, eval_dt,
-                                       k_infeasible_cost, k_violation_weight](const double* x, const int n) {
+        libcmaes::FitFunc objective = [this, &fourier_traj, &best_score, &best_mat, eval_dt, k_infeasible_cost,
+                                       k_violation_weight](const double* x, const int n) {
             if (n != fourier_traj.dof() * 2 * fourier_traj.harmonics()) {
                 return k_infeasible_cost;
             }
@@ -198,9 +197,10 @@ void ExcitationTrajectory::calc_func() {
         }
 
         const double final_violation = traj_constraint_violation(fourier_traj, eval_dt);
-        const double final_score =
-            final_violation <= 0.0 ? traj_score(fourier_traj, eval_dt, identifiable_parameter_num_)
-                                   : std::numeric_limits<double>::quiet_NaN();
+        double final_score           = std::numeric_limits<double>::quiet_NaN();
+        if (final_violation <= 0.0) {
+            final_score = traj_score(fourier_traj, eval_dt, identifiable_parameter_num_);
+        }
 
         last_raw_violation_.store(raw_violation, std::memory_order_relaxed);
         last_applied_scale_.store(scale, std::memory_order_relaxed);
@@ -249,16 +249,14 @@ double ExcitationTrajectory::get_final_score() const {
     return last_final_score_.load(std::memory_order_relaxed);
 }
 
-double ExcitationTrajectory::find_feasible_scale(FourierTrajectory& traj,
-                                                 const Eigen::VectorXd& coefficients,
-                                                 double dt) {
+double ExcitationTrajectory::find_feasible_scale(FourierTrajectory& traj, const Eigen::VectorXd& coefficients, double dt) {
     // λ = 0 时 q(t) ≡ 0，位置与速度约束必然满足；λ 增大时违例单调不减，
     // 所以直接二分可行区间的右端。若连 λ = 0 都不可行（末端箱式约束把原点排除），
     // 返回 0，由调用方判定生成失败。
     double feasible   = 0.0;
     double infeasible = 1.0;
     for (int i = 0; i < 40; ++i) {
-        const double mid           = 0.5 * (feasible + infeasible);
+        const double mid            = 0.5 * (feasible + infeasible);
         const Eigen::VectorXd trial = mid * coefficients;
         traj.set_coefficients(trial);
         if (traj_constraint_violation(traj, dt) <= 0.0) {
