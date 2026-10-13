@@ -146,7 +146,7 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 ### 已知问题
 
-- **O8 已修**（`COMMIT_O8`）：辨识用的加速度原本是对 500 Hz 记录速度二次求导得到的
+- **O8 已修**（`5e59ef5`）：辨识用的加速度原本是对 500 Hz 记录速度二次求导得到的
   （相对误差 31.5%），把辨识结果推出了物理可行集。现在 measure **直接记录 MuJoCo 的真实
   `qacc`**（`mujoco_ros2_control` 新导出 `acceleration` 状态接口 → `ArmController` 读进
   `state_acceleration_` → `ParamterIdentify` 写 `acc_*` 列），时间列也从墙钟换成**仿真时间**。
