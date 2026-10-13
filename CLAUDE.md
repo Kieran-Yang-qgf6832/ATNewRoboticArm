@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 6 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare` 等）。F 系列与 O1–O10 已全部闭环。
+> 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
+> `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O11 已全部闭环。
 
 ## 常用命令
 
