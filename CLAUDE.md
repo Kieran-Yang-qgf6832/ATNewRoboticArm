@@ -174,6 +174,20 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   现在：种子做成参数 `measure_trajectory_seed`（0 = 随机，非 0 = 固定可复现）、
   评估次数提到 1500、sigma 降到 0.25，并加 `find_feasible_scale()` 用二分把系数整体
   缩放到**保证可行**。详见 `docs/bugs.md` O10。
+- **O11 已修**（`340e002`）：激励轨迹**没避开地面**——link6 的工具网格会钻进地面 4.6 mm
+  （1.0% 的样本），MuJoCo 的地面接触冲量让模型残差出现 **81.9 N·m** 的尖峰（每 10 s 一次），
+  参数误差从 0.001% 恶化到 **9.56%**。约束原本只卡末端 **frame 原点**，而 link6 的网格比
+  原点低 **0.0569 m**。现在：
+  - `measure_end_effector_tool_offset`（新，默认 0.07 m）——地面净空卡在**工具最低点**上；
+  - `measure_traj_torque_limit_rate`（新，默认 0.6）——RNEA 算指令轨迹需要的关节力矩，
+    超过 `rate × effortLimit(50 N·m)` 就惩罚（原轨迹有 10.3% 的样本 >30 N·m）；
+  - `measure_end_effector_z_lower_limit` 0.1 → 0.20。
+  实测 seed=1：残差 1.53% → **0.30%**（最大 81.9 → **0.26 N·m**），参数误差
+  **9.5565% → 0.0011%**，激励得分只降 2%。**这两个参数的实际生效值会由控制器日志的
+  `激励约束：` 那一行打出来**，改完记得去看（C6 的教训）。详见 `docs/bugs.md` O11。
+  > 验证辨识结果**不要看报告里的 `rmse`**——它量的是最小二乘基参数，而写进 URDF 的是
+  > 投影之后的参数，实测可以差几十倍。用 `src/parameter_identify/tools/verify_torque.py`
+  > 拿最终 URDF 正演一遍（训练集 + 另一条轨迹 + 与真值模型对比 + 残差与 |dq| 的相关性）。
 - `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
   `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
