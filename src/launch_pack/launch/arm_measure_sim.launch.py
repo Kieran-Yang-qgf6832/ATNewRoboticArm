@@ -147,12 +147,16 @@ def _launch_setup(context):
 
     controller_override_yaml = _write_controller_override_file(context)
 
-    # 通过 xacro 处理 URDF，使 <ros2_control> 硬件标签里的 $(find arm_model) 被展开。
+    # 通过 xacro 处理 URDF，使 <ros2_control> 硬件标签里的 $(find arm_model) 被展开；
+    # 顺便把 headless 透传给 mujoco_ros2_control——测量不需要界面，默认关掉 UI，
+    # 不跑 GLFW/渲染线程，物理线程照常推进（"Running in HEADLESS mode."）。
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             plant_urdf_path,
+            " headless:=",
+            LaunchConfiguration("headless"),
         ]
     )
     robot_description = {"robot_description": ParameterValue(robot_description_content, value_type=str)}
@@ -309,6 +313,11 @@ def generate_launch_description():
                 "show_rviz",
                 default_value="false",
                 description="是否启动 RViz2（测量不需要界面，默认关）",
+            ),
+            DeclareLaunchArgument(
+                "headless",
+                default_value="true",
+                description="是否关掉 MuJoCo 自带 UI 窗口（测量默认 headless，纯命令行跑）",
             ),
             DeclareLaunchArgument(
                 "use_sim_time",

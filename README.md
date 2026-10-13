@@ -294,6 +294,7 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 #    move_to_start_duration / controller_urdf_path（控制器内部模型，只影响激励轨迹
 #    生成，被控对象仍是真值 URDF）/ step_timeout（测量变长时要放大）/
 #    trajectory_seed（0 = 随机不可复现，非 0 = 固定；控制器日志会打出实际种子）
+#    测量默认 headless（关掉 MuJoCo UI 窗口，纯命令行跑）；想要界面加 headless:=false
 
 # 2) 离线辨识
 ros2 run parameter_identify identify_arm \

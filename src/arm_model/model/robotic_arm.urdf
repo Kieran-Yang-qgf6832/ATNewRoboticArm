@@ -3,12 +3,23 @@
      Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
+  xmlns:xacro="http://www.ros.org/wiki/xacro"
   name="robotic_arm">
+
+  <!-- headless：是否关掉 MuJoCo 自带的 UI 窗口，纯命令行跑仿真（测量/批处理用）。
+       默认 false = 保留 UI。launch 用 xacro 传 headless:=true 打开。
+       注意：本文件同时被 pinocchio 当**纯 URDF** 解析（identify_arm / 激励轨迹生成），
+       pinocchio 会忽略 <ros2_control> 整块和 xacro 元素，所以这里加 xacro 是安全的；
+       但不要在这里写会影响运动学的 $(arg ...)。 -->
+  <xacro:arg name="headless" default="false"/>
 
   <ros2_control name="arm_hw" type="system">
     <hardware>
       <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
       <param name="mujoco_model">$(find arm_model)/model/scene.xml</param>
+      <!-- mujoco_ros2_control 的硬件参数：headless=true 时用 HeadlessAdapter 代替 GLFW，
+           不开窗口、不跑渲染线程，物理线程照常推进。 -->
+      <param name="headless">$(arg headless)</param>
     </hardware>
 
     <joint name="joint1">

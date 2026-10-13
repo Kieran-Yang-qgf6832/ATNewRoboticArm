@@ -50,12 +50,15 @@ def generate_launch_description():
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
 
-    # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开
+    # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开；
+    # headless 透传给 mujoco_ros2_control，默认 false = 保留 MuJoCo UI 窗口。
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             urdf_path,
+            " headless:=",
+            LaunchConfiguration("headless"),
         ]
     )
     robot_description = {
@@ -76,6 +79,12 @@ def generate_launch_description():
     robot_description_remap = [("robot_description", "arm_robot_description")]
 
     use_sim_time = ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)
+
+    headless_arg = DeclareLaunchArgument(
+        "headless",
+        default_value="false",
+        description="是否关掉 MuJoCo 自带 UI 窗口（true = 纯命令行跑仿真）",
+    )
 
     show_rviz_arg = DeclareLaunchArgument(
         "show_rviz",
@@ -216,6 +225,7 @@ def generate_launch_description():
 
     return LaunchDescription(
         [
+            headless_arg,
             show_rviz_arg,
             use_sim_time_arg,
             controller_manager_timeout_arg,

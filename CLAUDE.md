@@ -158,7 +158,7 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
   `OpaqueFunction` 生成 node key 为 `arm_controller` 的补充文件。**验证参数是否生效要查
   目标节点（`ros2 param get /arm_controller <name>`）或结果（CSV 行数），不能只看"文件里写了"。**
-- **O10 已修**（`COMMIT_O10`）：激励轨迹生成原本不可复现（`CMAParameters` 的 seed 传 0，
+- **O10 已修**（`06af06d`）：激励轨迹生成原本不可复现（`CMAParameters` 的 seed 传 0，
   libcmaes 的语义是"用当前时间"），且 `k_max_fevals = 600` 对 36 维变量严重欠收敛，
   于是返回的"最优"轨迹**每次都违反软限位**（实测 21/21 次，违例 0.119 ~ 6.675 rad），
   指令远超行程把关节甩出硬限位（joint6 行程 15.4 rad、速度峰值 1064 rad/s），数据报废。
@@ -184,6 +184,23 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   覆盖（见 O9、O10）。
   仍未验证的是 `admittance`（对应 `admittance_move` 步骤）与 `teach_pendant`（`teach`）；
   `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入。
+
+### 无界面运行（headless）
+
+MuJoCo 自带的 UI 窗口可以关掉，纯命令行跑：`headless` 是 **mujoco_ros2_control 的硬件参数**，
+写在 URDF 的 `<ros2_control><hardware>` 块里（`<param name="headless">`），不是控制器参数。
+URDF 用 xacro 声明了同名 arg（默认 `false`），两个 launch 都把它透传出去：
+
+- `arm_measure_sim.launch.py`：`headless` **默认 true**（测量不需要界面）；
+- `arm_controller_test_sim.launch.py`：默认 false，想要无界面加 `headless:=true`。
+
+headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理线程照常 500 Hz 推进；
+日志里是 `Running in HEADLESS mode.`（不再有 `Starting the MuJoCo rendering thread...`）。
+实测同一 seed 下 headless 与带界面生成**完全相同**的激励轨迹，数据链路不受影响。
+
+> `sim_speed_factor`（同一处的硬件参数，2.0 = 2 倍速）可以跑得比实时快，但**现在不能用**：
+> CSV 的 `time` 列是墙钟，跑快了 `csv_loader` 仍按墙钟求导，加速度会错。要先让 measure
+> 记录仿真时间（O8）。
 
 ### 两个容易踩的运维细节
 

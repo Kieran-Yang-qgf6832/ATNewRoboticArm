@@ -121,6 +121,7 @@ CSV 默认落在**项目根目录**的 `measured_for_identification.csv`（launc
 | `trajectory_repeat_cnt` | `1` | 重复次数；测量时长 = `move_to_start_duration + period × repeat_cnt` |
 | `move_to_start_duration` | `3.0` | 移动到激励轨迹起点的时长 |
 | `trajectory_seed` | `0` | 激励轨迹 CMA-ES 随机种子：**0 = 随机（不可复现）**，非 0 = 固定可复现 |
+| `headless` | `true` | **关掉 MuJoCo 自带 UI 窗口**，纯命令行跑（测量不需要界面） |
 | `step_timeout` | `30.0` | 任务层单步骤超时；测量比 `measure.yaml` 的 `duration` 长时**必须放大** |
 
 例：用上一轮辨识的模型生成 120 s 激励轨迹：
@@ -136,6 +137,26 @@ ros2 launch launch_pack arm_measure_sim.launch.py \
 > 只转发 `arm_controller.*` 前缀的项）——见 [docs/bugs.md O9](../../docs/bugs.md)。
 > 改完参数请用 `ros2 param get /arm_controller measure_trajectory_period` 或 CSV 行数
 > （500 Hz 下 120 s 应约 60000 行）验证它真的生效。
+
+### 无界面（headless）运行
+
+测量默认就是 headless——launch 会把 `headless:=true` 传给 xacro，最终写进 URDF 的
+`<ros2_control><hardware>` 块，mujoco_ros2_control 收到后用 `HeadlessAdapter` 代替 GLFW，
+**不开窗口、不起渲染线程**，物理线程照常以 500 Hz 推进。日志里会看到：
+
+```text
+[MujocoSimulation]: Running in HEADLESS mode.
+[MujocoSimulation]: Starting the MuJoCo physics thread...
+```
+
+想临时把界面要回来看，加 `headless:=false` 即可。实测 headless 与带界面在**同一 seed 下
+产生完全相同的激励轨迹**（score 2.10418 vs 2.10418），数据链路不受影响。
+
+> 想进一步**跑得比实时快**，mujoco_ros2_control 还有个硬件参数 `sim_speed_factor`
+> （`<param name="sim_speed_factor">2.0</param>` = 2 倍速）。**但现在不能直接用**：
+> CSV 的 `time` 列记的是 `steady_clock` 墙钟，不是仿真时间；跑快了以后
+> `csv_loader` 仍按墙钟求导，加速度会被算成错的值。要先让 measure 记录仿真时间
+> （见 [docs/bugs.md O8](../../docs/bugs.md)）才能开这个开关。
 
 ### 激励轨迹的可复现与可行性（O10）
 
