@@ -362,9 +362,14 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "step_timeout",
                 # O12 之前默认 30 s。加碰撞约束后激励轨迹生成（1500 次 CMA-ES 评估，
-                # 每个采样点做 AABB 预筛 + 带安全裕度的碰撞查询）实测约 50 s，再加上
-                # move_to_start 3 s 与一个轨迹周期 10 s，30 s 一定会误判失败。
-                default_value="240.0",
+                # 每个采样点做 AABB 预筛 + 带安全裕度的碰撞查询）在 6 自由度模型上实测
+                # 约 50 s，30 s 一定会误判失败，所以先提到 240 s。
+                # 换成 4 自由度模型后还遇到一个更慢的情况：连杆间碰撞约束开着时，它的
+                # base_link 网格 5.0 MB（6 自由度 0.7 MB），coal 的 mesh-mesh 查询让生成
+                # 时间 > 4.5 min（2026-10-17 实测 240 s 超时、600 s 仍未生成完）。
+                # 现在 ros2_controller.yaml 默认关掉连杆间约束（地面净空保留），生成回到
+                # ~46 s；但如果以后重新打开该约束，240 s 一定不够，所以这里保留 600 s 余量。
+                default_value="600.0",
                 description="任务层单步骤超时（秒）；默认已按 O12 的生成耗时放大，长测量再自行调大",
             ),
             DeclareLaunchArgument(

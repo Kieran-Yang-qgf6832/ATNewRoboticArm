@@ -29,7 +29,9 @@
 
 class ExcitationTrajectory {
 public:
-    explicit ExcitationTrajectory(const std::string& urdf_path);
+    /// @param urdf_path          模型 URDF 路径
+    /// @param end_effector_frame 末端坐标系名（必须存在于 URDF 中；4 自由度模型是 link4）
+    explicit ExcitationTrajectory(const std::string& urdf_path, const std::string& end_effector_frame);
     ~ExcitationTrajectory();
     void generate(double period, int repeat_cnt);
     bool generate_is_finished();

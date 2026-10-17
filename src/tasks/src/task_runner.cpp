@@ -48,9 +48,8 @@
 
 namespace {
 
-/// 默认关节顺序，需与 ros2_controller.yaml / URDF 保持一致。
-const std::vector<std::string> kDefaultJoints = {
-    "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
+/// 默认关节顺序，需与 ros2_controller.yaml / URDF 保持一致（当前生效模型为 4 自由度）。
+const std::vector<std::string> kDefaultJoints = {"joint1", "joint2", "joint3", "joint4"};
 
 /**
  * @brief 解析默认任务配置文件路径
@@ -87,9 +86,9 @@ std::string join(const std::vector<std::string>& values) {
  * - @c tasks_config：任务配置文件路径（默认指向安装后的 @c tasks/config/tasks.yaml）；
  * - @c task_sequence：要执行的**序列名**（默认空，表示只加载配置并等待）；
  * - @c controller_node：控制器节点名（默认 "arm_controller"）；
- * - @c joints：关节顺序（默认 joint1..joint6）；
+ * - @c joints：关节顺序（默认 joint1..joint4）；
  * - @c cart_traj_topic / @c joint_traj_topic / @c admittance_topic：轨迹话题；
- * - @c base_frame / @c ee_frame：末端位姿参考系与末端坐标系（默认 "base_link" / "link6"）；
+ * - @c base_frame / @c ee_frame：末端位姿参考系与末端坐标系（默认 "base_link" / "link4"）；
  * - @c startup_timeout：等待控制器与 /joint_states 就绪的超时（秒，默认 10）；
  * - @c exit_settle：序列结束后保持 idel 的时长（秒，默认 0.5）；
  * - @c controller_idle_timeout：切入任务前等待控制器进入 idel 的最长时间（秒，默认 0.5）；
@@ -109,7 +108,7 @@ public:
         joint_traj_topic_        = declare_parameter<std::string>("joint_traj_topic", "arm_joint_traj");
         admittance_topic_        = declare_parameter<std::string>("admittance_topic", "arm_admittance");
         base_frame_              = declare_parameter<std::string>("base_frame", "base_link");
-        ee_frame_                = declare_parameter<std::string>("ee_frame", "link6");
+        ee_frame_                = declare_parameter<std::string>("ee_frame", "link4");
         tasks_config_            = declare_parameter<std::string>("tasks_config", default_tasks_config());
         task_sequence_           = declare_parameter<std::string>("task_sequence", "");
         startup_timeout_         = declare_parameter<double>("startup_timeout", 10.0);

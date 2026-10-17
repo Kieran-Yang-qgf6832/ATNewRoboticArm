@@ -1,3 +1,9 @@
+# ============================================================================
+# 当前生效模型：4 自由度机械臂（src/arm_model/model）。
+# 6 自由度模型保存在 Git 历史（commit 5e59ef5）；下面注释里 joint5/joint6、
+# link6 工具网格、0.124 rad 静差等数值都是 6 自由度时期整定的，切换后仅作参考，
+# 需要按 4 自由度模型重新实测。
+# ============================================================================
 controller_manager:
   ros__parameters:
     update_rate: 500
@@ -18,8 +24,6 @@ sim_pid_controller:
       - joint2
       - joint3
       - joint4
-      - joint5
-      - joint6
 
 arm_controller:
   ros__parameters:
@@ -28,9 +32,10 @@ arm_controller:
       - joint2
       - joint3
       - joint4
-      - joint5
-      - joint6
     urdf_path: ""
+    # 末端执行器坐标系：4 自由度模型的最后一节是 link4；6 自由度模型是 link6。
+    # controller 的 FK/雅可比、measure 激励轨迹、任务层 TF 查询都读这个参数。
+    end_effector_frame: link4
     command_interface_prefix: sim_pid_controller
     # 控制器激活后自动进入的状态。
     # 设为 reset：上电（激活）后先自动复位到 reset_joint_pos，复位完成时 ResetState
@@ -39,8 +44,17 @@ arm_controller:
     # 正好把它拉回零位）；复位时长/目标/容差由下面的 reset_duration / reset_joint_pos /
     # reset_tolerance 决定。若不想自动复位，改回 idel 即可。
     exp_state: reset
-    default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
-    default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
+    # 4 自由度模型的阻抗初值——**不能照搬 6 自由度或 MJCF 位置伺服的增益**：
+    #   · 6 自由度的 kp 200/800 依赖大得多的连杆惯量；MuJoCo 的 <position kp> 是隐式
+    #     伺服，而本项目走 500 Hz 显式力矩环（SimPidController），稳定域由 I/dt²、I/dt 决定。
+    #   · joint3 的等效惯量只有约 2e-4 kg·m²，显式阻尼的稳定上界 kd < 2I/dt ≈ 0.2；
+    #     kd 取 0.5 时会在 500 Hz 下出现 2 步一翻转的数值振荡（实测）。
+    #   · joint1（肩）在 bent 位姿下的重力 Hessian 特征值约 -6.4，kp 必须大于它才能
+    #     让重力前馈（按**期望**位姿算）下的跟踪误差收敛；取 15 留出裕量。
+    # 下面这组值经 MuJoCo 闭环仿真与实跑验证：复位收敛、reset_then_joint 跟踪误差
+    # 0.0000 rad。改动前建议先用同样的闭环仿真复核（尤其是 kd3）。
+    default_kp: [15.0, 20.0, 3.0, 3.0]
+    default_kd: [1.2, 2.0, 0.1, 0.3]
     # 所有保持路径的重力前馈补偿（docs/bugs.md O6 / O7）：reset / idel 与
     # write_hold_command()（cart_traj / joint_traj / admittance 的保持阶段）共用
     # HoldGravityFeedforward（arm_fsm.hpp）。
@@ -51,7 +65,7 @@ arm_controller:
     # 打开时用 RNEA 在 dq = ddq = 0 下算出重力力矩作为力矩前馈，静差被直接补掉。
     # 这是实机上唯一一处主动输出力矩的保持路径，怀疑模型质量或力矩符号时先关掉它。
     gravity_compensation: true
-    reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    reset_joint_pos: [0.0, 0.0, 0.0, 0.0]
     reset_duration: 3.0
     reset_tolerance: 0.01
     # 兜底：复位时长结束后再等这么久仍未全部到位（例如重力静差大于容差），打一条
@@ -73,16 +87,18 @@ arm_controller:
     # 生成的轨迹**不可复现**；填任意正整数即可复现同一条轨迹——控制器日志里的
     # "seed=" 会打出实际使用的值，照抄回来即可重放某一次测量。
     measure_trajectory_seed: 0
-    admittance_mass: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
-    admittance_damping: [20.0, 20.0, 20.0, 2.0, 2.0, 2.0]
-    admittance_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 导纳参数按 6 维任务空间定义；4 自由度模型下 admittance 状态不可用，
+    # 这里保留前 4 维仅为了让参数长度与关节数一致。
+    admittance_mass: [1.0, 1.0, 1.0, 0.1]
+    admittance_damping: [20.0, 20.0, 20.0, 2.0]
+    admittance_stiffness: [0.0, 0.0, 0.0, 0.0]
     measure_end_effector_x_lower_limit: -.inf
     measure_end_effector_x_upper_limit: .inf
     measure_end_effector_y_lower_limit: -.inf
     measure_end_effector_y_upper_limit: .inf
     # 末端位置箱式约束。注意 **z 下限卡的是"工具最低点"**，不是末端 frame 原点：
     # 实际值 = 末端原点 z - measure_end_effector_tool_offset。
-    # 实测（2026-10-13）：只卡原点 z>=0.1 时 link6 的工具网格会钻进地面 4.6 mm，
+    # 实测（2026-10-13，6 自由度时期）：只卡原点 z>=0.1 时 link6 的工具网格会钻进地面 4.6 mm，
     # MuJoCo 的地面接触冲量让模型残差出现 81.9 N·m 的尖峰（每个激励周期一次），
     # 而 URDF 里没有地面，无法解释——辨识数据因此报废。
     #
@@ -91,8 +107,9 @@ arm_controller:
     # 保留这两个参数作 O11 的回归基准与逃生开关：想回到旧的单点约束，把 z 下限设回 0.20 即可。
     measure_end_effector_z_lower_limit: -.inf
     measure_end_effector_z_upper_limit: .inf
-    # 工具最低点相对末端 frame 原点的偏移（沿 -z，米）。link6 的 STL 实测 0.0569 m，
-    # 留一点余量取 0.07；实际生效值见控制器日志 "激励约束：" 那一行。
+    # 工具最低点相对末端 frame 原点的偏移（沿 -z，米）。0.07 是 6 自由度 link6 的
+    # 实测值（0.0569 m 加余量），4 自由度下需要重新确认；实际生效值见控制器日志
+    # "激励约束：" 那一行。
     # 只在 measure_end_effector_z_lower_limit 有限时才有意义（O12 后默认关闭）。
     measure_end_effector_tool_offset: 0.07
     # 指令力矩可行性：RNEA 算出的 |关节力矩| 不得超过 该比例 × 关节额定力矩（URDF 的
@@ -105,10 +122,16 @@ arm_controller:
     #   它们的网格在关节处本来就互相嵌入，检查它们会让可行域恒为空。
     #   地面净空：每个连杆网格的最低点 >= 该值（米），**base_link 除外**（它的网格本来
     #   就埋在地面下 9.5 mm，仿真里是静态体、不产生接触）。与 measure_end_effector_z_lower_limit
-    #   的区别是它卡全部 6 个活动连杆（实测 link4/link5/link6 在部分位形下都会低于 z=0）。
-    # 两个值的来历：1000 个均匀随机位形里，从不碰撞的几对中 p5 分位最小约 0.028 m
-    # （link3↔link5）、p1 分位 0.021 m；20 mm 会切掉一小部分极端位形但不伤主体激励空间。
+    #   的区别是它卡全部活动连杆（6 自由度时期实测 link4/link5/link6 在部分位形下都会低于 z=0）。
+    # 两个值的来历（6 自由度时期）：1000 个均匀随机位形里，从不碰撞的几对中 p5 分位最小
+    # 约 0.028 m（link3↔link5）、p1 分位 0.021 m；20 mm 会切掉一小部分极端位形但不伤主体
+    # 激励空间。4 自由度模型的连杆更少，建议重新跑一遍 check_collision.py 确认。
     # 地面留 10 mm 是给 MuJoCo 接触容忍度留余量。
     # 改完记得看日志 "激励约束：" 行确认实际生效值。
-    measure_traj_collision_safe_distance: 0.02
+    # 4 自由度模型的连杆间碰撞约束**默认关闭**：它的 base_link 网格 5.0 MB（6 自由度
+    # 是 0.7 MB），且 AABB 与整条臂长期重叠，coal 的 mesh-mesh 距离查询让激励轨迹生成
+    # 从 ~50 s 恶化到 >4.5 min（2026-10-17 实测 240 s 超时、600 s 仍未完成）。
+    # 地面净空 measure_traj_ground_clearance 仍然开启（平面距离查询很便宜）。
+    # 网格简化或把 base_link 从碰撞对里排除后，可以把它恢复成 0.02。
+    measure_traj_collision_safe_distance: 0.0
     measure_traj_ground_clearance: 0.01

@@ -164,6 +164,11 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("measure_traj_ground_clearance", 0.0);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
+    // 末端执行器坐标系名（URDF 里的 link 名）。模型换型时必须跟着改：4 自由度模型是
+    // link4，6 自由度模型是 link6。它同时被 controller 的 FK/雅可比、measure 激励轨迹
+    // 与任务层的 TF 查询使用，写错会在初始化或测量时报 "does not contain the
+    // end-effector frame"。默认值沿用 6 自由度时期的 link6。
+    auto_declare<std::string>("end_effector_frame", "link6");
     auto_declare<std::string>("exp_state", "idel");
     auto_declare<std::string>("command_interface_prefix", "");
     auto_declare<std::string>("current_state", "unknown");
@@ -186,6 +191,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
         }
     }
 
+    // 关键参数在构造阶段打出来，方便确认 YAML 是否真的生效（docs/bugs.md C6 的教训）。
+    std::string end_effector_frame;
+    node->get_parameter<std::string>("end_effector_frame", end_effector_frame);
+    RCLCPP_INFO(
+        node->get_logger(), "arm_controller: joints=%zu, urdf_path=%s, end_effector_frame=%s", joints_name.size(), urdf_path.c_str(),
+        end_effector_frame.c_str());
+
     // 构造状态机工厂：内部加载 URDF 模型、构建求解器并注册全部控制状态。
     try {
         fsm_factory = std::make_shared<FSMArmControlFactory>(node);
@@ -205,7 +217,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
      *
      * 遍历本次请求更新的参数并逐项校验，只有全部通过才允许生效：
      * - @c exp_state：直接写入状态机工厂的期望状态名，不做范围校验；
-     * - @c joints / @c command_interface_prefix：初始化后不可修改，一律拒绝；
+     * - @c joints / @c command_interface_prefix / @c end_effector_frame：初始化后不可修改，一律拒绝；
      * - @c default_kp / @c default_kd / @c reset_joint_pos：长度不得超过关节数，
      *   以避免状态切换时重新分配内存；
      * - @c admittance_mass / @c admittance_damping / @c admittance_stiffness：
@@ -232,7 +244,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
             if (name == "exp_state") {
                 // 期望状态名允许热更新，直接写入状态机工厂，由各状态的 check_switch() 消费。
                 fsm_factory->exp_state_name = param.as_string();
-            } else if (name == "joints" || name == "command_interface_prefix") {
+            } else if (name == "joints" || name == "command_interface_prefix" || name == "end_effector_frame") {
                 // 接口相关参数在 on_init() 后固定，禁止再修改。
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";

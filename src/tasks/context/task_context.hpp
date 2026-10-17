@@ -47,12 +47,12 @@ public:
     struct Options {
         std::string controller_node{"arm_controller"}; ///< 控制器节点名，用于拼接参数服务名
         std::vector<std::string> joints{                 ///< 关节顺序，需与 ros2_controller.yaml 一致
-            "joint1", "joint2", "joint3", "joint4", "joint5", "joint6"};
+            "joint1", "joint2", "joint3", "joint4"};
         std::string cart_traj_topic{"arm_cart_traj"};     ///< 笛卡尔轨迹话题
         std::string joint_traj_topic{"arm_joint_traj"};   ///< 关节轨迹话题
         std::string admittance_topic{"arm_admittance"};   ///< 导纳期望轨迹话题
         std::string base_frame{"base_link"};              ///< 末端位姿参考系
-        std::string ee_frame{"link6"};                    ///< 末端执行器坐标系
+        std::string ee_frame{"link4"};                    ///< 末端执行器坐标系（4 自由度模型）
         double controller_idle_timeout{0.5};              ///< 切入新任务前等待控制器进入 idel 的最长时间（秒）
     };
 

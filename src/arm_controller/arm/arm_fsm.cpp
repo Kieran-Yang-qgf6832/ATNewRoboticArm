@@ -1333,7 +1333,8 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     }
 
     const std::string urdf_path                        = factory->node_->get_parameter("urdf_path").as_string();
-    excitation_trajectory_                             = std::make_shared<ExcitationTrajectory>(urdf_path);
+    const std::string end_effector_frame               = factory->node_->get_parameter("end_effector_frame").as_string();
+    excitation_trajectory_                             = std::make_shared<ExcitationTrajectory>(urdf_path, end_effector_frame);
     excitation_trajectory_->set_seed(static_cast<std::uint64_t>(measure_trajectory_seed));
     excitation_trajectory_->end_effector_x_lower_limit = end_effector_x_lower_limit;
     excitation_trajectory_->end_effector_x_upper_limit = end_effector_x_upper_limit;

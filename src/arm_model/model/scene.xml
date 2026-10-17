@@ -1,9 +1,15 @@
 <mujoco model="robotic_arm_scene">
-  <!-- timestep=0.002 -> 500Hz，与 ros2_controller.yaml 的 update_rate 一致 -->
+  <!-- 场景入口：物理步长、地面、取景、光照。机械臂本体在 robotic_arm.xml。
+       timestep=0.002 -> 500 Hz，与 launch_pack/config/ros2_controller.yaml 的
+       controller_manager.update_rate=500 构成 1:1 整数分频：每个控制周期正好推进
+       一步物理仿真，力矩环的相位滞后最小。不写时 MuJoCo 默认也是 0.002，但写出来
+       能保证以后换版本/换机器时不变。
+       地面 geom 的 contype/conaffinity 打开（1/1）：机械臂会真的和地面碰撞，与
+       参数辨识里的地面净空约束（docs/bugs.md O11/O12）语义一致。 -->
   <option timestep="0.002" gravity="0 0 -9.81"/>
   <include file="robotic_arm.xml"/>
 
-  <statistic center="0.35 0 0.25" extent="1.2"/>
+  <statistic center="0.25 0 0.2" extent="0.9"/>
 
   <visual>
     <headlight diffuse="0.2 0.2 0.2" ambient="0.35 0.35 0.35" specular="0.1 0.1 0.1"/>
@@ -25,6 +31,5 @@
   <worldbody>
     <geom name="ground" type="plane" size="50 50 0.3" pos="0 0 0" material="groundplane" contype="1" conaffinity="1"/>
     <light name="main_light" pos="0 0 4" dir="0 0 -1" directional="true"/>
-
   </worldbody>
 </mujoco>

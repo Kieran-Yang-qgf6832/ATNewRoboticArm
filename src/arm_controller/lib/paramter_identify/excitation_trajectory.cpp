@@ -20,13 +20,13 @@
 #include <coal/collision_object.h>
 #include <coal/shape/geometric_shapes.h>
 
-ExcitationTrajectory::ExcitationTrajectory(const std::string& urdf_path) {
+ExcitationTrajectory::ExcitationTrajectory(const std::string& urdf_path, const std::string& end_effector_frame) {
     pinocchio::urdf::buildModel(urdf_path, model_);
     data_ = pinocchio::Data(model_);
-    if (!model_.existFrame("link6")) {
-        throw std::runtime_error("The URDF model does not contain the end-effector frame: link6");
+    if (!model_.existFrame(end_effector_frame)) {
+        throw std::runtime_error("The URDF model does not contain the end-effector frame: " + end_effector_frame);
     }
-    end_effector_frame_id_ = model_.getFrameId("link6");
+    end_effector_frame_id_ = model_.getFrameId(end_effector_frame);
 
     // O12：碰撞检测的几何模型。buildGeom 读 URDF 里每个 link 的 <collision> 段（本项目的
     // 7 个 STL 网格），得到与 MuJoCo 仿真**同一套**几何——仿真里会撞的这里一定撞。

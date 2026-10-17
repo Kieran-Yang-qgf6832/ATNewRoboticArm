@@ -77,7 +77,8 @@ public:
      */
     FSMArmControlFactory(rclcpp_lifecycle::LifecycleNode::SharedPtr node) {
         node_      = node;
-        model_     = std::make_shared<ModelFromURDF>(node->get_parameter("urdf_path").as_string(), "link6");
+        model_     = std::make_shared<ModelFromURDF>(
+            node->get_parameter("urdf_path").as_string(), node->get_parameter("end_effector_frame").as_string());
         task_map_  = std::make_shared<Default6DofTaskSpaceMapping>();
         arm_solve_ = std::make_shared<ArmSolve>(model_, task_map_);         // 加载机器人模型
 

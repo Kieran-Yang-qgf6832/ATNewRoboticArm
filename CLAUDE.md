@@ -4,12 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
+基于 ROS 2 (Jazzy) + `ros2_control` 的机械臂控制系统（当前生效模型为 **4 自由度**，6 自由度版本见 Git 历史），支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
 > `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O11 已全部闭环。
+
+> **模型切换说明（2026-10-17）**：`src/arm_model/model/` 现在是 **4 自由度**机械臂
+> （几何/惯量/限位/网格来自它自己的 SolidWorks 导出）。接口层沿用 6 自由度版本的写法：
+> URDF 带 `<ros2_control>`（effort 命令 + position/velocity/effort/acceleration 状态）
+> 与 xacro `headless` 参数，MJCF 用 `<motor>` 力矩执行器，scene 显式 `timestep=0.002`
+> 且地面参与碰撞。6 自由度模型保存在 Git 历史（commit `5e59ef5`），可从那里取回。
+> 注意：文档与 `ros2_controller.yaml` / `tasks.yaml` 里仍有若干按 6 自由度整定的
+> 数值和 6 维任务空间序列（joint5/joint6、link6 工具偏移、z≈1.233 m 的位姿等），
+> 它们只是历史参考，4 自由度下不可用或需要重新实测。
+> 4 自由度模型的 `default_kp/default_kd` 按**显式 500 Hz 力矩环**重新整定过
+> （joint3 等效惯量只有 ~2e-4 kg·m²，kd 必须 < 0.2；肩关节 kp 要压过重力 Hessian
+> 的 -6.4）；`measure_traj_collision_safe_distance` 默认改为 0（base_link 网格 5 MB，
+> 开着它激励轨迹生成 > 4.5 min），地面净空仍开启。改这些值前先看 YAML 里的注释。
+>
+> 末端坐标系已参数化：控制器新增 `end_effector_frame` 参数（默认 `link6`，
+> `ros2_controller.yaml` 里设成 `link4`），measure 激励轨迹与任务层（`ee_frame` 默认
+> `link4`）共用它；换回 6 自由度模型时只改参数即可。注意离线工具
+> `fk_dump` / `ik_solve` / `ik_benchmark` 仍把末端 frame 写死为 `link6`。
 
 ## 常用命令
 
