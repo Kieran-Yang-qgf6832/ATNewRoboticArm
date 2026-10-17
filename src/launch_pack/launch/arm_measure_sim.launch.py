@@ -361,8 +361,11 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "step_timeout",
-                default_value="30.0",
-                description="任务层单步骤超时（秒）；长测量需要放大",
+                # O12 之前默认 30 s。加碰撞约束后激励轨迹生成（1500 次 CMA-ES 评估，
+                # 每个采样点做 AABB 预筛 + 带安全裕度的碰撞查询）实测约 50 s，再加上
+                # move_to_start 3 s 与一个轨迹周期 10 s，30 s 一定会误判失败。
+                default_value="240.0",
+                description="任务层单步骤超时（秒）；默认已按 O12 的生成耗时放大，长测量再自行调大",
             ),
             DeclareLaunchArgument(
                 "controller_manager_timeout",

@@ -97,9 +97,16 @@ ament_target_dependencies(
   orocos_kdl
 )
 
+target_compile_definitions(arm_controller PRIVATE PINOCCHIO_WITH_COLLISION)
+
 target_link_libraries(arm_controller
   Eigen3::Eigen
   pinocchio::pinocchio
+  # O12：激励轨迹的连杆间/连杆-地面碰撞限制要用 pinocchio 的几何与距离查询（底层是 coal，
+  # 即 hpp-fcl 的继任者）。pinocchio_collision 会自动带上 coal::coal 与
+  # PINOCCHIO_WITH_COLLISION 编译定义；没有这个宏，GeometryData 的 collisionResults /
+  # distanceResults 成员在头文件里根本不存在。
+  pinocchio::pinocchio_collision
   PkgConfig::LIBUSB
   libcmaes::cmaes
 )

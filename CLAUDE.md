@@ -188,6 +188,21 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   > 验证辨识结果**不要看报告里的 `rmse`**——它量的是最小二乘基参数，而写进 URDF 的是
   > 投影之后的参数，实测可以差几十倍。用 `src/parameter_identify/tools/verify_torque.py`
   > 拿最终 URDF 正演一遍（训练集 + 另一条轨迹 + 与真值模型对比 + 残差与 |dq| 的相关性）。
+- **O12 已修**（本次，未提交）：激励轨迹**没有自碰撞与连杆-地面碰撞约束**——1000 个均匀
+  随机位形里有 **11 个自碰撞**（link1↔link4/5/6、link2↔link4、base_link↔link3/4），
+  且 link4/link5/link6 的网格在部分位形下可低于 z=0。现在：
+  - `measure_traj_collision_safe_distance`（新，默认 0.02 m）——非相邻连杆网格之间的距离
+    不得小于它；相邻连杆对（joint 相差 1）不检查，与 MuJoCo `contact <exclude>` 一致；
+  - `measure_traj_ground_clearance`（新，默认 0.01 m）——每个连杆网格的最低点必须高于它；
+    **base_link 除外**（它本来就埋在地面下 9.5 mm，仿真里是静态体、不产生接触）；
+  - 旧 `measure_end_effector_z_lower_limit` 默认改回 `-.inf`（O11 的回归开关保留）；
+  - 两个参数 `0 = 关闭`，实际生效值会打在 `激励约束：` 日志行上。
+  **实现要点（别走回头路）**：完整距离查询 79 ms/次（1000 点 × 1500 次 = 33 h，不可用），
+  实际用「世界 AABB 预筛 + coal 带 security_margin 的碰撞查询」（约 0.94 ms/点）。
+  代价是**激励轨迹生成从 ~20 s 变成 ~54 s**，`arm_measure_sim.launch.py` 的
+  `step_timeout` 默认已从 30 s 提到 240 s。验证工具：
+  `src/parameter_identify/tools/check_collision.py`（拿 csv 里的实际关节角复算精确距离）。
+  详见 `docs/bugs.md` O12。
 - `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
   `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，

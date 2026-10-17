@@ -22,6 +22,8 @@
   <depend>kdl_parser</depend>
   <depend>orocos_kdl</depend>
   <depend>pinocchio</depend>
+  <!-- O12：pinocchio 的碰撞/距离查询底层是 coal（hpp-fcl 的继任者）。 -->
+  <depend>coal</depend>
   <depend>ament_index_cpp</depend>
   <depend>arm_model</depend>
 

@@ -1284,8 +1284,13 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     double end_effector_z_upper_limit;
     double traj_torque_limit_rate;
     double end_effector_tool_offset;
+    double traj_collision_safe_distance;
+    double traj_ground_clearance;
     factory->node_->get_parameter("measure_traj_torque_limit_rate", traj_torque_limit_rate);
     factory->node_->get_parameter("measure_end_effector_tool_offset", end_effector_tool_offset);
+    // O12：碰撞限制。0 = 关闭。实际生效值会打进 "激励约束：" 日志行。
+    factory->node_->get_parameter("measure_traj_collision_safe_distance", traj_collision_safe_distance);
+    factory->node_->get_parameter("measure_traj_ground_clearance", traj_ground_clearance);
     factory->node_->get_parameter("measure_end_effector_x_lower_limit", end_effector_x_lower_limit);
     factory->node_->get_parameter("measure_end_effector_x_upper_limit", end_effector_x_upper_limit);
     factory->node_->get_parameter("measure_end_effector_y_lower_limit", end_effector_y_lower_limit);
@@ -1338,6 +1343,8 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     excitation_trajectory_->end_effector_z_upper_limit = end_effector_z_upper_limit;
     excitation_trajectory_->traj_torque_limit_rate    = traj_torque_limit_rate;
     excitation_trajectory_->end_effector_tool_offset  = end_effector_tool_offset;
+    excitation_trajectory_->traj_collision_safe_distance = traj_collision_safe_distance;
+    excitation_trajectory_->traj_ground_clearance        = traj_ground_clearance;
     paramter_identify_                                 = std::make_unique<ParamterIdentify>(urdf_path);
     const auto record_capacity =
         static_cast<int>(std::ceil(trajectory_period_ * static_cast<double>(trajectory_repeat_cnt_) * measure_record_sample_rate_)) + 2;
@@ -1453,13 +1460,19 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             excitation_trajectory_->get_final_violation(),
             excitation_trajectory_->get_final_score());
         // 约束的实际生效值也必须打出来（C6：写错的参数名不会有任何提示）。
+        // O12：碰撞约束的实际生效值与违例量也在这里打出来——判断「碰撞约束到底有没有在
+        // 约束优化」只能看这一行，不能只看 YAML（C6 的教训）。
         RCLCPP_INFO(
             factory->node_->get_logger(),
-            "激励约束：关节软限位 %.3f，力矩上限 %.3f×额定，末端工具偏移 %.4f m，末端 z 下限 %.4f m",
+            "激励约束：关节软限位 %.3f，力矩上限 %.3f×额定，末端工具偏移 %.4f m，末端 z 下限 %.4f m，"
+            "连杆间安全间距 %.4f m，地面净空 %.4f m，碰撞违例 %.3e",
             excitation_trajectory_->traj_pos_soft_limit_rate,
             excitation_trajectory_->traj_torque_limit_rate,
             excitation_trajectory_->end_effector_tool_offset,
-            excitation_trajectory_->end_effector_z_lower_limit);
+            excitation_trajectory_->end_effector_z_lower_limit,
+            excitation_trajectory_->traj_collision_safe_distance,
+            excitation_trajectory_->traj_ground_clearance,
+            excitation_trajectory_->get_collision_violation());
         measure_phase_ = MeasurePhase::MovingToStart;
     }
 

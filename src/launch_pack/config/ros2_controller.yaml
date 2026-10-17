@@ -85,12 +85,30 @@ arm_controller:
     # 实测（2026-10-13）：只卡原点 z>=0.1 时 link6 的工具网格会钻进地面 4.6 mm，
     # MuJoCo 的地面接触冲量让模型残差出现 81.9 N·m 的尖峰（每个激励周期一次），
     # 而 URDF 里没有地面，无法解释——辨识数据因此报废。
-    measure_end_effector_z_lower_limit: 0.20
+    #
+    # O12（2026-10-17）：地面净空现在由下面的 measure_traj_ground_clearance 直接卡在
+    # **每个连杆网格的最低点**上，因此这里默认关闭（-.inf），把激励空间还给碰撞约束。
+    # 保留这两个参数作 O11 的回归基准与逃生开关：想回到旧的单点约束，把 z 下限设回 0.20 即可。
+    measure_end_effector_z_lower_limit: -.inf
     measure_end_effector_z_upper_limit: .inf
     # 工具最低点相对末端 frame 原点的偏移（沿 -z，米）。link6 的 STL 实测 0.0569 m，
     # 留一点余量取 0.07；实际生效值见控制器日志 "激励约束：" 那一行。
+    # 只在 measure_end_effector_z_lower_limit 有限时才有意义（O12 后默认关闭）。
     measure_end_effector_tool_offset: 0.07
     # 指令力矩可行性：RNEA 算出的 |关节力矩| 不得超过 该比例 × 关节额定力矩（URDF 的
     # effort=50 N·m）。0 = 关闭。实机上力矩超限会直接跟踪失败；仿真里关节会被甩到高速，
     # 记录到的 qacc 出现尖峰，辨识数据报废。
     measure_traj_torque_limit_rate: 0.6
+    # O12：激励轨迹的碰撞限制（docs/bugs.md O12）。0 = 关闭。
+    #   连杆间安全间距：非相邻连杆网格之间的最小距离 >= 该值（米）。相邻连杆对
+    #   （joint index 相差 1）被排除，与 MuJoCo scene.xml 的 contact exclude 一致——
+    #   它们的网格在关节处本来就互相嵌入，检查它们会让可行域恒为空。
+    #   地面净空：每个连杆网格的最低点 >= 该值（米），**base_link 除外**（它的网格本来
+    #   就埋在地面下 9.5 mm，仿真里是静态体、不产生接触）。与 measure_end_effector_z_lower_limit
+    #   的区别是它卡全部 6 个活动连杆（实测 link4/link5/link6 在部分位形下都会低于 z=0）。
+    # 两个值的来历：1000 个均匀随机位形里，从不碰撞的几对中 p5 分位最小约 0.028 m
+    # （link3↔link5）、p1 分位 0.021 m；20 mm 会切掉一小部分极端位形但不伤主体激励空间。
+    # 地面留 10 mm 是给 MuJoCo 接触容忍度留余量。
+    # 改完记得看日志 "激励约束：" 行确认实际生效值。
+    measure_traj_collision_safe_distance: 0.02
+    measure_traj_ground_clearance: 0.01

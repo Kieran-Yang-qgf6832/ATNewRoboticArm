@@ -11,8 +11,11 @@
 #     measure_move_to_start_duration + measure_trajectory_period x repeat_cnt
 # （默认 3 + 10 x 1 = 13 s，另加激励轨迹的生成时间）。测量结束后状态停在
 # HoldingEnd 等 idel 请求，所以 duration 略大于实际测量即可：取小了不会丢数据，
-# 只是让随后的 wait_for_idel 多等一会儿（step_timeout 默认 30 s）；取大了则是
-# 空等。改了 ros2_controller.yaml 里的 measure_* 参数后记得同步这里。
+# 只是让随后的 wait_for_idel 多等一会儿；取大了则是空等。
+# O12 之后激励轨迹生成实测约 50 s（1500 次 CMA-ES 评估 + 碰撞约束），
+# arm_measure_sim.launch.py 的 step_timeout 默认已从 30 s 提到 240 s；
+# 如果自己写 launch 或直接跑 task_runner，记得把 step_timeout 放大。
+# 改了 ros2_controller.yaml 里的 measure_* 参数后记得同步这里。
 
 sequences:
   measure_only:

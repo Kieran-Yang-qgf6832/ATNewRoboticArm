@@ -155,6 +155,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("measure_traj_torque_limit_rate", 0.0);
     // 工具最低点相对末端 frame 原点的偏移（沿 -z，米），地面净空卡在工具最低点上。
     auto_declare<double>("measure_end_effector_tool_offset", 0.0);
+    // O12：激励轨迹的碰撞限制。0 = 关闭。
+    //   连杆间安全间距：非相邻连杆网格之间的最小距离不得小于该值（米）。
+    //   连杆-地面净空：每个连杆网格的最低点必须高于 z = 该值（米）。
+    // 注意这两个参数只在 measure 状态生成轨迹时读取（非实时路径），但按 C6 的约定必须在
+    // on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
+    auto_declare<double>("measure_traj_collision_safe_distance", 0.0);
+    auto_declare<double>("measure_traj_ground_clearance", 0.0);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("exp_state", "idel");
@@ -324,6 +331,14 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 if (!std::isfinite(offset) || offset < 0.0) {
                     result.successful = false;
                     result.reason     = "measure_end_effector_tool_offset must be finite and non-negative";
+                    return result;
+                }
+            } else if (name == "measure_traj_collision_safe_distance" || name == "measure_traj_ground_clearance") {
+                // 0 = 关闭；打开时是长度，必须非负且有限（不允许 NaN/inf）。
+                const double length = param.as_double();
+                if (!std::isfinite(length) || length < 0.0) {
+                    result.successful = false;
+                    result.reason     = name + " must be finite and non-negative (0 disables it)";
                     return result;
                 }
             } else if (name == "measure_end_effector_x_lower_limit"
