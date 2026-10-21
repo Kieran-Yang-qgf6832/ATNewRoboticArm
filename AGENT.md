@@ -18,8 +18,9 @@
   reference interface，向仿真硬件输出 `effort`。
 - `arm_controller/ArmRealInterfaces`：实机 `hardware_interface::SystemInterface`。
   关节名从 URDF 的 `<ros2_control>` 段读取，使用 libusb CDC 与 MCU 收发 packed struct
-  数据包。MCU 通信帧固定为 6 个电机，**关节数与帧长不符时 `on_init` 直接拒绝启动**
-  （越界读写会把垃圾数据当指令发给电机，见 `docs/bugs.md` O3）。
+  数据包。MCU 通信帧当前固定为 6 个电机，**关节数与帧长不符时 `on_init` 直接拒绝启动**
+  （越界读写会把垃圾数据当指令发给电机，见 `docs/bugs.md` O3）。因此当前 4 轴 URDF
+  **不能直接走实机**；打通实机前需要确认硬件电机数并调整协议/接口（见四轴适配报告）。
 
 ## 主要目录
 
@@ -57,25 +58,41 @@
   做一次逆解，不收敛就整条拒绝、**一个运动指令都不下发**（O2）。只查终点是因为单次
   逆解最坏约 386 µs，而控制周期是 2 ms。
 
-## 参数辨识（measure 状态）——当前结果不可用
+## 导纳 / 拖动示教（4 轴已可用，docs/bugs.md O14）
 
-`ParamterMeasureState`（`measure`）生成傅里叶激励轨迹、跟踪它并把
-`position/velocity/torque` 记进 CSV。链路本身已跑通（见 `docs/bugs.md` O8），但
-**辨识结果非物理**，根因是**加速度**：CSV 里没有加速度列，离线辨识只能对 500 Hz 的记录速度
-做二次求导，相对误差 31.5%（换任何平滑参数只能到 20~34%）。记录力矩本身与刚体动力学在机器
-精度上一致（反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`）。
+- `AdmittanceState`：没收到 `arm_admittance` 轨迹时是**自由导纳**——
+  期望位置锁在当前位姿，按 `M·ẍ + D·ẋ = F_est` 积分（K 不参与），推着走、撤力停；
+  收到轨迹时仍是「轨迹 + 柔顺」。逆解失败（顶到边界）回滚上一拍可行目标 + 速度清零，
+  **状态保持**、不报错回 idel。
+- 力估计 = `RNEA(q, dq, ddq_实测) − τ_act`（**模型减实测**，符号反了会朝背离受力方向让开）。
+  之后过死区（0.5 N / 0.05 N·m）→ 10 Hz 一阶低通 → 限幅（20 N / 3 N·m）。
+  死区不是优化项：K = 0 时导纳对力是无穷大直流增益，任何偏差都会积成爬行。
+- 限速：平移按速度向量模长 0.1 m/s，自转 0.5 rad/s。所有 `admittance_*` 参数**热更新**
+  （`std::atomic` 快照，run() 每拍读）。力估计对外发布在 `~/admittance_estimate`
+  （前一半原始值、后一半处理后），用于第 1 步复核。
+- `TeachPendantState`：零力拖动（kp = 0，只留 kd 阻尼 + 重力前馈），任务维从
+  `TaskMapping` 取，不再写死 6。
+- 一条命令的验收：`src/launch_pack/tools/admittance_demo_check.py`
+  （`--mode force|admittance|teach`，自己起 headless 仿真、跑 `tasks.yaml` 的
+  `admittance_demo` / `teach_demo`、注入已知外力并断言，退出码真实）。
 
-**要修的话**：让本状态把加速度一起写进 CSV——`FourierTrajectory::acceleration(t)` 已经有解析
-值，只需给 `ExcitationTrajectory` 加一个取值接口并在 `run()` 里写入 `acc_*` 列；离线侧的
-`csv_loader` 与 `acceleration_source: recorded` 已经支持。注意解析加速度是**指令值**，
-精度取决于跟踪质量。详见 `docs/bugs.md` O8。
+## 参数辨识（measure 状态）——已可用
+
+`ParamterMeasureState`（`measure`）生成傅里叶激励轨迹、跟踪它，并把
+`position/velocity/acceleration/torque` 与**仿真时间**记进 CSV。O8 修好后记录的是
+MuJoCo 的真实 `qacc`（`acc_*` 列），不再对速度二次求导：实测模型残差 31.5% → 0.37%，
+参数误差 11.56% → 0.39%，伪惯量物理校验通过。详见 `docs/bugs.md` O8。
+
+注意：辨识输出不能当下一轮辨识的先验（C7），验证结果要看 `verify_torque.py` 对最终
+URDF 的正演误差，而不是报告里的 `rmse`。
 
 ## 离线排查工具
 
 `tools/` 下 4 个工具**不安装**，构建后在 `build/arm_controller/` 里：
 
-- `fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>`：打印 FK 的平移/四元数/旋转矩阵与任务空间 6 维向量
-- `ik_solve <urdf> <t0..t5> <s0..s5>`：单次逆解，报告三态结果、残余、迭代次数与耗时
+- `fk_dump <urdf> <frame> <q1> ... <qN>`：打印 FK 的平移/四元数/旋转矩阵与任务空间向量
+  （4 轴：`link4 4`；6 轴：`link6 6`）
+- `ik_solve <urdf> <frame> <task_dof> <t0..tN> <s0..sM>`：单次逆解，报告三态结果、残余、迭代次数与耗时
 - `ik_benchmark`：批量采样统计收敛率与迭代次数，用于扫描求解器参数
 - `arm_real_joint_count_test`：不连硬件校验实机接口的关节数处理（5/6/7 关节）
 

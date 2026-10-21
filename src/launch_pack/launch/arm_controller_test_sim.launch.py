@@ -48,6 +48,8 @@ def generate_launch_description():
 
     urdf_path = os.path.join(arm_model_share, "model", "robotic_arm.urdf")
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
+    # MuJoCo 插件配置（外部力注入，docs/bugs.md O14）：导纳/示教的验收脚本要在末端施力。
+    mujoco_plugins_yaml = os.path.join(launch_pack_share, "config", "mujoco_plugins.yaml")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
 
     # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开；
@@ -141,6 +143,7 @@ def generate_launch_description():
             robot_description,
             {"use_sim_time": use_sim_time},
             ParameterFile(controller_yaml),
+            ParameterFile(mujoco_plugins_yaml),
         ],
         remappings=robot_description_remap,
         on_exit=Shutdown(),

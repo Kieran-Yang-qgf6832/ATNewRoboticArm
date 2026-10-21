@@ -145,6 +145,23 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<std::vector<double>>("admittance_mass", {1.0, 1.0, 1.0, 0.1, 0.1, 0.1});
     auto_declare<std::vector<double>>("admittance_damping", {20.0, 20.0, 20.0, 2.0, 2.0, 2.0});
     auto_declare<std::vector<double>>("admittance_stiffness", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    // 导纳的限速 / 死区 / 滤波（docs/bugs.md O14）。4 轴模型下 admittance 已可用：
+    //   · admittance_velocity_limit：平移速度模长上限（米/秒），斜推时不会被逐轴截断；
+    //   · admittance_rotation_velocity_limit：工具自转速度上限（弧度/秒）；
+    //   · admittance_force_deadband / admittance_torque_deadband：力估计死区。K = 0 时
+    //     导纳对力是无穷大直流增益，模型偏差会被积成缓慢爬行，死区是必需项；
+    //   · admittance_force_filter_cutoff：力估计一阶低通截止频率（赫兹），0 = 关闭。
+    // 这几个参数都支持热更新（run() 读原子快照，参数回调写入），调手感不用重启仿真。
+    auto_declare<double>("admittance_velocity_limit", 0.1);
+    auto_declare<double>("admittance_rotation_velocity_limit", 0.5);
+    auto_declare<double>("admittance_force_deadband", 1.5);
+    auto_declare<double>("admittance_torque_deadband", 0.2);
+    auto_declare<double>("admittance_force_filter_cutoff", 10.0);
+    // 力估计上限（O14）：近奇异位形下「τ = Jᵀ·F」的最小二乘解会被 1/σ_min 放大（实测
+    // 零位形进入导纳时被放大到 78 N / 12 N·m）。限幅只作用于进入导纳的那份估计，
+    // 对外发布的原始估计保持不变，便于诊断。
+    auto_declare<double>("admittance_force_limit", 20.0);
+    auto_declare<double>("admittance_torque_limit", 3.0);
     auto_declare<double>("measure_end_effector_x_lower_limit", -std::numeric_limits<double>::infinity());
     auto_declare<double>("measure_end_effector_x_upper_limit", std::numeric_limits<double>::infinity());
     auto_declare<double>("measure_end_effector_y_lower_limit", -std::numeric_limits<double>::infinity());
@@ -167,8 +184,14 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 末端执行器坐标系名（URDF 里的 link 名）。模型换型时必须跟着改：4 自由度模型是
     // link4，6 自由度模型是 link6。它同时被 controller 的 FK/雅可比、measure 激励轨迹
     // 与任务层的 TF 查询使用，写错会在初始化或测量时报 "does not contain the
-    // end-effector frame"。默认值沿用 6 自由度时期的 link6。
-    auto_declare<std::string>("end_effector_frame", "link6");
+    // end-effector frame"。默认值按当前生效的 4 自由度模型取 link4；换回 6 轴模型时
+    // 由 ros2_controller.yaml 显式覆盖成 link6。
+    auto_declare<std::string>("end_effector_frame", "link4");
+    // 任务空间维度（docs/bugs.md O13）：4 = (x, y, z, joint4 自转)，6 = (x, y, z, 旋转向量)。
+    // 4 轴模型的 6 维几何雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达——
+    // 实测最小二乘「尽力而为」会把位置让出 28.6 mm。换回 6 轴模型时改回 6。
+    // 按 C6 的约定必须在 on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
+    auto_declare<int64_t>("task_space_dof", 4);
     auto_declare<std::string>("exp_state", "idel");
     auto_declare<std::string>("command_interface_prefix", "");
     auto_declare<std::string>("current_state", "unknown");
@@ -194,9 +217,11 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 关键参数在构造阶段打出来，方便确认 YAML 是否真的生效（docs/bugs.md C6 的教训）。
     std::string end_effector_frame;
     node->get_parameter<std::string>("end_effector_frame", end_effector_frame);
+    int64_t task_space_dof = 4;
+    node->get_parameter("task_space_dof", task_space_dof);
     RCLCPP_INFO(
-        node->get_logger(), "arm_controller: joints=%zu, urdf_path=%s, end_effector_frame=%s", joints_name.size(), urdf_path.c_str(),
-        end_effector_frame.c_str());
+        node->get_logger(), "arm_controller: joints=%zu, urdf_path=%s, end_effector_frame=%s, task_space_dof=%lld",
+        joints_name.size(), urdf_path.c_str(), end_effector_frame.c_str(), static_cast<long long>(task_space_dof));
 
     // 构造状态机工厂：内部加载 URDF 模型、构建求解器并注册全部控制状态。
     try {
@@ -207,17 +232,31 @@ controller_interface::CallbackReturn ArmController::on_init() {
         return controller_interface::CallbackReturn::ERROR;
     }
 
+    // 参数热更新出口：把 admittance_* 的在线修改转发给导纳状态。
+    // 用 find_fsm() 取对象、dynamic_cast 到具体类型；工厂本身不缓存 FSM 私有参数。
+    admittance_state_ = dynamic_cast<AdmittanceState*>(fsm_factory->find_fsm("admittance"));
+    RCLCPP_INFO(
+        node->get_logger(), "arm_controller: admittance hot-update channel %s",
+        admittance_state_ != nullptr ? "ready" : "UNAVAILABLE (admittance state not found)");
+
     // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
     // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。
     state_pub_ = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
-    state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() { publish_current_state(); });
+    // 导纳力估计出口（O14 第 1 步的复核入口）：只在 admittance 状态发布，数据来自状态内的原子快照。
+    admittance_estimate_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "~/admittance_estimate", rclcpp::QoS(1).transient_local());
+    state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() {
+        publish_current_state();
+        publish_admittance_estimate();
+    });
 
     /**
      * @brief 参数在线更新校验回调
      *
      * 遍历本次请求更新的参数并逐项校验，只有全部通过才允许生效：
      * - @c exp_state：直接写入状态机工厂的期望状态名，不做范围校验；
-     * - @c joints / @c command_interface_prefix / @c end_effector_frame：初始化后不可修改，一律拒绝；
+     * - @c joints / @c command_interface_prefix / @c end_effector_frame / @c task_space_dof：
+     *   初始化后不可修改，一律拒绝；
      * - @c default_kp / @c default_kd / @c reset_joint_pos：长度不得超过关节数，
      *   以避免状态切换时重新分配内存；
      * - @c admittance_mass / @c admittance_damping / @c admittance_stiffness：
@@ -238,14 +277,36 @@ controller_interface::CallbackReturn ArmController::on_init() {
     param_cb_ = node->add_on_set_parameters_callback([this](const std::vector<rclcpp::Parameter>& params) {
         rcl_interfaces::msg::SetParametersResult result;
         result.successful = true;
+
+        // 导纳参数的暂存区：整批参数全部合法才写回状态机。回调运行在参数服务线程，
+        // 允许分配内存；状态机侧只写原子快照，run() 下一拍生效。
+        std::vector<double> admittance_mass;
+        std::vector<double> admittance_damping;
+        std::vector<double> admittance_stiffness;
+        bool has_velocity_limit  = false;
+        bool has_rotation_limit  = false;
+        bool has_force_deadband  = false;
+        bool has_torque_deadband = false;
+        bool has_filter_cutoff   = false;
+        bool has_force_limit     = false;
+        bool has_torque_limit    = false;
+        double velocity_limit    = 0.0;
+        double rotation_limit    = 0.0;
+        double force_deadband    = 0.0;
+        double torque_deadband   = 0.0;
+        double filter_cutoff     = 0.0;
+        double force_limit       = 0.0;
+        double torque_limit      = 0.0;
+
         // 逐项校验，任一参数不合法即整体拒绝。
         for (const auto& param : params) {
             auto name = param.get_name();
             if (name == "exp_state") {
                 // 期望状态名允许热更新，直接写入状态机工厂，由各状态的 check_switch() 消费。
                 fsm_factory->exp_state_name = param.as_string();
-            } else if (name == "joints" || name == "command_interface_prefix" || name == "end_effector_frame") {
-                // 接口相关参数在 on_init() 后固定，禁止再修改。
+            } else if (name == "joints" || name == "command_interface_prefix" || name == "end_effector_frame"
+                       || name == "task_space_dof") {
+                // 接口/任务空间相关参数在 on_init() 后固定（映射与求解器已按维度构造），禁止再修改。
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";
                 return result;
@@ -272,6 +333,56 @@ controller_interface::CallbackReturn ArmController::on_init() {
                         result.reason     = name + " contains an invalid value";
                         return result;
                     }
+                }
+                // 通过校验：暂存，整批成功后再写回状态机（热更新，O14）。
+                if (name == "admittance_mass") {
+                    admittance_mass = values;
+                } else if (name == "admittance_damping") {
+                    admittance_damping = values;
+                } else {
+                    admittance_stiffness = values;
+                }
+            } else if (
+                name == "admittance_velocity_limit" || name == "admittance_rotation_velocity_limit"
+                || name == "admittance_force_limit" || name == "admittance_torque_limit") {
+                // 速度上限必须为正且有限（0 会让导纳完全动不了，视为非法）。
+                const double value = param.as_double();
+                if (!std::isfinite(value) || value <= 0.0) {
+                    result.successful = false;
+                    result.reason     = name + " must be finite and positive";
+                    return result;
+                }
+                if (name == "admittance_velocity_limit") {
+                    velocity_limit     = value;
+                    has_velocity_limit = true;
+                } else if (name == "admittance_rotation_velocity_limit") {
+                    rotation_limit     = value;
+                    has_rotation_limit = true;
+                } else if (name == "admittance_force_limit") {
+                    force_limit     = value;
+                    has_force_limit = true;
+                } else {
+                    torque_limit     = value;
+                    has_torque_limit = true;
+                }
+            } else if (name == "admittance_force_deadband" || name == "admittance_torque_deadband"
+                       || name == "admittance_force_filter_cutoff") {
+                // 死区允许为 0；滤波截止频率允许为 0（= 关闭）。不允许负值或 NaN/inf。
+                const double value = param.as_double();
+                if (!std::isfinite(value) || value < 0.0) {
+                    result.successful = false;
+                    result.reason     = name + " must be finite and non-negative (0 disables it)";
+                    return result;
+                }
+                if (name == "admittance_force_deadband") {
+                    force_deadband     = value;
+                    has_force_deadband = true;
+                } else if (name == "admittance_torque_deadband") {
+                    torque_deadband     = value;
+                    has_torque_deadband = true;
+                } else {
+                    filter_cutoff     = value;
+                    has_filter_cutoff = true;
                 }
             } else if (name == "reset_duration") {
                 // 复位持续时间必须为正。
@@ -369,6 +480,25 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 // 其余参数不在此处校验。
             }
         }
+
+        // 整批参数都已通过校验：把导纳相关项写回状态机（热更新）。
+        // 本次批里没出现的项沿用状态机中的当前值——只改一项时不会把其余旋钮重置成默认。
+        if (admittance_state_ != nullptr
+            && (!admittance_mass.empty() || !admittance_damping.empty() || !admittance_stiffness.empty())) {
+            admittance_state_->update_impedance_parameters(admittance_mass, admittance_damping, admittance_stiffness);
+        }
+        if (admittance_state_ != nullptr
+            && (has_velocity_limit || has_rotation_limit || has_force_deadband || has_torque_deadband
+                || has_filter_cutoff || has_force_limit || has_torque_limit)) {
+            admittance_state_->update_runtime_parameters(
+                has_velocity_limit ? velocity_limit : admittance_state_->velocity_limit(),
+                has_rotation_limit ? rotation_limit : admittance_state_->rotation_velocity_limit(),
+                has_force_deadband ? force_deadband : admittance_state_->force_deadband(),
+                has_torque_deadband ? torque_deadband : admittance_state_->torque_deadband(),
+                has_filter_cutoff ? filter_cutoff : admittance_state_->filter_cutoff(),
+                has_force_limit ? force_limit : admittance_state_->force_limit(),
+                has_torque_limit ? torque_limit : admittance_state_->torque_limit());
+        }
         return result;
     });
 
@@ -406,6 +536,27 @@ controller_interface::CallbackReturn ArmController::on_init() {
  *       但 @c update() 仍禁止任何 ROS 通信与参数写入。
  * @see ArmController::on_init
  */
+void ArmController::publish_admittance_estimate() {
+    if (!fsm_factory || admittance_state_ == nullptr || admittance_estimate_pub_ == nullptr) {
+        return;
+    }
+    if (fsm_factory->current_state_name() != "admittance") {
+        return;
+    }
+    const std::size_t task_dof = fsm_factory->task_dof_;
+    if (task_dof == 0 || task_dof > AdmittanceState::kMaxTaskDof) {
+        return;
+    }
+    std_msgs::msg::Float64MultiArray message;
+    message.data.resize(2 * task_dof);
+    const std::size_t written =
+        admittance_state_->copy_force_estimate(message.data.data(), message.data.data() + task_dof, task_dof);
+    if (written != task_dof) {
+        return;
+    }
+    admittance_estimate_pub_->publish(message);
+}
+
 void ArmController::publish_current_state() {
     if (!fsm_factory) {
         return;

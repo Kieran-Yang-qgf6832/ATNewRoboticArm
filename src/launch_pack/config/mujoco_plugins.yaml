@@ -1,0 +1,24 @@
+# MuJoCo 侧插件配置（不是控制器参数，作为 ros__parameters 传给 ros2_control_node 进程）。
+#
+# mujoco_ros2_control 从参数 `mujoco_plugins.<名字>.type` 发现并加载插件，插件节点是
+# /mujoco_ros2_control_node 的子节点，所以服务名是
+#   /mujoco_ros2_control_node/external_wrench_plugin/apply_wrench
+# 用 `ros2 service list | grep apply_wrench` 可以确认（名字里带子命名空间）。
+#
+# 为什么需要它（docs/bugs.md O14）：导纳/拖动示教要验的是「被外力推着走」，
+# 没有外力就只是在原地保持。ExternalWrenchPlugin 把 wrench 写进 MuJoCo 的
+# data->xfrc_applied，等效于在指定 body 上挂一个持续 duration 的外力；力的方向与
+# 应用点在 **body 局部坐标系**（link4），不是世界系。
+#
+# 注意：该服务调用会**阻塞**到最长 duration 结束才返回，客户端要么异步调用、
+# 要么放到独立线程里（src/launch_pack/tools/admittance_demo_check.py 就是异步的）。
+#
+# 只在仿真里生效：实机没有 MuJoCo，也没有这个插件。
+/**:
+  ros__parameters:
+    mujoco_plugins:
+      external_wrench_plugin:
+        type: "mujoco_ros2_control_plugins/ExternalWrenchPlugin"
+        # RViz 里力/力矩箭头的缩放（仅可视化，不影响物理）。
+        force_arrow_scale: 0.02
+        torque_arrow_scale: 0.02

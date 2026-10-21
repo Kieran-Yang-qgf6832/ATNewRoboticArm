@@ -18,7 +18,8 @@
   <exec_depend>mujoco_ros2_control</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
-  <!-- arm_measure_sim.launch.py 会拉起 tasks/task_runner 跑 measure_only 序列 -->
+  <!-- arm_measure_sim.launch.py 会拉起 tasks/task_runner 跑 measure_only 序列；
+       arm_task_sim.launch.py 用同一个 task_runner 跑 tasks.yaml 里的任意序列 -->
   <exec_depend>tasks</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>

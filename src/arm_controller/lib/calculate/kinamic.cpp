@@ -26,24 +26,32 @@ IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping
         throw std::invalid_argument("IKSolver requires a TaskMapping");
     }
 
+    // 任务维由映射决定（4 轴模型 4 维，6 轴模型 6 维），这里不再写死 6。
+    task_dim_ = task_mapping_->task_dim();
+    if (task_dim_ <= 0) {
+        throw std::invalid_argument("TaskMapping::task_dim() must be positive");
+    }
+
     const Eigen::Index joint_count = robot_->dof();
+    const Eigen::Index task_dim    = static_cast<Eigen::Index>(task_dim_);
     workspace_.solution.resize(joint_count);
-    workspace_.current.resize(6);
-    workspace_.error.resize(6);
-    workspace_.zero_error.setZero(6);
+    workspace_.current.resize(task_dim);
+    workspace_.error.resize(task_dim);
+    workspace_.zero_error.setZero(task_dim);
     workspace_.trial.resize(joint_count);
-    workspace_.trial_error.resize(6);
+    workspace_.trial_error.resize(task_dim);
     workspace_.rhs.resize(joint_count);
     workspace_.joint_step.resize(joint_count);
     workspace_.geometric_jacobian.resize(6, joint_count);
-    workspace_.task_jacobian.resize(6, joint_count);
+    workspace_.task_jacobian.resize(task_dim, joint_count);
     workspace_.hessian.resize(joint_count, joint_count);
     workspace_.hessian.setZero();
     workspace_.ldlt.compute(workspace_.hessian);
 }
 
 bool IKSolver::task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_position) {
-    if (task_position == nullptr || joint_pos.size() != robot_->dof() || task_position->size() != 6) {
+    if (task_position == nullptr || joint_pos.size() != robot_->dof()
+        || task_position->size() != static_cast<Eigen::Index>(task_dim_)) {
         return false;
     }
 
@@ -56,8 +64,9 @@ bool IKSolver::task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* 
 
 bool IKSolver::jacobian(
     const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, Eigen::MatrixXd* task_jacobian) {
-    if (task_jacobian == nullptr || joint_pos.size() != robot_->dof() || task_jacobian->rows() != 6
-        || task_jacobian->cols() != robot_->dof() || error.size() != 6) {
+    if (task_jacobian == nullptr || joint_pos.size() != robot_->dof()
+        || task_jacobian->rows() != static_cast<Eigen::Index>(task_dim_) || task_jacobian->cols() != robot_->dof()
+        || error.size() != static_cast<Eigen::Index>(task_dim_)) {
         return false;
     }
 
@@ -90,6 +99,31 @@ bool IKSolver::evaluate_error(
     return task_mapping_->error_map(target, workspace_.current, error);
 }
 
+bool IKSolver::within_tolerance(const Eigen::VectorXd& error) const {
+    if (error.size() != static_cast<Eigen::Index>(task_dim_)) {
+        return false;
+    }
+
+    const Tuning& config = tuning();
+    const Eigen::Index position_dim =
+        std::min<Eigen::Index>(task_mapping_->position_dim(), static_cast<Eigen::Index>(task_dim_));
+    if (position_dim < 0) {
+        return false;
+    }
+
+    const double position_norm = error.head(position_dim).norm();
+    const double rotation_norm = error.tail(static_cast<Eigen::Index>(task_dim_) - position_dim).norm();
+    return position_norm <= config.position_tolerance && rotation_norm <= config.rotation_tolerance;
+}
+
+void IKSolver::record_error(const Eigen::VectorXd& error) {
+    const Eigen::Index position_dim =
+        std::min<Eigen::Index>(task_mapping_->position_dim(), error.size());
+    last_error_norm_          = error.norm();
+    last_position_error_norm_ = position_dim > 0 ? error.head(position_dim).norm() : 0.0;
+    last_rotation_error_norm_ = error.size() > position_dim ? error.tail(error.size() - position_dim).norm() : 0.0;
+}
+
 IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) {
     const Tuning& config = tuning();
 
@@ -98,12 +132,14 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
     last_result_ = SolveResult::Failed;
 
     const int joint_count = robot_->dof();
-    if (target.size() != 6 || joint_pos.size() != joint_count) {
+    if (target.size() != static_cast<Eigen::Index>(task_dim_) || joint_pos.size() != joint_count) {
         return SolveResult::Failed;
     }
 
-    last_error_norm_ = 0.0;
-    last_iterations_ = 0;
+    last_error_norm_          = 0.0;
+    last_position_error_norm_ = 0.0;
+    last_rotation_error_norm_ = 0.0;
+    last_iterations_          = 0;
 
     workspace_.solution = joint_pos;
     if (!workspace_.solution.allFinite()) {
@@ -130,11 +166,11 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
     if (!evaluate_error(target, workspace_.solution, &workspace_.error)) {
         return SolveResult::Failed;
     }
+    record_error(workspace_.error);
     double current_norm = workspace_.error.norm();
-    if (current_norm < config.tolerance) {
-        joint_pos        = workspace_.solution;
-        last_error_norm_ = current_norm;
-        last_result_     = SolveResult::Converged;
+    if (within_tolerance(workspace_.error)) {
+        joint_pos    = workspace_.solution;
+        last_result_ = SolveResult::Converged;
         return SolveResult::Converged;
     }
 
@@ -146,7 +182,7 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
         last_iterations_ = iteration + 1;
 
         if (!jacobian(workspace_.solution, workspace_.error, &workspace_.task_jacobian)) {
-            last_error_norm_ = current_norm;
+            record_error(workspace_.error);
             return SolveResult::Failed;
         }
 
@@ -157,7 +193,7 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
         workspace_.ldlt.compute(workspace_.hessian);
         workspace_.joint_step = workspace_.ldlt.solve(workspace_.rhs);
         if (!workspace_.joint_step.allFinite()) {
-            last_error_norm_ = current_norm;
+            record_error(workspace_.error);
             return SolveResult::Failed;
         }
 
@@ -176,7 +212,7 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
 
         workspace_.trial = workspace_.solution + workspace_.joint_step;
         if (!evaluate_error(target, workspace_.trial, &workspace_.trial_error)) {
-            last_error_norm_ = current_norm;
+            record_error(workspace_.error);
             return SolveResult::Failed;
         }
         const double trial_norm = workspace_.trial_error.norm();
@@ -186,10 +222,10 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
             workspace_.solution = workspace_.trial;
             workspace_.error    = workspace_.trial_error;
             current_norm        = trial_norm;
-            if (current_norm < config.tolerance) {
-                joint_pos        = workspace_.solution;
-                last_error_norm_ = current_norm;
-                last_result_     = SolveResult::Converged;
+            record_error(workspace_.error);
+            if (within_tolerance(workspace_.error)) {
+                joint_pos    = workspace_.solution;
+                last_result_ = SolveResult::Converged;
                 return SolveResult::Converged;
             }
             lambda       = std::max(lambda * config.lambda_down, config.lambda_min);
@@ -203,17 +239,17 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
             // 不一致时误差降不到零）。此时必须尽快返回，否则会在实时回路里空转满
             // max_iterations，拖慢控制周期、让机械臂跟不上轨迹。
             if (++consecutive_rejections >= kMaxConsecutiveRejections) {
-                last_error_norm_ = current_norm;
+                record_error(workspace_.error);
                 // 连续多次找不到下降方向 = 已经停在局部极小。误差降不到判据以内，
                 // 说明目标不在可达集内（可达集边界到目标的距离就是 current_norm）。
-                last_result_ = current_norm < config.tolerance ? SolveResult::Converged : SolveResult::Unreachable;
+                last_result_ = within_tolerance(workspace_.error) ? SolveResult::Converged : SolveResult::Unreachable;
                 return last_result_;
             }
         }
     }
 
-    last_error_norm_ = current_norm;
-    if (current_norm < config.tolerance) {
+    record_error(workspace_.error);
+    if (within_tolerance(workspace_.error)) {
         joint_pos    = workspace_.solution;
         last_result_ = SolveResult::Converged;
         return SolveResult::Converged;

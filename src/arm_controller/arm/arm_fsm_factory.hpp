@@ -22,6 +22,7 @@
 
 #include "arm.hpp"
 #include "arm_fsm.hpp"
+#include "default4dof_task.hpp"
 #include "default6dof_task.hpp"
 #include "fsm_factory.hpp"
 #include "model_from_urdf.hpp"
@@ -29,6 +30,7 @@
 #include "task.hpp"
 
 #include <memory>
+#include <stdexcept>
 #include <rclcpp/qos.hpp>
 #include <robot_msgs/msg/detail/joint_traj_cmd__struct.hpp>
 #include <string>
@@ -49,7 +51,7 @@
  *
  * 继承自 FSMFactory，在构造时完成以下初始化：
  * - 加载 URDF 机器人模型（ModelFromURDF）
- * - 创建 6 自由度任务空间映射（Default6DofTaskSpaceMapping）
+ * - 按参数 @c task_space_dof 创建任务空间映射（4 维 / 6 维）
  * - 构建运动学/动力学求解器（ArmSolve）
  * - 注册全部 8 个控制状态
  * - 设置初始状态为 "idel"
@@ -79,7 +81,37 @@ public:
         node_      = node;
         model_     = std::make_shared<ModelFromURDF>(
             node->get_parameter("urdf_path").as_string(), node->get_parameter("end_effector_frame").as_string());
-        task_map_  = std::make_shared<Default6DofTaskSpaceMapping>();
+
+        // 任务空间维度（docs/bugs.md O13）：4 轴臂的 6 维几何雅可比秩恒为 4，用 6 维
+        // 任务空间时笛卡尔目标必然不可达（实测最小二乘「尽力而为」把位置让出 28.6 mm）。
+        // 4 = (x, y, z, joint4 自转)；6 = (x, y, z, 旋转向量)。换回 6 轴模型时改参数即可。
+        const int64_t task_space_dof = node->get_parameter("task_space_dof").as_int();
+        if (task_space_dof == 4) {
+            task_map_ = std::make_shared<Default4DofTaskSpaceMapping>();
+        } else if (task_space_dof == 6) {
+            task_map_ = std::make_shared<Default6DofTaskSpaceMapping>();
+        } else {
+            throw std::runtime_error("task_space_dof must be 4 or 6");
+        }
+        task_dof_ = static_cast<std::size_t>(task_map_->task_dim());
+
+        const int model_dof = model_->dof();
+        if (task_space_dof > model_dof) {
+            RCLCPP_WARN(
+                node->get_logger(),
+                "task_space_dof=%lld but the model has only %d joints: the task space is over-constrained, every "
+                "Cartesian target will be rejected as unreachable",
+                static_cast<long long>(task_space_dof), model_dof);
+        }
+        if (task_space_dof == 4 && model_dof != 4) {
+            RCLCPP_WARN(
+                node->get_logger(),
+                "task_space_dof=4 assumes the 4th joint is the tool roll axis, but the model has %d joints", model_dof);
+        }
+        RCLCPP_INFO(
+            node->get_logger(), "arm_controller: task_space_dof=%zu (%s), model dof=%d", task_dof_,
+            task_space_dof == 4 ? "x, y, z, joint4" : "x, y, z, rx, ry, rz", model_dof);
+
         arm_solve_ = std::make_shared<ArmSolve>(model_, task_map_);         // 加载机器人模型
 
 
@@ -124,6 +156,14 @@ public:
      * @see Default6DofTaskSpaceMapping
      */
     std::shared_ptr<TaskMapping> task_map_;
+
+    /**
+     * @brief 任务空间维度（4 = [x, y, z, joint4]，6 = [x, y, z, 旋转向量]）
+     * @note 由控制器参数 @c task_space_dof 决定，初始化后不可修改；各 FSM 状态的
+     *       任务维与消息投影都以它为准。
+     * @see TaskMapping::task_dim
+     */
+    std::size_t task_dof_{4};
 
     /**
      * @brief 当前关节状态数组

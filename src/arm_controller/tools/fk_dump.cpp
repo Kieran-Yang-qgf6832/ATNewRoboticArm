@@ -10,12 +10,14 @@
  *
  * 用法：
  * @code{.sh}
- * fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>
+ * fk_dump <urdf> <frame> <q1> ... <qN>
  * @endcode
+ *   frame = 末端坐标系名（4 轴模型 link4，6 轴模型 link6）；关节角个数必须等于模型关节数。
  *
  * @note 只用于离线排查，不参与控制器运行。
  */
 
+#include "default4dof_task.hpp"
 #include "default6dof_task.hpp"
 #include "model_from_urdf.hpp"
 
@@ -29,31 +31,38 @@
 #include <Eigen/Geometry>
 
 int main(int argc, char** argv) {
-    if (argc < 8) {
-        fprintf(stderr, "usage: fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>\n");
+    if (argc < 4) {
+        fprintf(stderr, "usage: fk_dump <urdf> <frame> <q1> ... <qN>\n");
         return 1;
     }
 
     const std::string urdf_path = argv[1];
+    const std::string frame     = argv[2];
 
     std::shared_ptr<ModelBase> model;
     try {
-        model = std::make_shared<ModelFromURDF>(urdf_path, "link6");
+        model = std::make_shared<ModelFromURDF>(urdf_path, frame);
     } catch (const std::exception& error) {
         fprintf(stderr, "failed to load model: %s\n", error.what());
         return 1;
     }
 
-    Eigen::VectorXd q(model->dof());
-    for (Eigen::Index i = 0; i < q.size(); ++i) {
-        q(i) = std::atof(argv[2 + i]);
+    const int dof = model->dof();
+    if (argc != 3 + dof) {
+        fprintf(stderr, "expected %d joint values, got %d arguments in total\n", dof, argc - 1);
+        return 1;
+    }
+
+    Eigen::VectorXd q(dof);
+    for (int i = 0; i < dof; ++i) {
+        q(i) = std::atof(argv[3 + i]);
     }
 
     const Eigen::Isometry3d pose = model->forward_kinematics(q);
     const Eigen::Quaterniond quat(pose.linear());
 
     printf("q           = [");
-    for (Eigen::Index i = 0; i < q.size(); ++i) {
+    for (int i = 0; i < dof; ++i) {
         printf("%s%.9f", i == 0 ? "" : ", ", q(i));
     }
     printf("]\n");
@@ -69,14 +78,24 @@ int main(int argc, char** argv) {
             "  [%+.9f %+.9f %+.9f]\n", pose.linear()(row, 0), pose.linear()(row, 1), pose.linear()(row, 2));
     }
 
-    Default6DofTaskSpaceMapping mapping;
-    Eigen::VectorXd task(6);
-    if (mapping.position_map(q, pose, &task)) {
+    // 6 维任务坐标（位置 + 旋转向量）：任何模型都能算，方便与 6 轴时期的数据对比。
+    Default6DofTaskSpaceMapping mapping6;
+    Eigen::VectorXd task6(6);
+    if (mapping6.position_map(q, pose, &task6)) {
         printf(
-            "task6       = [%.9f, %.9f, %.9f | %.9f, %.9f, %.9f]   |rv| = %.9f\n", task(0), task(1), task(2),
-            task(3), task(4), task(5), task.tail<3>().norm());
+            "task6       = [%.9f, %.9f, %.9f | %.9f, %.9f, %.9f]   |rv| = %.9f\n", task6(0), task6(1), task6(2),
+            task6(3), task6(4), task6(5), task6.tail<3>().norm());
     } else {
         printf("task6       = <position_map failed>\n");
+    }
+
+    // 4 维任务坐标（位置 + joint4 自转）：4 轴模型实际使用的任务空间。
+    Default4DofTaskSpaceMapping mapping4;
+    Eigen::VectorXd task4(4);
+    if (mapping4.position_map(q, pose, &task4)) {
+        printf("task4       = [%.9f, %.9f, %.9f | q4 %.9f]\n", task4(0), task4(1), task4(2), task4(3));
+    } else {
+        printf("task4       = <position_map failed>\n");
     }
 
     return 0;

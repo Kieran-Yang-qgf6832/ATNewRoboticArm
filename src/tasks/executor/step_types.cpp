@@ -27,7 +27,7 @@ const Entry kStepTable[] = {
     {"reset", true, false, "reset"},           // 复位；ResetState::enter 要求 last_state == idel
     {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
     {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹
-    {"admittance_move", false, true, "admittance"}, // 导纳控制下的期望轨迹
+    {"admittance_move", false, true, "admittance"}, // 导纳：给 offset 是「轨迹 + 柔顺」，不给是「自由导纳停留」
     {"tool", false, false, nullptr},           // 末端执行器开关量
     {"teach", true, true, "teach_pendant"},    // 示教；TeachPendantState 要求 idel 进出
     {"measure", true, true, "measure"},        // 参数辨识；ParamterMeasureState 要求 idel 进出

@@ -275,7 +275,14 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         if (uses_to || uses_target || uses_action) {
             return fail(step->type + " accepts only 'offset'");
         }
+        // admittance_move 的 offset 是**可选**的（docs/bugs.md O14）：
+        //   给 offset -> 旧的「导纳下的期望轨迹」语义（轨迹点 + 柔顺位移）；
+        //   不给     -> 自由导纳：进入导纳后停 duration 秒，由外力推着走、撤力停下。
+        // 自由导纳没有位移目标，所以不做「到位/残差」判定。
         if (!uses_offset) {
+            if (step->type == "admittance_move") {
+                return true;
+            }
             return fail(step->type + " requires an 'offset' (relative end-effector displacement)");
         }
         if (step->offset.size() != 3) {
@@ -618,7 +625,10 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
     }
 
     if (step.type == "admittance_move") {
-        return run_task_space_move(step, "admittance", error);
+        // 没给 offset = 自由导纳停留：按定时状态执行（进入 -> 停 duration -> 回 idel），
+        // 期间由外力推着走；给了 offset = 旧的轨迹 + 柔顺语义。
+        return step.offset.empty() ? run_timed_state(step, "admittance", error)
+                                   : run_task_space_move(step, "admittance", error);
     }
 
     if (step.type == "tool") {

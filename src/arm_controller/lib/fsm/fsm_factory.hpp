@@ -87,6 +87,14 @@ public:
             }
             if (!next_fsm.enter(current_fsm.get_name(), time)) {
                 // 目标状态拒绝进入：保持位置，等待外部干预。
+                //
+                // 必须同时**清掉这次切换请求**：否则 state_switch 一直为 true，下个周期会
+                // 再次尝试 enter 同一个状态，形成「拒绝 -> 重试 -> 再拒绝」的死循环，
+                // 外部后来写入的 exp_state（故障兜底会写 idel）永远没有机会被消费。
+                // 实测：4 轴模型下把 exp_state 设成 servo/admittance（它们只在 6 维任务
+                // 空间下有效）时，控制器会卡在这个循环里再也切不回 idel。
+                state_switch = false;
+                next_state_name_.clear();
                 return RunResult::Recoverable;
             }
             current_state_name_ = next_state_name_;
@@ -130,6 +138,18 @@ public:
 
     // 当前活动状态名（只读）：供外部观测控制器实际处于哪个状态。
     const std::string& current_state_name() const { return current_state_name_; }
+
+    /**
+     * @brief 按名字取状态对象
+     * @param name 状态名
+     * @return 状态指针；名字不存在时为 nullptr
+     * @note 供控制器把「参数热更新」转发给具体状态。工厂依旧**不缓存**任何 FSM
+     *       私有参数（AGENT.md 的约定），这里只暴露对象本身。
+     */
+    FSM* find_fsm(const std::string& name) {
+        const auto state = fsm_map.find(name);
+        return (state == fsm_map.end()) ? nullptr : state->second.get();
+    }
 
     /**
      * @brief 当前活动状态对象（只读）

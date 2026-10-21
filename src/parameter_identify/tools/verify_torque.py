@@ -39,6 +39,11 @@ def load_csv(path: str, dof: int) -> dict[str, np.ndarray]:
     return out
 
 
+def model_dof(urdf: str) -> int:
+    """从 URDF 读取关节数（4 轴模型 4，6 轴模型 6），避免把轴数写死在工具里。"""
+    return int(pin.buildModelFromUrdf(urdf).nv)
+
+
 def predict(urdf: str, d: dict[str, np.ndarray]) -> np.ndarray:
     model = pin.buildModelFromUrdf(urdf)
     data = model.createData()
@@ -51,7 +56,9 @@ def predict(urdf: str, d: dict[str, np.ndarray]) -> np.ndarray:
     return pred
 
 
-def report(tag: str, urdf: str, csv: str, dof: int) -> dict:
+def report(tag: str, urdf: str, csv: str, dof: int | None = None) -> dict:
+    if dof is None:
+        dof = model_dof(urdf)
     d = load_csv(csv, dof)
     pred = predict(urdf, d)
     tau = d["torque"]
@@ -80,7 +87,12 @@ def main() -> int:
     ap.add_argument("--urdf", required=True, help="要验证的 URDF（通常是辨识输出）")
     ap.add_argument("--csv", action="append", required=True, help="测量 CSV，可重复传多份")
     ap.add_argument("--reference", default=None, help="参考模型（真值 URDF），用于给出误差地板")
-    ap.add_argument("--dof", type=int, default=6)
+    ap.add_argument(
+        "--dof",
+        type=int,
+        default=None,
+        help="关节数；默认从 --urdf 自动读取（4 轴模型 4，6 轴模型 6）",
+    )
     args = ap.parse_args()
 
     rc = 0

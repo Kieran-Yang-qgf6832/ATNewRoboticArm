@@ -25,17 +25,27 @@ public:
      */
     struct Tuning {
         /**
-         * @brief 收敛判据：任务空间误差范数
+         * @brief 位置收敛判据（米）
          *
-         * 这是一个「米 + 弧度」混合的 6 维范数，判据不能按纯数值精度来定：
+         * 判据不能按纯数值精度来定：
          * - 双精度下迭代会停在 1e-6 量级（舍入 + 雅可比条件数）；
          * - 更关键的是目标位姿往往与控制器自身正解存在微小不一致——任务层经 TF
          *   读取的末端位姿、实机上的标定误差，都会让目标落在可达集之外一点点，
          *   此时误差无论如何都降不到零。实测该不一致约 1.5e-4。
          *
-         * 取 1e-3 对应 1 mm / 0.057°，对机械臂控制足够，且给上述不一致留出余量。
+         * 取 1e-3 对应 1 mm，对机械臂控制足够，且给上述不一致留出余量。
          */
-        double tolerance{1e-3};
+        double position_tolerance{1e-3};
+
+        /**
+         * @brief 姿态收敛判据（弧度）
+         *
+         * 与位置分开判，**不再把米和弧度混进同一个范数**：混算时「1e-3」的物理含义
+         * 取决于量纲配比，reset_then_cart 这类判据边界用例（位置残余 1.53e-3）就没法
+         * 解释。4 维任务空间下这一项只包含 joint4 自转分量。
+         */
+        double rotation_tolerance{1e-3};
+
         int max_iterations{200};     ///< 最大迭代次数
 
         double lambda_initial{1e-2}; ///< LM 阻尼初值（由离线基准扫描确定，见 tools/ik_benchmark.cpp）
@@ -70,7 +80,7 @@ public:
      * （docs/bugs.md O2）。
      */
     enum class SolveResult {
-        Converged,   ///< 残余已在 @ref Tuning::tolerance 以内
+        Converged,   ///< 位置与姿态残余同时进入各自判据（@ref Tuning）
         Unreachable, ///< 迭代结束（停滞或次数用尽）时残余仍超判据：目标没有达到，通常意味着落在可达集之外
         Failed,      ///< 数值失败（输入非法、雅可比不可用、步长非有限），可达性未知
     };
@@ -79,7 +89,7 @@ public:
 
     /**
      * @brief 求解逆运动学
-     * @param target    任务空间目标（6 维）
+     * @param target    任务空间目标（维度由映射决定，见 @ref TaskMapping::task_dim）
      * @param joint_pos 既作输入又作输出：输入为迭代初值（应传当前实测关节角），
      *                  求解失败时内容保持不变
      * @return @ref SolveResult，只有 Converged 表示残余已进入判据
@@ -93,7 +103,7 @@ public:
      * @brief 任务误差的 Gauss-Newton 雅可比
      * @param joint_pos     当前关节角
      * @param error         当前任务空间误差（见 @ref TaskMapping::error_map）
-     * @param task_jacobian 输出：6 × dof
+     * @param task_jacobian 输出：task_dim × dof
      */
     bool jacobian(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, Eigen::MatrixXd* task_jacobian);
 
@@ -107,8 +117,17 @@ public:
 
     bool task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_position);
 
-    /// @return 上一次 solve() 结束时的任务空间误差范数，用于诊断
+    /// @return 任务空间维度（由映射决定：4 轴模型是 4，6 轴模型是 6）
+    int task_dim() const { return task_dim_; }
+
+    /// @return 上一次 solve() 结束时的任务空间误差范数（位置与姿态的混合范数），用于诊断
     double last_error_norm() const { return last_error_norm_; }
+
+    /// @return 上一次 solve() 结束时误差的位置分量范数（米）
+    double last_position_error_norm() const { return last_position_error_norm_; }
+
+    /// @return 上一次 solve() 结束时误差的姿态分量范数（弧度）
+    double last_rotation_error_norm() const { return last_rotation_error_norm_; }
 
     /// @return 上一次 solve() 实际使用的迭代次数，用于诊断
     int last_iterations() const { return last_iterations_; }
@@ -119,6 +138,12 @@ public:
 private:
     /// 计算给定关节角下的任务空间误差
     bool evaluate_error(const Eigen::VectorXd& target, const Eigen::VectorXd& joint_pos, Eigen::VectorXd* error);
+
+    /// 位置与姿态是否**同时**进入各自的判据（见 @ref Tuning）
+    bool within_tolerance(const Eigen::VectorXd& error) const;
+
+    /// 记录本次误差的总范数与位置/姿态分量范数，供日志与诊断使用
+    void record_error(const Eigen::VectorXd& error);
 
     struct Workspace {
         Eigen::VectorXd solution;
@@ -138,7 +163,10 @@ private:
     std::shared_ptr<ModelBase> robot_;
     std::shared_ptr<TaskMapping> task_mapping_;
     Workspace workspace_;
+    int task_dim_{6};
     double last_error_norm_{0.0};
+    double last_position_error_norm_{0.0};
+    double last_rotation_error_norm_{0.0};
     int last_iterations_{0};
     SolveResult last_result_{SolveResult::Failed};
 };

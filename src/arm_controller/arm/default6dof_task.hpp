@@ -5,6 +5,9 @@ class Default6DofTaskSpaceMapping : public TaskMapping{
 public:
     Default6DofTaskSpaceMapping();
 
+    /// 6 维任务空间：[x, y, z, rx, ry, rz]（姿态为旋转向量）
+    int task_dim() const override { return 6; }
+
     bool position_map(const Eigen::VectorXd& joint_pos,
                       const Eigen::Isometry3d& pose,
                       Eigen::VectorXd* task_position) override;

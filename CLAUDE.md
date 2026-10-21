@@ -9,25 +9,37 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O11 已全部闭环。
+> `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O14 已闭环；
+> O15（4 轴辨识精度）配置侧已修，数据质量仍待办。
 
 > **模型切换说明（2026-10-17）**：`src/arm_model/model/` 现在是 **4 自由度**机械臂
 > （几何/惯量/限位/网格来自它自己的 SolidWorks 导出）。接口层沿用 6 自由度版本的写法：
 > URDF 带 `<ros2_control>`（effort 命令 + position/velocity/effort/acceleration 状态）
 > 与 xacro `headless` 参数，MJCF 用 `<motor>` 力矩执行器，scene 显式 `timestep=0.002`
 > 且地面参与碰撞。6 自由度模型保存在 Git 历史（commit `5e59ef5`），可从那里取回。
-> 注意：文档与 `ros2_controller.yaml` / `tasks.yaml` 里仍有若干按 6 自由度整定的
-> 数值和 6 维任务空间序列（joint5/joint6、link6 工具偏移、z≈1.233 m 的位姿等），
-> 它们只是历史参考，4 自由度下不可用或需要重新实测。
+> **任务空间已按 4 轴降维（2026-10-18，docs/bugs.md O13）**：控制器新增参数
+> `task_space_dof`（默认 4），任务空间 = **(x, y, z, joint4 自转)**。4 轴臂的 6 维几何
+> 雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达（实测 6 维最小二乘"尽力而为"
+> 会把 pick_demo 的位置让出 28.6 mm）。任务层仍然发 6 维位姿，由控制器投影：取位置，
+> 自转锁存为载入时的 joint4，其余姿态分量丢弃。**工具指向不受控**（由位置经 joint1/2/3
+> 决定，5 cm 平移漂 4–8°、15 cm 漂 10–12°），**y 方向工作空间只有约 4 cm 厚**。
+> `cart_move` 在 4 轴下可用：`pick_demo` / `ready_then_cart`（15 cm 行程）与
+> `cart_cycle_large`（4 段 × 15 cm 循环）是正例，仿真实测位置残余 0.3 / 0.7 / 0.2 mm；
+> `servo` 仍按 6 维定义，在 4 维模式下会**显式拒绝进入**并报 ERROR；`admittance` 与
+> `teach_pendant` **在 4 轴下已可用**（docs/bugs.md O14）：导纳没有轨迹时是**自由导纳**
+> （推着走、撤力停，平移限速 0.1 m/s、自转 0.5 rad/s，带死区/滤波/限幅），有轨迹时仍是
+> 「轨迹 + 柔顺」；示教是零力拖动（kp=0，只留 kd 阻尼 + 重力前馈）。文档与 YAML 里其余
+> 按 6 自由度整定的数值（joint5/joint6、link6 工具偏移、z≈1.233 m 的位姿等）只是历史参考。
 > 4 自由度模型的 `default_kp/default_kd` 按**显式 500 Hz 力矩环**重新整定过
 > （joint3 等效惯量只有 ~2e-4 kg·m²，kd 必须 < 0.2；肩关节 kp 要压过重力 Hessian
 > 的 -6.4）；`measure_traj_collision_safe_distance` 默认改为 0（base_link 网格 5 MB，
 > 开着它激励轨迹生成 > 4.5 min），地面净空仍开启。改这些值前先看 YAML 里的注释。
 >
-> 末端坐标系已参数化：控制器新增 `end_effector_frame` 参数（默认 `link6`，
-> `ros2_controller.yaml` 里设成 `link4`），measure 激励轨迹与任务层（`ee_frame` 默认
-> `link4`）共用它；换回 6 自由度模型时只改参数即可。注意离线工具
-> `fk_dump` / `ik_solve` / `ik_benchmark` 仍把末端 frame 写死为 `link6`。
+> 末端坐标系已参数化：控制器新增 `end_effector_frame` 参数（默认 `link4`，与当前
+> 4 轴模型一致；`ros2_controller.yaml` 里显式设成 `link4`），measure 激励轨迹与
+> 任务层（`ee_frame` 默认 `link4`）共用它；换回 6 自由度模型时只改参数即可。离线工具
+> `fk_dump` / `ik_solve` / `ik_benchmark` 也已参数化：frame 与 task_dof 都从命令行给
+> （4 轴：`link4 4`；6 轴：`link6 6`）。
 
 ## 常用命令
 
@@ -53,6 +65,10 @@ ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when
 
 # 任务层：换一份任务配置文件
 ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
+
+# 任务层：一条命令起仿真 + 跑 tasks.yaml 的一条序列（跑完 launch 自动退出）
+# 成败看 task_runner 的日志 / /task_status；ros2 launch 自身退出码恒为 0
+ros2 launch launch_pack arm_task_sim.launch.py task_sequence:="reset_then_joint"
 
 # 切换控制器工作状态
 ros2 param set /arm_controller exp_state reset
@@ -118,9 +134,11 @@ ArmController (controller_interface, 500 Hz)
 进程默认常驻，改写该参数即可再跑一条；加 `exit_when_idle:=true` 让它在序列结束后退出
 （退出码反映成败）。
 
-> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形在工作空间边界）、
-> `unreachable_near` / `unreachable_far`（目标不可达）。它们退出码为 1 是正确行为。
-> 注意这几条的失败方式都是「**下发前被拒绝、完全不运动**」，不是「逆解跑到一半失败」。
+> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形在工作空间
+> 边界，残余 1.526e-3 m 刚好越过 1e-3 m 判据——判据一放宽就会翻面）、`unreachable_near`
+> （+Y 5 cm，4 轴臂 y 方向只有约 4 cm 厚，结构不可达）、`unreachable_far`（+X 2 m）。
+> 它们退出码为 1 是正确行为。注意这几条的失败方式都是「**下发前被拒绝、完全不运动**」，
+> 不是「逆解跑到一半失败」。
 
 ### 计算库分层
 
@@ -129,10 +147,17 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 ```
 
 - `ModelFromURDF`（Pinocchio 实现 `ModelBase`）：FK、几何雅可比、RNEA、关节限位
-- `Default6DofTaskSpaceMapping`（实现 `TaskMapping`）：任务空间语义与模型数学解耦
+- `TaskMapping`（任务空间语义与模型数学解耦）：`task_dim()` 给出任务维，
+  `position_map()` / `jacobian_map()` / `error_map()` 定义坐标与误差，
+  `target_from_pose()` 把消息里的 6 维位姿投影成任务目标。两个实现：
+  - `Default4DofTaskSpaceMapping`（**默认，4 轴模型**）：`[x, y, z, q4]`；
+  - `Default6DofTaskSpaceMapping`（6 轴模型）：`[x, y, z, rx, ry, rz]`。
+- `IKSolver` / `ArmSolve`：任务维全部从映射取，不再写死 6；收敛判据拆成
+  `position_tolerance`（米）与 `rotation_tolerance`（弧度），两者同时达标才算收敛。
 - `Trajectory`：五次 Hermite/Bezier 段插值，保证位置/速度/加速度连续
 
-**约定**：修改任务空间时同步检查 `position_map()` 与 `jacobian_map()`。
+**约定**：修改任务空间时同步检查 `position_map()` / `jacobian_map()` / `error_map()`
+与 `target_from_pose()`；任务维变化时还要同步 `task_space_dof` 参数（初始化后不可修改）。
 
 ### arm_controller 导出的插件
 
@@ -148,7 +173,20 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 
 `idel`（锁定）、`reset`（复位）、`cart_traj`（笛卡尔轨迹）、`joint_traj`（关节轨迹）、`servo`（速度积分伺服）、`admittance`（导纳控制）、`teach_pendant`（示教拖动）、`measure`（参数辨识测量）。
 
-注册在 `arm_fsm_factory.hpp`，通过 `exp_state` 参数切换。
+注册在 `arm_fsm_factory.hpp`，通过 `exp_state` 参数切换。**`servo` 只在 6 维任务空间下
+可用**：4 维模式下它的 `enter()` 会打 ERROR 并拒绝进入，工厂放弃这次切换请求、保持当前
+位置并回到 `idel`（不会再像以前那样每个周期重试同一个状态、把切换机制卡死）。
+`admittance` / `teach_pendant` 已解除 4 维限制：任务维从 `TaskMapping` 取，M/D/K 按
+`task_dof` 取值（O13/O14）。导纳的状态语义：
+- **自由导纳**（进来但没收到 `arm_admittance` 轨迹）：期望位置锁在当前位姿，按
+  `M·ẍ + D·ẋ = F_est` 积分，K 不参与；推着走、撤力停在原地；
+- **轨迹 + 柔顺**（收到轨迹）：沿用旧语义，导纳在轨迹点附近叠加柔顺位移；
+- 逆解失败（顶到关节限位/工作空间边界）时回滚到上一拍可行目标并清零速度，**状态保持**
+  而不是报错回 `idel`。
+力估计 = `RNEA(q, dq, ddq_实测) − τ_act`（**注意是模型减实测**，符号反了会朝背离受力方向
+让开，O14），再过死区（0.5 N / 0.05 N·m）与 10 Hz 低通，并限幅到 20 N / 3 N·m
+（近奇异位形下 `Jᵀf = τ` 的解会被 1/σ_min 放大）。`admittance_*` 与限速/死区/滤波/限幅
+都支持**热更新**（`ros2 param set` 立刻生效）。
 
 ## 重要约束与注意事项
 
@@ -224,8 +262,9 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
   `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
-  **实机路径尚未打通**。可用入口只有 `arm_controller_test_sim.launch.py` 与
-  `arm_measure_sim.launch.py`。
+  **实机路径尚未打通**。可用入口：`arm_controller_test_sim.launch.py`（只起仿真）、
+  `arm_measure_sim.launch.py`（仿真 + 测量）、`arm_task_sim.launch.py`（仿真 + 跑
+  `tasks.yaml` 里的一条序列，`task_sequence` 选序列，默认 `reset_then_joint`）。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
@@ -238,8 +277,19 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   该 launch 支持 `csv_file_path` / `controller_urdf_path` / `trajectory_period` /
   `trajectory_repeat_cnt` / `move_to_start_duration` / `trajectory_seed` / `step_timeout`
   覆盖（见 O9、O10）。
-  仍未验证的是 `admittance`（对应 `admittance_move` 步骤）与 `teach_pendant`（`teach`）；
-  `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入。
+  `admittance` / `teach_pendant` 于 2026-10-18 端到端验证可用（O14）：
+  `admittance_move` **不给 `offset` = 自由导纳停留**（进导纳、停 duration 秒、回 `idel`），
+  给 `offset` = 「轨迹 + 柔顺」；`teach` 只能从 `idel` 进，序列里 `joint_move` 之后要补一个
+  `idel` 步骤。两条演示序列 `admittance_demo` / `teach_demo` 在 `tasks.yaml` 里，
+  **本身不施力**，一条命令的验收入口是：
+  `python3 src/launch_pack/tools/admittance_demo_check.py --mode admittance|teach|force`
+  （脚本自己起 headless 仿真、跑序列、注入已知外力并断言，退出码真实）。
+  `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入，4 维下会显式拒绝进入。
+  `cart_move` 的序列已按 4 维任务空间重排并仿真实测（2026-10-18）：
+  正例 `reset_only` / `reset_then_joint` / `ready_then_cart` / `pick_demo` /
+  `cart_cycle_large` 退出码 0，
+  反例 `reset_then_cart` / `unreachable_near` / `unreachable_far` 退出码 1 且
+  控制器日志出现「REJECTED before any motion」。
 
 ### 无界面运行（headless）
 
@@ -248,7 +298,7 @@ MuJoCo 自带的 UI 窗口可以关掉，纯命令行跑：`headless` 是 **mujo
 URDF 用 xacro 声明了同名 arg（默认 `false`），两个 launch 都把它透传出去：
 
 - `arm_measure_sim.launch.py`：`headless` **默认 true**（测量不需要界面）；
-- `arm_controller_test_sim.launch.py`：默认 false，想要无界面加 `headless:=true`。
+- `arm_controller_test_sim.launch.py` / `arm_task_sim.launch.py`：默认 false，想要无界面加 `headless:=true`。
 
 headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理线程照常 500 Hz 推进；
 日志里是 `Running in HEADLESS mode.`（不再有 `Starting the MuJoCo rendering thread...`）。

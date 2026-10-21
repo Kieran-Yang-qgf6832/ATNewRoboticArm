@@ -3,7 +3,7 @@
 <package format="3">
   <name>arm_controller</name>
   <version>0.0.0</version>
-  <description>Core control package for the 6-DOF robotic arm: controller-side FSM (ArmController), chained PID for simulation (SimPidController) and the real-hardware USB CDC interface (ArmRealInterfaces), plus Pinocchio-based kinematics/dynamics solvers.</description>
+  <description>Core control package for the 4-DOF robotic arm: controller-side FSM (ArmController), chained PID for simulation (SimPidController) and the real-hardware USB CDC interface (ArmRealInterfaces), plus Pinocchio-based kinematics/dynamics solvers. The task-space dimension is configurable (4 for the current model, 6 for the historical 6-DOF model).</description>
   <maintainer email="cloud1202@qq.com">lyz</maintainer>
   <license>TODO: License declaration</license>
 

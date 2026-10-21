@@ -21,6 +21,7 @@
 #include "fsm.hpp"
 
 #include <any>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <memory>
@@ -303,7 +304,7 @@ private:
     std::vector<double> default_kp_param_; ///< 位置增益参数原始值
     std::vector<double> default_kd_param_; ///< 速度增益参数原始值
     std::size_t joint_count_{0};       ///< 关节数量
-    std::size_t task_dof_{6};          ///< 任务空间自由度
+    std::size_t task_dof_{0};          ///< 任务空间自由度（取自工厂参数 task_space_dof）
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
 
     /// 保持路径的重力前馈（docs/bugs.md O7）。等待轨迹到达期间用它补掉重力静差。
@@ -315,9 +316,18 @@ private:
     /// 只查**终点**：终点不可达是绝大多数实际情况，而且单次逆解实测最坏约 386 us
     /// （200 次迭代），一个控制周期是 2 ms——查 8 个途经点就可能超周期。
     bool precheck_pending_{false};    ///< 是否有一条新轨迹等待预检
-    Eigen::VectorXd precheck_target_; ///< 待检终点（6 维）
+    Eigen::VectorXd precheck_target_; ///< 待检终点（task_dof_ 维，已从消息的 6 维位姿投影）
     Eigen::VectorXd precheck_seed_;   ///< 预检用的关节角种子（当前实测关节角）
     Eigen::VectorXd precheck_solution_; ///< 预检的解算结果
+
+    /// 逆解失败日志用的预分配 buffer（实时路径禁止分配内存）。
+    Eigen::VectorXd debug_seed_;          ///< 当前实测关节角
+    Eigen::VectorXd debug_measured_task_; ///< 实测关节角的正解（任务空间）
+    Eigen::VectorXd debug_task_error_;    ///< 目标与实测正解的任务空间误差
+
+    /// 订阅回调（非实时线程）里做 6 维位姿 -> 任务目标投影用的 buffer。
+    Eigen::VectorXd load_seed_;       ///< 投影时取 joint4 自转目标的关节角种子
+    Eigen::VectorXd load_task_point_; ///< 单点投影结果
 
     /**
      * @brief 对 @ref precheck_target_ 做一次逆解，确认终点可达
@@ -460,7 +470,7 @@ public:
 private:
     FSMArmControlFactory* factory{nullptr};           ///< 状态机工厂指针
     std::size_t joint_count_{0};                      ///< 关节数量
-    std::size_t task_dof_{6};                         ///< 任务空间自由度
+    std::size_t task_dof_{0};                         ///< 任务空间自由度（本状态只在 6 维下可用）
     rclcpp::Time last_update_time_;                   ///< 上次更新时间
     Eigen::VectorXd joint_pos_;                       ///< 关节位置
     Eigen::VectorXd joint_velocity_;                  ///< 关节速度
@@ -481,17 +491,36 @@ private:
 /**
  * @brief 导纳控制状态
  *
- * 基于导纳模型实现力控制。通过估计外部力（实测力矩与模型力矩之差），
- * 结合质量-阻尼-刚度模型生成修正轨迹，实现柔顺控制。
+ * 两种用法共用同一套力估计、死区、滤波与限速：
  *
- * @note 订阅话题 "arm_admittance"，消息类型 AdmittanceCmd
- * @warning 导纳参数（质量、阻尼、刚度）需根据实际负载调整
+ * - **自由导纳**（默认：进来但还没收到 \c arm_admittance 轨迹时）：进入时把期望任务
+ *   位置锁到当前位姿，之后每周期按 c M·ẍ + D·ẋ = F_est 积分（没有固定参考点，K 不参与）。
+ *   不推不动、推着走、撤力停在原地；速度受 \c admittance_velocity_limit（平移模长）与
+ *   \c admittance_rotation_velocity_limit（自转）限制。逆解失败（顶到关节限位 / 工作空间
+ *   边界）时回滚到上一拍可行目标并清零速度，**状态保持而不是报错回 idel**。
+ * - **轨迹 + 柔顺**（收到 \c arm_admittance 轨迹后）：沿用原语义，导纳在轨迹点附近叠加
+ *   柔顺位移；柔顺速度同样受限，但轨迹本身的前馈速度不截断。
+ *
+ * 力估计：\c τ_est = τ_actuator(实测) − RNEA(q, dq, ddq_实测)。O8 之后控制器能读到真实
+ * 加速度（\c state_acceleration_），用它做 RNEA 可以把 M·qdd 从残差里去掉；没有该接口
+ * （实机）时退回 ddq = 0。残差再经任务空间雅可比转成力，然后过死区与一阶低通。
+ * **死区是必需的**：K = 0 时导纳对力是无穷大直流增益，任何模型偏差（实测参数误差
+ * 0.1% 量级）都会被积成一个缓慢爬行。
+ *
+ * @note 订阅话题 "arm_admittance"，消息类型 AdmittanceCmd；不发轨迹就是自由导纳
+ * @warning 导纳参数（M/D/K、限速、死区、滤波）都可在运行时用 \c ros2 param set 热更新
+ * @warning 实时约束：buffer 全部在构造阶段分配；\c run() 只读原子参数快照，不分配、不加锁
  * @see AdmittanceCmd
- *
- * @see ServoState
+ * @see TeachPendantState
+ * @see docs/bugs.md O13 / O14
  */
 class AdmittanceState : public FSM {
 public:
+    /**
+     * @brief 参数数组的最大长度（与控制器参数校验里的上限一致）
+     */
+    static constexpr std::size_t kMaxTaskDof = 6;
+
     /**
      * @brief 构造函数
      * @param name 状态名称
@@ -504,7 +533,8 @@ public:
      * @brief 进入状态时调用
      * @param last_state 上一个状态名称
      * @param time       进入时刻
-     * @return true 进入成功；false 表示正运动学求解失败
+     * @return true 进入成功；false 表示工厂/求解器未就绪或正运动学求解失败
+     * @note 4 轴模型下不再拒绝进入（docs/bugs.md O13 的临时限制已解除）
      */
     bool enter(const std::string& last_state, const rclcpp::Time& time) override;
 
@@ -529,6 +559,53 @@ public:
      */
     bool run(const rclcpp::Time& time) override;
 
+    /**
+     * @brief 热更新导纳 M/D/K（由参数回调在非实时线程调用）
+     * @param mass      质量参数，空表示不改；长度超过任务维的部分忽略
+     * @param damping   阻尼参数，同上
+     * @param stiffness 刚度参数，同上
+     * @note 只写原子快照，\c run() 下一拍生效；不做内存分配
+     */
+    void update_impedance_parameters(const std::vector<double>& mass, const std::vector<double>& damping,
+                                     const std::vector<double>& stiffness);
+
+    /**
+     * @brief 热更新限速 / 死区 / 滤波截止频率（由参数回调在非实时线程调用）
+     * @param velocity_limit           平移速度上限（米/秒）
+     * @param rotation_velocity_limit  自转速度上限（弧度/秒）
+     * @param force_deadband           平移力死区（牛）
+     * @param torque_deadband          自转力矩死区（牛·米）
+     * @param filter_cutoff            一阶低通截止频率（赫兹），0 = 关闭
+     */
+    void update_runtime_parameters(double velocity_limit, double rotation_velocity_limit, double force_deadband,
+                                   double torque_deadband, double filter_cutoff, double force_limit,
+                                   double torque_limit);
+
+    /// 当前生效的平移速度上限（米/秒）
+    double velocity_limit() const { return velocity_limit_.load(std::memory_order_relaxed); }
+    /// 当前生效的自转速度上限（弧度/秒）
+    double rotation_velocity_limit() const { return rotation_velocity_limit_.load(std::memory_order_relaxed); }
+    /// 当前生效的平移力死区（牛）
+    double force_deadband() const { return force_deadband_.load(std::memory_order_relaxed); }
+    /// 当前生效的自转力矩死区（牛·米）
+    double torque_deadband() const { return torque_deadband_.load(std::memory_order_relaxed); }
+    /// 当前生效的一阶低通截止频率（赫兹，0 = 关闭）
+    double filter_cutoff() const { return filter_cutoff_.load(std::memory_order_relaxed); }
+    /// 当前生效的平移力上限（牛）
+    double force_limit() const { return force_limit_.load(std::memory_order_relaxed); }
+    /// 当前生效的自转力矩上限（牛·米）
+    double torque_limit() const { return torque_limit_.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief 拷贝最近一拍的任务空间力估计（供控制器以非实时频率对外发布）
+     * @param raw      输出：死区/滤波之前的力估计，长度需 >= task_dof()
+     * @param filtered 输出：死区/滤波之后的力估计，长度需 >= task_dof()
+     * @param capacity 两个输出缓冲的长度
+     * @return 写入的分量数（= task_dof()）；capacity 不足时返回 0 且不写
+     * @note 读的是原子快照，可在任意线程调用；用于 O14 第 1 步「力估计复核」与服务端调参
+     */
+    std::size_t copy_force_estimate(double* raw, double* filtered, std::size_t capacity) const;
+
 private:
     /**
      * @brief 加载导纳参数
@@ -539,37 +616,113 @@ private:
      */
     void load_admittance_parameters(const char* name, const Eigen::VectorXd& fallback, Eigen::VectorXd& destination);
 
+    /**
+     * @brief 任务空间速度限幅
+     * @param velocity 待限幅的速度（原地修改）；分量 0..2 是平移，其余是自转
+     * @note 平移按**向量模长**限，避免斜推时被逐轴截断导致运动方向偏离受力方向
+     */
+    void limit_task_velocity(Eigen::VectorXd* velocity) const;
+
+    /**
+     * @brief 自由导纳：把期望位置积分到 @ref next_task_position_ 并做可达性处理
+     * @note 逆解失败时回滚到 @ref last_feasible_task_position_ 并把期望速度清零，
+     *       绝不把「顶到边界」升级成故障（否则推到头会瞬间掉回 idel）
+     */
+    void solve_free_roam_target();
+
+    /**
+     * @brief 由期望关节位置/速度 + 逆动力学前馈写 command_
+     * @param feedforward_task_force        逆动力学前馈里的任务力；外力由导纳积分体现，
+     *                                      这里传零向量，避免 J^T·F 被叠加两次
+     * @param feedforward_task_acceleration 逆动力学前馈里的任务加速度。自由导纳传零向量：
+     *                                      它的加速度来自力估计，近奇异位形下可能被放大，
+     *                                      交给位置环跟随比直接加进力矩前馈安全
+     * @return 正常写入了完整前馈返回 true；逆速度/逆动力学局部失败时退回较保守的
+     *         命令（速度 0 或纯重力前馈）并返回 false，调用方不得据此判定故障
+     */
+    bool write_task_command(const Eigen::VectorXd& feedforward_task_force,
+                            const Eigen::VectorXd& feedforward_task_acceleration);
+
+    /**
+     * @brief 把力估计限幅到物理合理的量级（docs/bugs.md O14）
+     *
+     * 近奇异位形下 static_force() 的任务空间最小二乘解会被 1/σ_min 放大：实测零位形
+     * （完全伸直、z 方向不可控）进入导纳时，四阶残差被放大成 78 N / 12 N·m 的假力，
+     * 会把机械臂甩出去。平移按模长限、自转按绝对值限；只作用于进入导纳的那份估计，
+     * 对外发布的「原始估计」保持原样，便于诊断。
+     */
+    void clamp_task_force();
+
+    /**
+     * @brief 自由导纳分支（没有 \c arm_admittance 轨迹时）
+     * @param time 当前时间
+     * @param dt   本拍积分步长（已限幅、非负）
+     * @return true 正常；false 表示积分结果非有限值（可恢复故障）
+     */
+    bool run_free_roam(const rclcpp::Time& time, double dt);
+
+    /**
+     * @brief 轨迹 + 柔顺分支（收到 \c arm_admittance 轨迹后，沿用原语义）
+     * @param time 当前时间
+     * @param dt   本拍积分步长（已限幅、非负）
+     * @return true 正常；false 表示采样/逆解/积分失败（可恢复故障）
+     */
+    bool run_trajectory(const rclcpp::Time& time, double dt);
+
     FSMArmControlFactory* factory{nullptr};           ///< 状态机工厂指针
     std::size_t joint_count_{0};                      ///< 关节数量
-    std::size_t task_dof_{6};                         ///< 任务空间自由度
+    std::size_t task_dof_{0};                         ///< 任务空间自由度（4 = [x,y,z,joint4]，6 = 位姿）
     bool trajectory_active_{false};                   ///< 轨迹激活标志
     rclcpp::Time traj_start_time_;                    ///< 轨迹开始时间
     rclcpp::Time last_update_time_;                   ///< 上次更新时间
     Trajectory traj;                                  ///< 轨迹对象
     Point point;                                      ///< 当前轨迹点
-    Eigen::VectorXd joint_pos_;                       ///< 关节位置
-    Eigen::VectorXd joint_velocity_;                  ///< 关节速度
-    Eigen::VectorXd joint_acceleration_;              ///< 关节加速度
-    Eigen::VectorXd model_torque_;                    ///< 模型力矩
-    Eigen::VectorXd torque_residual_;                 ///< 力矩残差（估计外力）
-    Eigen::VectorXd task_force_;                      ///< 任务空间力
-    Eigen::VectorXd task_position_;                   ///< 任务空间位置
+    Eigen::VectorXd joint_pos_;                       ///< 关节位置（实测）
+    Eigen::VectorXd joint_velocity_;                  ///< 关节速度（实测）
+    Eigen::VectorXd joint_acceleration_;              ///< 关节加速度（实测，缺失时为 0）
+    Eigen::VectorXd model_torque_;                    ///< 模型力矩（RNEA，残差与前馈共用）
+    Eigen::VectorXd torque_residual_;                 ///< 外部广义力矩 = RNEA − τ_act（不是 τ_act − RNEA）
+    Eigen::VectorXd raw_task_force_;                  ///< 死区/滤波之前的任务空间力
+    Eigen::VectorXd task_force_;                      ///< 死区/滤波之后的任务空间力
+    Eigen::VectorXd task_position_;                   ///< 任务空间位置（实测正解）
     Eigen::VectorXd desired_task_position_;           ///< 期望任务空间位置
-    Eigen::VectorXd desired_task_velocity_;           ///< 期望任务空间速度
+    Eigen::VectorXd next_task_position_;              ///< 本拍候选期望位置（逆解通过才提交）
+    Eigen::VectorXd last_feasible_task_position_;     ///< 上一个逆解可行的期望位置
+    Eigen::VectorXd desired_task_velocity_;           ///< 期望任务空间速度（已限幅）
     Eigen::VectorXd desired_task_acceleration_;       ///< 期望任务空间加速度
+    Eigen::VectorXd compliance_velocity_;             ///< 轨迹模式下只对柔顺部分限速用的缓存
     Eigen::VectorXd position_error_;                  ///< 位置误差
     Eigen::VectorXd velocity_error_;                  ///< 速度误差
-    Eigen::VectorXd torque_;                          ///< 关节力矩
-    Eigen::VectorXd admittance_mass_;                 ///< 导纳质量参数
-    Eigen::VectorXd admittance_damping_;              ///< 导纳阻尼参数
-    Eigen::VectorXd admittance_stiffness_;            ///< 导纳刚度参数
+    Eigen::VectorXd zero_task_;                       ///< 任务维零向量（逆动力学前馈用）
+    Eigen::VectorXd desired_joint_position_;          ///< 期望关节位置（逆解结果）
+    Eigen::VectorXd desired_joint_velocity_;          ///< 期望关节速度
+    Eigen::VectorXd last_feasible_joint_position_;    ///< 上一个逆解可行的关节位置
+    Eigen::VectorXd admittance_mass_;                 ///< 导纳质量参数（本拍快照）
+    Eigen::VectorXd admittance_damping_;              ///< 导纳阻尼参数（本拍快照）
+    Eigen::VectorXd admittance_stiffness_;            ///< 导纳刚度参数（本拍快照）
     std::vector<float> default_kp_;                   ///< 默认位置增益
     std::vector<float> default_kd_;                   ///< 默认速度增益
-    std::vector<float> hold_position_;                ///< 锁存的保持位置（轨迹未激活时使用）
+    std::vector<float> hold_position_;                ///< 锁存的保持位置（保留给失败兜底）
     std::vector<double> default_kp_param_;            ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;            ///< 速度增益参数原始值
+    bool force_filter_initialized_{false};            ///< 低通滤波状态是否已初始化
 
-    /// 保持路径的重力前馈（docs/bugs.md O7）。轨迹未激活时用它补掉重力静差。
+    /// 参数热更新快照：参数回调线程写、run() 每拍读，单写单读，用原子量避免撕裂。
+    std::array<std::atomic<double>, kMaxTaskDof> param_mass_{};
+    std::array<std::atomic<double>, kMaxTaskDof> param_damping_{};
+    std::array<std::atomic<double>, kMaxTaskDof> param_stiffness_{};
+    std::atomic<double> velocity_limit_{0.1};              ///< 平移速度上限（米/秒）
+    std::atomic<double> rotation_velocity_limit_{0.5};     ///< 自转速度上限（弧度/秒）
+    std::atomic<double> force_deadband_{1.5};              ///< 平移力死区（牛）
+    std::atomic<double> torque_deadband_{0.2};             ///< 自转力矩死区（牛·米）
+    std::atomic<double> filter_cutoff_{10.0};              ///< 一阶低通截止频率（赫兹），0 = 关闭
+    std::atomic<double> force_limit_{20.0};                ///< 平移力估计上限（牛）
+    std::atomic<double> torque_limit_{3.0};                ///< 自转力矩估计上限（牛·米）
+    /// 最近一拍的力估计快照（原始 / 死区+滤波之后），供控制器 500 ms 定时器对外发布。
+    std::array<std::atomic<double>, kMaxTaskDof> raw_force_estimate_{};
+    std::array<std::atomic<double>, kMaxTaskDof> filtered_force_estimate_{};
+
+    /// 保持路径的重力前馈（docs/bugs.md O7）。逆动力学前馈求解失败时退回到它。
     HoldGravityFeedforward gravity_;
 
     rclcpp::Subscription<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_cmd_sub_; ///< 导纳指令订阅
@@ -628,6 +781,7 @@ public:
 private:
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
     std::size_t joint_count_{0};            ///< 关节数量
+    std::size_t task_dof_{0};               ///< 任务空间维（4 轴模型是 4，不再写死 6，见 O13）
     std::vector<float> default_kd_;         ///< 默认速度增益
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
     Eigen::VectorXd joint_pos_;             ///< 关节位置

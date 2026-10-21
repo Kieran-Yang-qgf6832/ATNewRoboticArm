@@ -1,5 +1,7 @@
 model:
-  active_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
+  # 当前生效模型是 4 自由度（src/arm_model/model）。必须与 URDF 和测量 CSV 的关节数一致；
+  # 换回 6 轴模型时改成 joint1..joint6。
+  active_joints: [joint1, joint2, joint3, joint4]
 
 data:
   # 必须与 CSV 实际采样周期一致。实测 CSV 是 500 Hz（0.002），原来写的 0.02（50 Hz）差了 10 倍。
@@ -31,8 +33,8 @@ reconstruction:
   #
   # 2026-10-13 更新（docs/bugs.md O8 修复后）：测量已经记录**真实加速度**，残差从 31.5%
   # 降到 0.37%，辨识参数与真值只差 0.83%。但 sdp 仍会判不可行——**不是数据错**，而是这台
-  # 机器人的真值模型本身就贴在物理可行集边界上（link5 伪惯量最小特征值只有 6.4e-6），
-  # 任何估计误差都会把最小二乘解推到可行集之外。
+  # 机器人的真值模型本身就贴在物理可行集边界上，任何估计误差都会把最小二乘解推到
+  # 可行集之外。
   # 所以默认打开 physical_projection：LMI 投影把它拉回可行集内，实测投影后与真值差 1.6%，
   # **不会**退化成质点（旧数据下才会）。投影成功且物理校验通过时不再报错。
   method: auto
@@ -47,7 +49,11 @@ reconstruction:
   mass_min: 1.0e-3
   projection_psd_floor: 1.0e-9
   psd_eig_tol: 1.0e-9
-  inertia_eig_tol: -1.0e-9
+  # 校验容差（负值 = 允许的最小特征值，绝对值是容差）。
+  # 4 轴模型的 joint3 等效惯量只有 ~2e-4 kg·m²，LMI 投影求解器噪声可到 ~3e-9；
+  # 原来 -1e-9 会把「投影成功、只是数值噪声」误判成非物理（2026-10-19 实测）。
+  # 未投影的真实违反量是 1e-2 量级，放宽到 1e-8 仍能拦住。
+  inertia_eig_tol: -1.0e-8
   solver: cvxopt
   max_seconds:
   require_physical: true

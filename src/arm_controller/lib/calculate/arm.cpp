@@ -7,17 +7,25 @@ ArmSolve::ArmSolve(std::shared_ptr<ModelBase> model, std::shared_ptr<TaskMapping
     : model_(model) {
     ik_solver_ = std::make_shared<IKSolver>(model, task_mapping);
 
+    // 任务维由映射决定（4 轴模型 4 维，6 轴模型 6 维）：cart_traj 的力矩前馈
+    // 走的就是 inverse_dynamic，所以这里必须跟着任务维走，不能写死 6。
+    task_dim_ = ik_solver_->task_dim();
+    if (task_dim_ <= 0) {
+        throw std::invalid_argument("TaskMapping::task_dim() must be positive");
+    }
+
     const Eigen::Index joint_count = model_->dof();
+    const Eigen::Index task_dim    = static_cast<Eigen::Index>(task_dim_);
     workspace_.finite_joint_pos.resize(joint_count);
     workspace_.joint_vel.resize(joint_count);
-    workspace_.jacobian_velocity.resize(6);
-    workspace_.task_acc_rhs.resize(6);
+    workspace_.jacobian_velocity.resize(task_dim);
+    workspace_.task_acc_rhs.resize(task_dim);
     workspace_.joint_acc.resize(joint_count);
     workspace_.task_force_torque.resize(joint_count);
-    workspace_.jacobian.resize(6, joint_count);
-    workspace_.next_jacobian.resize(6, joint_count);
-    workspace_.jacobian_delta.resize(6, joint_count);
-    workspace_.jacobian_transpose.resize(joint_count, 6);
+    workspace_.jacobian.resize(task_dim, joint_count);
+    workspace_.next_jacobian.resize(task_dim, joint_count);
+    workspace_.jacobian_delta.resize(task_dim, joint_count);
+    workspace_.jacobian_transpose.resize(joint_count, task_dim);
     workspace_.jacobian.setZero();
     workspace_.next_jacobian.setZero();
     workspace_.jacobian_delta.setZero();
@@ -52,6 +60,14 @@ bool ArmSolve::forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd
 
 double ArmSolve::last_ik_error_norm() const {
     return ik_solver_ != nullptr ? ik_solver_->last_error_norm() : 0.0;
+}
+
+double ArmSolve::last_ik_position_error_norm() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_position_error_norm() : 0.0;
+}
+
+double ArmSolve::last_ik_rotation_error_norm() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_rotation_error_norm() : 0.0;
 }
 
 int ArmSolve::last_ik_iterations() const {
@@ -182,7 +198,7 @@ bool ArmSolve::static_force(const Eigen::VectorXd& joint_pos,
         message << "Invalid joint torque residual size: expected " << joint_count << ", got " << joint_torque_residual.size();
         throw std::invalid_argument(message.str());
     }
-    if (task_force->size() != 6) {
+    if (task_force->size() != static_cast<Eigen::Index>(task_dim_)) {
         throw std::invalid_argument("Invalid task force output size");
     }
 

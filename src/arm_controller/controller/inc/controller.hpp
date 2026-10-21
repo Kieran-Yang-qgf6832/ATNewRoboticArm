@@ -28,6 +28,7 @@
 #include <rclcpp/subscription.hpp>
 #include <rclcpp/time.hpp>
 #include <rclcpp/timer.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <../arm/arm_fsm_factory.hpp>
 #include <../arm/arm_fsm.hpp>
@@ -183,6 +184,18 @@ private:
     void publish_current_state();
 
     /**
+     * @brief 发布导纳状态最近一拍的力估计（docs/bugs.md O14 的第 1 步复核入口）
+     *
+     * 话题 @c ~/admittance_estimate（@c std_msgs::msg::Float64MultiArray）：前 task_dof 个
+     * 分量是**死区/滤波之前**的原始估计，后 task_dof 个分量是死区 + 一阶低通之后的估计。
+     * 4 轴模型下依次是 [F_x, F_y, F_z, τ_joint4]（后 4 个同序）。
+     *
+     * 只在状态机处于 @c admittance 时发布；数据取自 AdmittanceState 的原子快照，
+     * 因此本函数运行在 wall timer（非实时线程）是安全的。
+     */
+    void publish_admittance_estimate();
+
+    /**
      * @brief 故障兜底：锁定当前实测位置并请求切回 idel
      *
      * 当出现关节越限、或状态机报告可恢复故障（@c RunResult::Recoverable）/
@@ -216,6 +229,13 @@ private:
 
     /// 状态机工厂共享指针，持有机器人模型、求解器并承载各控制状态
     std::shared_ptr<FSMArmControlFactory> fsm_factory;
+    /**
+     * @brief 导纳状态对象（可能为 nullptr）
+     * @note 参数回调把 admittance_* 的热更新直接转发给它；工厂不缓存任何 FSM 私有参数。
+     *       只在 on_init() 里赋值一次，之后只读，运行于参数服务线程时与 update() 并发安全
+     *       （状态内部用原子快照，见 AdmittanceState）。
+     */
+    AdmittanceState* admittance_state_{nullptr};
     /// 关节名称列表，决定命令/状态接口的数量与命名
     std::vector<std::string> joints_name;
     /// 命令接口名称前缀，为空时命令接口直接使用关节名
@@ -229,6 +249,8 @@ private:
     std::vector<float> default_kp,default_kd;
     /// 状态机实际状态名的话题发布器（~/state，transient_local）
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
+    /// 导纳力估计发布器（~/admittance_estimate，500 ms，仅 admittance 状态）
+    rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr admittance_estimate_pub_;
     /// 状态发布用的 wall timer，运行在非实时线程
     rclcpp::TimerBase::SharedPtr state_timer_;
     /// 上一次已发布的状态名，用于只在状态变化时发布

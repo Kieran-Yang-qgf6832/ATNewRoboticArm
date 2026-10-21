@@ -294,11 +294,10 @@ def identify(
         else:
             hint = (
                 "SDP 求解失败：辨识出的基参数与逐杆物理约束（伪惯量 PSD）无法同时满足。"
-                "注意这**不一定是数据错**——本机器人的真值模型本身就贴在物理可行集的边界上"
-                "（link5 伪惯量最小特征值只有 6.4e-6），任何估计误差都会把最小二乘解推到"
-                "可行集之外。打开 reconstruction.physical_projection: true 走 LMI 投影即可："
-                "它把参数拉回可行集内，实测投影后与真值只差 1.6%，不会退化成质点。"
-                "详见 docs/bugs.md O8。"
+                "注意这**不一定是数据错**——本机器人的真值模型本身就贴在物理可行集的边界上，"
+                "任何估计误差都会把最小二乘解推到可行集之外。打开 "
+                "reconstruction.physical_projection: true 走 LMI 投影即可："
+                "它把参数拉回可行集内，避免退化成质点。详见 docs/bugs.md O8。"
             )
         raise RuntimeError(
             f"Physical reconstruction did not complete successfully: status={reconstruction_status}. {hint} "

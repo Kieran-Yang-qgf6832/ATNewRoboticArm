@@ -36,6 +36,12 @@ arm_controller:
     # 末端执行器坐标系：4 自由度模型的最后一节是 link4；6 自由度模型是 link6。
     # controller 的 FK/雅可比、measure 激励轨迹、任务层 TF 查询都读这个参数。
     end_effector_frame: link4
+    # 任务空间维度（docs/bugs.md O13）：4 = (x, y, z, joint4 自转)，6 = (x, y, z, 旋转向量)。
+    # 4 轴臂的 6 维几何雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达——
+    # 实测把 6 维目标做最小二乘「尽力而为」会让 pick_demo 的位置误差达到 28.6 mm。
+    # 换回 6 自由度模型时把这里改成 6（同时 end_effector_frame 改回 link6）。
+    # 初始化后不可修改（映射与求解器已按维度构造），实际生效值见控制器启动日志。
+    task_space_dof: 4
     command_interface_prefix: sim_pid_controller
     # 控制器激活后自动进入的状态。
     # 设为 reset：上电（激活）后先自动复位到 reset_joint_pos，复位完成时 ResetState
@@ -87,11 +93,41 @@ arm_controller:
     # 生成的轨迹**不可复现**；填任意正整数即可复现同一条轨迹——控制器日志里的
     # "seed=" 会打出实际使用的值，照抄回来即可重放某一次测量。
     measure_trajectory_seed: 0
-    # 导纳参数按 6 维任务空间定义；4 自由度模型下 admittance 状态不可用，
-    # 这里保留前 4 维仅为了让参数长度与关节数一致。
+    # 导纳参数（docs/bugs.md O14）：4 轴模型下 admittance 已可用，长度按 task_space_dof
+    # 取前 4 维 = [x, y, z, joint4 自转]（6 轴模型按 6 维用，多出来的项会被忽略）。
+    #   · 进入导纳后**没收到 arm_admittance 轨迹**时按自由导纳工作：K 不参与，推着走、
+    #     撤力停在原地（速度上限见下面两个 admittance_*_velocity_limit）；
+    #     收到轨迹时是「轨迹 + 柔顺」的旧语义（这时 K 会起作用）。
+    #   · 质量按 kg、阻尼按 N/(m/s)、刚度按 N/m；第 4 维对应 N·m、N·m/(rad/s)、N·m/rad。
+    #   · 这几个参数和下面的限速/死区/滤波都支持 **热更新**（ros2 param set 立刻生效）：
+    #     调手感不用重启仿真。长度上限 6，质量必须为正，阻尼/刚度非负。
     admittance_mass: [1.0, 1.0, 1.0, 0.1]
     admittance_damping: [20.0, 20.0, 20.0, 2.0]
     admittance_stiffness: [0.0, 0.0, 0.0, 0.0]
+    # 让开速度上限：平移按**速度向量模长**限 0.1 m/s（斜推不会被逐轴截断成只沿一个轴走），
+    # 工具自转单独限 0.5 rad/s。没有位移上限——一直推会一直走到工作空间/关节限位，
+    # 到边界时控制器回滚到上一拍可行目标并清零速度，**状态保持不退**。
+    admittance_velocity_limit: 0.1
+    admittance_rotation_velocity_limit: 0.5
+    # 力估计死区（平移 N / 自转 N·m）：低于阈值当 0，阈值以上先减掉再进导纳。
+    # 必需项——K = 0 时导纳对力是无穷大直流增益，模型偏差（实测参数误差 0.1% 量级）
+    # 会被积成肉眼可见的缓慢爬行（0.2 N 的偏差按 D=20 就是 1 cm/s）。
+    # 实际阈值应由第 1 步的力估计复测（注入已知外力对比估计值）来标定。
+    # 实测（2026-10-18，ready 位形）：静止时原始力估计只有 3e-8 N 量级——URDF 与 MuJoCo
+    # 模型同源参数，残差本来就是机器精度。所以 1.5 N 的死区对仿真太保守：2 N 的轻推会被
+    # 全部吃掉。这里取 0.5 N / 0.05 N·m，留一点余量给实机上的模型偏差。
+    admittance_force_deadband: 0.5
+    admittance_torque_deadband: 0.05
+    # 力估计的一阶低通截止频率（Hz），0 = 关闭。残差里剩下的高频成分来自模型误差，
+    # 抹掉它比加大阻尼更不影响手感（10 Hz 在 500 Hz 下约 16 ms 滞后）。
+    admittance_force_filter_cutoff: 10.0
+    # 力估计上限（N / N·m）：近奇异位形（例如零位形完全伸直时 z 方向不可控）下
+    # 「τ = Jᵀ·F」的最小二乘解会被 1/σ_min 放大——实测零位形进入导纳时被放大到
+    # 78 N / 12 N·m，直接把这么大的加速度写进力矩前馈会把机械臂甩到关节限位外。
+    # 限幅只作用于进入导纳的那份估计；~/admittance_estimate 里前一半仍是**原始**估计。
+    # 演示应当从非奇异位形（ready）进入导纳，零位形只用于兜底。
+    admittance_force_limit: 20.0
+    admittance_torque_limit: 3.0
     measure_end_effector_x_lower_limit: -.inf
     measure_end_effector_x_upper_limit: .inf
     measure_end_effector_y_lower_limit: -.inf

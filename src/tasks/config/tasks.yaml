@@ -6,7 +6,8 @@
 #   reset           复位；只等控制器 current_state 回到 idel
 #   joint_move      关节空间轨迹；用 to 引用目标点，或直接给 target
 #   cart_move       笛卡尔轨迹；offset 为相对当前末端位姿的位移（3 维）
-#   admittance_move 导纳控制下的期望轨迹；同样用 offset
+#   admittance_move 导纳；**不给 offset = 自由导纳停留**（进导纳、停 duration 秒、回 idel，
+#                   外力推着走 / 撤力停下），给 offset = 旧的「导纳下的期望轨迹」
 #   tool            末端执行器开关量；action 取下面 tool 段定义的语义名
 #   teach           示教；需 duration
 #   measure         参数辨识；需 duration
@@ -14,11 +15,25 @@
 # 常用字段：duration（秒）、tolerance（到位容差）。
 # reset / teach / measure 只能从 idel 进出，执行器会自动先等待控制器空闲。
 #
-# 注意：当前生效模型是 4 自由度机械臂（src/arm_model/model）。
-#   · joint_move 直接用关节角，目标必须是 4 维，可用；
-#   · cart_move / admittance_move 要求 6 维任务空间位姿，4 自由度机械臂在物理上
-#     做不了完整 6 维位姿，相关序列与下面的位姿注释（z≈1.233 m 等）保留作历史
-#     参考，运行时预期失败。
+# 当前生效模型是 4 自由度机械臂（src/arm_model/model），控制器的任务空间是
+# **4 维**（参数 task_space_dof=4）：(x, y, z) + joint4 自转角。
+#   · 任务层仍然发 6 维位姿（位置 + 旋转向量），由控制器投影：取前 3 维位置，
+#     第 4 维自转锁存为载入时的 joint4 实测角，命令姿态的其余分量被丢弃。
+#   · 所以 cart_move 的 offset 只有 [dx, dy, dz] 有意义，姿态不会跟着变。
+#   · 工具指向（工具 z 轴方向）不受控：它由位置经关节 1/2/3 决定，实测 5 cm 平移
+#     漂 4–8°、15 cm 平移漂 10–12°。吸盘取放可以接受；需要严格贴面时改用 joint_move。
+#   · y 方向工作空间只有约 4 cm 厚（结构限制），|dy| 超过约 2 cm 的目标会被
+#     控制器在下发前判为不可达。
+#   · 4 轴模型下 admittance / teach_pendant 都可用（docs/bugs.md O14）：导纳的 M/D/K、
+#     限速、死区、滤波都按 task_space_dof 取值；不给 offset 时是自由导纳，给 offset 时
+#     是「轨迹 + 柔顺」。示教（teach）是零力拖动，靠 kd 阻尼停住。
+#
+# 各序列的预期结果（2026-10-18 用 4 维任务空间离线复算 + 仿真实测）：
+#   正例：reset_only / reset_then_joint / ready_then_cart / pick_demo /
+#         cart_cycle_large —— 退出码 0
+#   互动序列（需要外力才有意义，见下方注释）：admittance_demo / teach_demo —— 退出码 0
+#   反例：reset_then_cart（判据边界）/ unreachable_near（y 方向结构不可达）/
+#         unreachable_far（远超工作空间）—— 退出码 1，且**下发前**就被拒绝
 
 # 当前挂载的末端执行器：只影响 tool 步骤的语义名与日志。
 # 换夹爪时把 name 改成 gripper、on/off 改成 clamp/release 即可，任务序列不用动。
@@ -28,86 +43,147 @@ tool:
   off: release
 
 # 命名目标点：修改一处，所有引用它的序列一起生效。
-# 4 自由度模型的目标点（joint1..joint4 关节角，行程见 URDF）。
+# 4 自由度模型的目标点（joint1..joint4 关节角，行程见 URDF）：
+#   joint1 [-1.5708, 1.5708]  joint2 [-3.1, 3.1]
+#   joint3 [-3.14, 3.14]      joint4 [-1.5708, 1.5708]
 # 6 自由度时期这三组点是 6 维的，切换到 4 自由度后由前 4 维 / 温和位形重新给出。
+#
+# ready 已放大到 [0.8, 1.2, -1.2, 0.8]（原来的 [0, 0.3, -0.3, 0] 的约 4 倍，四个关节
+# 都动）：末端从 (0.137, 0.027, 0.847) 走到 (-0.078, 0.015, 0.713)。放大前用
+# pinocchio + coal 离线校验过整条 0→ready 关节空间路径：连杆间最小距离 0.023 m
+# （判据 0.02）、连杆-地面最小净空 0.012 m（判据 0.01）、重力矩最大 1.4 N·m
+# （effort 限 50 N·m），均在安全范围内；再往上取 [1.0, 1.5, -1.5, 1.0] 也满足同一组
+# 判据，想要更大幅度可以直接改这里。
 points:
   home:      [0.0, 0.0,  0.0, 0.0]
-  ready:     [0.0, 0.3, -0.3, 0.0]
+  ready:     [0.8, 1.2, -1.2, 0.8]
   above_box: [0.2, 0.4, -0.4, 0.2]
 
 sequences:
+  # 导纳演示（docs/bugs.md O14）：不带 offset = **自由导纳**。
+  #
+  # 进入后控制器把「实测力矩 − 模型力矩」的残差当外力，按 M·ẍ + D·ẋ = F 积分成让开运动
+  # （K = 0：撤力就停在原地）。速度受 admittance_velocity_limit（0.1 m/s）/ 自转上限
+  # （0.5 rad/s）限制，力估计带死区（1.5 N / 0.2 N·m）与一阶低通（10 Hz）。
+  #
+  # **本序列自身不施力**，不给外力时它只是「进导纳、原地保持 20 s、回 idel」——真实手感
+  # 要靠外力脚本，一条命令的验收入口是：
+  #   python3 src/launch_pack/tools/admittance_demo_check.py --mode admittance
+  # 先 joint_move 到 ready：零位形完全伸直、正好在工作空间边界（+X/-X 都推不动），
+  # 在那里测不出「被推着走」。
+  admittance_demo:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: admittance_move, duration: 25.0}
+
+  # 拖动示教演示（docs/bugs.md O14）：零力拖动（kp = 0、只留 kd 阻尼 + 重力前馈）。
+  # 同样需要外力脚本配合，一条命令的验收入口：
+  #   python3 src/launch_pack/tools/admittance_demo_check.py --mode teach
+  # 12 s 是给验收入口留的施力/撤力窗口；撤力后靠阻尼停住，不会自己滑出去。
+  teach_demo:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      # teach 只能从 idel 进（joint_move 结束后控制器停在 joint_traj 的 STOP 阶段），
+      # 所以这里必须显式回一次 idel，否则执行器会以「not in idel before a teach step」失败。
+      - {type: idel}
+      - {type: teach, duration: 12.0}
+
   # 最小可用序列：仅复位后回到空闲，用于验证执行器骨架。
   reset_only:
     steps:
       - {type: reset}
       - {type: idel}
 
-  # 复位后运动到 ready 点（阶段 3 实现 joint_move 后可用）。
+  # 复位后运动到 ready 点：纯关节空间，4 轴下稳定可用。
   reset_then_joint:
     steps:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: idel}
 
-  # 复位后直接做笛卡尔运动。**反例**：零位形机械臂完全伸直，处于工作空间边界
-  # （雅可比降秩），从那里直接做笛卡尔运动目标不可达，此处预期失败。
+  # **反例（判据边界）**：零位形机械臂完全伸直，处于工作空间边界（雅可比降秩），
+  # 从那里直接做笛卡尔运动目标不可达，此处预期失败。
   #
-  # 实测失败方式（不要按「逆解不收敛」去理解）：目标被控制器判为 UNREACHABLE 并在
-  # **下发前拒绝**，一个运动指令都不下发，退出码 1。零位姿 +X 5 cm 这个目标用
-  # 6 个差异极大的初值求解，全部收敛到同一残余 1.305636e-03——全局不可达，
-  # 只差约 1.3 mm（判据 1e-3）。余量这么小说明这是**判据边界**案例，不是明显不可行。
-  # 对照：零位姿本身可达（残余 3.2e-4）；把姿态换成 ready 的姿态后残余更大
-  # （6.96e-3），说明是**位置**不可达，与姿态约束无关。
+  # 4 维任务空间实测（ik_solve，见下）：零位姿 +X 5 cm 的最近可达位姿仍差
+  # **1.526e-3 m**（位置判据 1e-3 m），刚好越过判据。控制器在**下发前**拒绝，
+  # 一个运动指令都不下发，退出码 1。
+  # 注意这条用例对判据很敏感：位置判据一放宽它就会翻成正例。
   reset_then_cart:
     steps:
       - {type: reset}
       - {type: cart_move, offset: [0.05, 0.0, 0.0], duration: 2.0}
       - {type: idel}
 
-  # 先关节运动到非奇异位姿，再做笛卡尔运动。
+  # 先关节运动到非奇异位形，再做笛卡尔运动。
   #
-  # 两个必须遵守的约束（均由实测确定，见 docs/bugs.md）：
-  #   1) 不要从零位形直接做笛卡尔运动——零位形机械臂完全伸直、处于工作空间边界，
-  #      目标会被判为不可达并在下发前拒绝（见上面 reset_then_cart 的实测数据）。
-  #      先 joint_move 离开零位形。
-  #   2) **不要选 +Z 方向**——ready 位姿已在最大高度（z ≈ 1.233 m），向上偏移
-  #      5 cm 时「位置 + 姿态」的组合目标不可达（实测：位置单独可达、姿态单独可达、
-  #      组合不可达；6 个不同初值全部收敛到同一残余，证明是全局不可达而非局部极小）。
-  #      实测 ready 位姿处 ±X / ±Y / -Z 均可达，+Z 不可达。
+  # **正例（大幅）**：ready 位姿下 +X **15 cm**（原 5 cm 的 3 倍）。离线按「任务空间
+  # 直线 + 每点用上一点做初值」逐点复算：最差残余 2.8e-5 m，相邻点关节跳变最大
+  # 0.011 rad，全部点都在关节限位内。工具指向漂约 12.1°——吸盘可以接受，但已接近
+  # "不要再加大"的量级（20 cm 时 15.3°）。仿真实测：退出码 0，位置残余 0.0003 m。
+  #
+  # 仍然要遵守：不要从零位形直接做笛卡尔运动（见上面 reset_then_cart）。
   ready_then_cart:
     steps:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
-      - {type: cart_move, offset: [0.05, 0.0, 0.0], duration: 2.0}
+      - {type: cart_move, offset: [0.15, 0.0, 0.0], duration: 3.0}
       - {type: idel}
 
   # 完整取放示例：吸住后必须等真空建立才能抬升，所以 tool 之后跟一个 wait。
+  #
+  # **正例（大幅）**：ready 位姿下沿 -Z 下探 **15 cm**（原 5 cm 的 3 倍）。离线逐点
+  # 复算最差残余 5.5e-5 m，关节跳变最大 0.030 rad。工具指向在这 15 cm 里漂约 10.2°
+  # ——如果以后要贴着平面取放、对姿态敏感，把这一段改成 joint_move。
+  # 仿真实测：退出码 0，位置残余 0.0007 m。
   pick_demo:
     steps:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: tool, action: suck}
       - {type: wait, duration: 1.5}
-      - {type: cart_move, offset: [0.0, 0.0, -0.05], duration: 2.0}
+      - {type: cart_move, offset: [0.0, 0.0, -0.15], duration: 3.0}
       - {type: idel}
 
-  # **反例**：从 ready 位姿沿 +Z 抬升 5 cm。ready 已在最大高度（z ≈ 1.233 m），
-  # 该目标不可达。用于验证 O2：不可达目标应被明确报告为「不可达」，且不得
-  # 产生大幅意外运动。预期本序列**失败**，退出码非 0。
+  # **正例（大幅、多段）**：一条 4 段的笛卡尔循环，每段 15 cm、总行程 60 cm，
+  # 最后回到 ready。用于验证「连续 cart_move 步骤 + 大幅行程」：
+  #   ready → +X 15 cm → -Z 15 cm → +Z 15 cm → -X 15 cm → ready
   #
-  # 注意这是**临界**不可达：6 个差异极大的初值都收敛到同一残余 1.045997e-3，
-  # 只比 1e-3 的判据高 4.6%——所以日志里的 ik_err 看上去像「差一点点没收敛」，
-  # 实际含义是「目标落在可达集之外 1.046 mm」。这正是 O2 诊断困难的根源。
+  # 离线逐段复算（任务空间直线 + 每点用上一点做初值）：最差残余 5.2e-5 m，
+  # 单段相邻点关节跳变最大 0.029 rad，终点与 ready 的位置偏差 < 1e-4 m、
+  # 工具指向偏差 0.01°（因为整圈回到原点）。单段工具指向最多漂约 12°。
+  # 仿真实测：退出码 0，最后一段位置残余 0.0002 m，全程无 IK 失败/安全保持。
+  #
+  # 注意每段都是独立的 cart_move 步骤：控制器保持在 cart_traj 的 STOP 阶段，
+  # 下一段直接复用同一状态、不经过 idel；每段的起点取当前实测末端位姿。
+  cart_cycle_large:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: cart_move, offset: [0.15, 0.0, 0.0], duration: 3.0}
+      - {type: cart_move, offset: [0.0, 0.0, -0.15], duration: 3.0}
+      - {type: cart_move, offset: [0.0, 0.0, 0.15], duration: 3.0}
+      - {type: cart_move, offset: [-0.15, 0.0, 0.0], duration: 3.0}
+      - {type: idel}
+
+  # **反例（结构不可达）**：沿 +Y 平移 5 cm。
+  #
+  # 4 轴臂的 y 方向工作空间只有约 4 cm 厚（joint1/joint2 是绕 y 的平面 2R，
+  # joint3 的力臂只有 0.047 m），沿 y 平移 5 cm 在物理上出不去。ik_solve 实测：
+  # 最近可达位姿仍差 **3.7e-2 m**，远大于 1e-3 m 判据，控制器在下发前拒绝。
+  #
+  # 这条替换了 6 轴时期的「+Z 抬升 5 cm」：+Z 在 4 维任务空间里是**可达**的
+  # （离线实测残余 3.2e-5 m），不再能当反例。
   unreachable_near:
     steps:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
-      - {type: cart_move, offset: [0.0, 0.0, 0.05], duration: 2.0}
+      - {type: cart_move, offset: [0.0, 0.05, 0.0], duration: 2.0}
       - {type: idel}
 
-  # **反例**：从 ready 位姿沿 +X 平移 2 m，远远超出工作空间。
-  # 实测：手臂会先沿轨迹走到工作空间边界（joint2 转 -0.404 rad、joint4 转 +0.428 rad，
-  # 末端走了约 0.40 m），再因逆解失败中止——这才是 O2 要消除的「大幅意外运动」。
+  # **反例**：从 ready 位姿沿 +X 平移 2 m，远远超出工作空间（最大臂展约 0.82 m）。
+  # ik_solve 实测残余 1.215 m。控制器在下发前拒绝，完全不运动（docs/bugs.md O2 的语义）。
   unreachable_far:
     steps:
       - {type: reset}

@@ -1,9 +1,9 @@
 # RoboticArm
 
-基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
+基于 ROS 2 与 `ros2_control` 的 4 自由度机械臂控制系统（6 自由度版本保留在 Git 历史，commit `5e59ef5`），支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
 > **当前状态**：仿真链路已端到端跑通并验证；**实机从未运行过**。
-> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O10 已全部闭环。
+> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O14 已全部闭环。
 > **参数辨识链路可用**：measure 记录 MuJoCo 的真实关节加速度（`acc_*` 列）与仿真时间，
 > 辨识出的模型物理可行，参数误差 **0.39%**——见 [O8](docs/bugs.md) 与
 > [`src/parameter_identify/README.md`](src/parameter_identify/README.md)。
@@ -263,8 +263,8 @@ ros2 launch launch_pack arm_real.launch.py
 
 | 工具 | 用途 |
 | --- | --- |
-| `fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量 |
-| `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
+| `fk_dump <urdf> <frame> <q1> ... <qN>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间向量（4 轴：`link4 4`；6 轴：`link6 6`） |
+| `ik_solve <urdf> <frame> <task_dof> <t0..tN> <s0..sM>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
 | `ik_benchmark` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
 | `arm_real_joint_count_test` | 不连硬件校验实机接口的关节数处理（5/6/7 关节） |
 

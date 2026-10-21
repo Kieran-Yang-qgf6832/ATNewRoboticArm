@@ -6,7 +6,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <exception>
+#include <string>
 
 #include <rclcpp/duration.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -27,6 +29,15 @@ int model_dof_from_context(std::any ctx) {
         return 0;
     }
     return factory->model_->dof();
+}
+
+/// 任务空间维度（取自工厂参数 task_space_dof：4 轴模型 4，6 轴模型 6）
+std::size_t task_dof_from_context(std::any ctx) {
+    auto* factory = std::any_cast<FSMArmControlFactory*>(ctx);
+    if (factory == nullptr) {
+        return 0;
+    }
+    return factory->task_dof_;
 }
 
 /**
@@ -202,6 +213,103 @@ bool load_trajectory_from_message(
         }
     }
     return !traj->empty();
+}
+
+/**
+ * @brief 把消息里的 6 维位姿轨迹投影成任务空间轨迹
+ *
+ * 消息契约固定为 6 维位姿 [x, y, z, rx, ry, rz]（任务层不变），由控制器负责投影：
+ * - 6 维任务空间：原样拷贝；
+ * - 4 维任务空间：取 [x, y, z] + **载入时刻**的 joint4 角度（即「保持自转」），
+ *   命令姿态的其余分量被丢弃——4 轴臂在给定位置下没有能力改变工具指向。
+ *
+ * 在订阅回调（非实时线程）里调用，允许分配内存；轨迹点写进预分配的 Trajectory。
+ *
+ * @param mapping    任务空间映射
+ * @param seed       投影用的关节角种子（4 维映射用它取 joint4 目标）
+ * @param points     消息里的轨迹点（6 维位姿）
+ * @param seconds    与 points 一一对应的时刻
+ * @param traj       输出：任务空间轨迹（预分配）
+ * @param task_point 单点投影缓冲（长度 = 任务维）
+ * @param why        失败原因（可为 nullptr）
+ */
+bool load_task_trajectory_from_message(
+    const TaskMapping& mapping, const Eigen::VectorXd& seed, const std::vector<robot_msgs::msg::Vector>& points,
+    const std::vector<float>& seconds, Trajectory* traj, Eigen::VectorXd* task_point, std::string* why) {
+    const auto fail = [why](const std::string& message) {
+        if (why != nullptr) {
+            *why = message;
+        }
+        return false;
+    };
+
+    if (traj == nullptr || task_point == nullptr || points.empty() || seconds.size() != points.size()
+        || points.size() > traj->capacity()) {
+        return fail("trajectory message is empty, too long, or has inconsistent timestamps");
+    }
+
+    const auto task_dim = static_cast<std::size_t>(mapping.task_dim());
+    if (task_dim == 0 || task_point->size() != static_cast<Eigen::Index>(task_dim)) {
+        return fail("task space dimension is not initialized");
+    }
+
+    traj->clear();
+    Eigen::VectorXd pose(6);
+    std::vector<float> position(task_dim);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (points[i].pos.size() != 6) {
+            return fail("cartesian trajectory points must be 6D poses [x, y, z, rx, ry, rz]");
+        }
+        if (seconds[i] < 0.0f || !std::isfinite(seconds[i])) {
+            return fail("trajectory timestamps must be finite and non-negative");
+        }
+
+        for (int k = 0; k < 6; ++k) {
+            pose(k) = points[i].pos[static_cast<std::size_t>(k)];
+        }
+        if (!mapping.target_from_pose(seed, pose, task_point)) {
+            return fail("failed to project the 6D pose onto the task space");
+        }
+        for (std::size_t k = 0; k < task_dim; ++k) {
+            position[k] = static_cast<float>((*task_point)(static_cast<Eigen::Index>(k)));
+        }
+
+        std::vector<float> velocity;
+        std::vector<float> acceleration;
+        if (!points[i].vel.empty() || !points[i].acc.empty()) {
+            // 4 维任务空间没有定义「6 维位姿速度/加速度」到「4 维任务速度/加速度」的映射；
+            // 任务层从不发送前馈，这里显式拒绝而不是静默丢弃。
+            if (task_dim != 6) {
+                return fail("the 4-DOF task space does not accept velocity/acceleration feedforward");
+            }
+            velocity     = points[i].vel;
+            acceleration = points[i].acc;
+        }
+
+        if (!traj->add_point(
+                position, velocity, acceleration, rclcpp::Duration(std::chrono::duration<double>(seconds[i])))) {
+            return fail("failed to append a trajectory point");
+        }
+    }
+    return !traj->empty();
+}
+
+/**
+ * @brief 把向量格式化成 "[a, b, c]" 写进定长缓冲区（不分配内存，可在实时路径调用）
+ */
+void format_vector(const Eigen::VectorXd& values, char* buffer, std::size_t size) {
+    if (buffer == nullptr || size == 0) {
+        return;
+    }
+    buffer[0]        = '\0';
+    std::size_t used = 0;
+    for (Eigen::Index i = 0; i < values.size(); ++i) {
+        const int written = std::snprintf(buffer + used, size - used, "%s%.6f", i == 0 ? "" : ", ", values(i));
+        if (written <= 0 || static_cast<std::size_t>(written) >= size - used) {
+            break;
+        }
+        used += static_cast<std::size_t>(written);
+    }
 }
 
 } // namespace
@@ -471,11 +579,11 @@ bool ResetState::run(const rclcpp::Time& time) {
 
 CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     : FSM(name, ctx)
-    , point(6)
-    , traj(6, static_cast<int>(kMaxArmTrajectoryPoints))
+    , point(static_cast<int>(task_dof_from_context(ctx)))
+    , traj(static_cast<int>(task_dof_from_context(ctx)), static_cast<int>(kMaxArmTrajectoryPoints))
     , factory(std::any_cast<FSMArmControlFactory*>(ctx)) {
     joint_count_ = model_dof_from_context(ctx);
-    task_dof_    = 6;
+    task_dof_    = task_dof_from_context(ctx);
     joint_pos_.resize(static_cast<Eigen::Index>(joint_count_));
     torque_.resize(static_cast<Eigen::Index>(joint_count_));
     task_force_.setZero(static_cast<Eigen::Index>(task_dof_));
@@ -485,18 +593,45 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     precheck_target_.resize(static_cast<Eigen::Index>(task_dof_));
     precheck_seed_.resize(static_cast<Eigen::Index>(joint_count_));
     precheck_solution_.resize(static_cast<Eigen::Index>(joint_count_));
+    debug_seed_.resize(static_cast<Eigen::Index>(joint_count_));
+    debug_measured_task_.resize(static_cast<Eigen::Index>(task_dof_));
+    debug_task_error_.resize(static_cast<Eigen::Index>(task_dof_));
+    load_seed_.resize(static_cast<Eigen::Index>(joint_count_));
+    load_task_point_.resize(static_cast<Eigen::Index>(task_dof_));
+
+    // 实际生效的任务维必须打出来（C6 的教训：参数写错不会有任何提示）。
+    if (factory != nullptr && factory->node_ != nullptr) {
+        RCLCPP_INFO(
+            factory->node_->get_logger(),
+            "cart_traj: task_space_dof=%zu (%s); 6D pose commands are projected onto the task space and the roll target "
+            "is latched from joint4 when a trajectory is loaded",
+            task_dof_, task_dof_ == 4 ? "x, y, z, joint4" : "x, y, z, rx, ry, rz");
+    }
 
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
-            if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, task_dof_, &traj)) {
+            if (state != TrajPhase::STOP || factory == nullptr || factory->task_map_ == nullptr
+                || factory->state_.size() != joint_count_) {
                 return;
             }
-            // 记下终点供 run() 做可达性预检。这里只做拷贝，不开新轨迹：预检失败时
-            // 必须保证一个运动指令都没下发过。
-            const auto& final_waypoint = msg.position.back().pos;
-            for (Eigen::Index row = 0; row < precheck_target_.size(); ++row) {
-                precheck_target_(row) = final_waypoint[static_cast<std::size_t>(row)];
+
+            // 投影用当前实测关节角取 joint4 自转目标（即「保持自转」）。
+            for (std::size_t i = 0; i < joint_count_; ++i) {
+                load_seed_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
             }
+
+            std::string why;
+            if (!load_task_trajectory_from_message(
+                    *factory->task_map_, load_seed_, msg.position, msg.seconds, &traj, &load_task_point_, &why)) {
+                RCLCPP_WARN_THROTTLE(
+                    factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+                    "cart_traj: rejected the trajectory message: %s", why.c_str());
+                return;
+            }
+
+            // 记下终点供 run() 做可达性预检（已投影成任务空间坐标）。这里只做拷贝，
+            // 不开新轨迹：预检失败时必须保证一个运动指令都没下发过。
+            precheck_target_  = traj.back().pos;
             precheck_pending_ = true;
 
             const auto now = factory->node_->get_clock()->now();
@@ -591,9 +726,12 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                 RCLCPP_ERROR(
                     factory->node_->get_logger(),
                     "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
-                    "pose is still %.6f away from it (IK tolerance is %.1e). Without this pre-check the arm would have "
-                    "walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
-                    residual, IKSolver::tuning().tolerance);
+                    "pose is still %.6f m + %.6f rad away from it (tolerances %.1e m / %.1e rad). Without this pre-check "
+                    "the arm would have walked to the edge of its workspace and only then aborted. Fix the target, not "
+                    "the solver.",
+                    factory->arm_solve_->last_ik_position_error_norm(),
+                    factory->arm_solve_->last_ik_rotation_error_norm(), IKSolver::tuning().position_tolerance,
+                    IKSolver::tuning().rotation_tolerance);
             } else {
                 RCLCPP_ERROR(
                     factory->node_->get_logger(),
@@ -627,36 +765,40 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             state = TrajPhase::STOP;
             traj.stop();
             set_fault_stage("Cartesian trajectory inverse kinematics");
-            if (joint_count_ == 6) {
+            {
                 // 打印「目标」与「当前实测关节角的正解」以及二者的任务空间误差范数，
-                // 用于区分「目标不可达」与「迭代不收敛」。
-                Eigen::VectorXd seed_joints(6);
-                for (std::size_t i = 0; i < 6; ++i) {
-                    seed_joints(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+                // 用于区分「目标不可达」与「迭代不收敛」。全部使用预分配 buffer 与栈上
+                // 字符数组，不在实时路径里分配内存；维度由 task_dof_ 决定，不再写死 6。
+                for (std::size_t i = 0; i < joint_count_; ++i) {
+                    debug_seed_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
                 }
-                Eigen::VectorXd measured_task(6);
-                double error_norm = -1.0;
-                if (factory->arm_solve_->forward_kinamic(seed_joints, &measured_task)) {
-                    Eigen::VectorXd task_error(6);
-                    if (factory->task_map_->error_map(point.pos, measured_task, &task_error)) {
-                        error_norm = task_error.norm();
-                    }
+                double tracking_norm = -1.0;
+                if (factory->arm_solve_->forward_kinamic(debug_seed_, &debug_measured_task_)
+                    && factory->task_map_->error_map(point.pos, debug_measured_task_, &debug_task_error_)) {
+                    tracking_norm = debug_task_error_.norm();
                 }
+
+                char target_text[192];
+                char seed_text[192];
+                char measured_text[192];
+                format_vector(point.pos, target_text, sizeof(target_text));
+                format_vector(debug_seed_, seed_text, sizeof(seed_text));
+                format_vector(debug_measured_task_, measured_text, sizeof(measured_text));
+
                 RCLCPP_WARN_THROTTLE(
                     factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
-                    "Cartesian IK failed at t=%.3f s: %s, ik_err=%.3e (iters=%d), tracking_err=%.6f\n"
-                    "  target (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
-                    "  seed   (9dp) = [%.9f, %.9f, %.9f, %.9f, %.9f, %.9f]\n"
-                    "  fk(seed)     = [%.4f %.4f %.4f | %.4f %.4f %.4f]",
+                    "Cartesian IK failed at t=%.3f s: %s, ik_err=%.3e (pos %.3e m / rot %.3e rad, iters=%d), "
+                    "tracking_err=%.6f\n"
+                    "  target   = [%s]\n"
+                    "  seed     = [%s]\n"
+                    "  fk(seed) = [%s]",
                     (time - traj_start_time_).seconds(),
                     factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable
                         ? "target is UNREACHABLE (iteration stalled at the edge of the reachable set)"
                         : "solver failed numerically (reachability unknown)",
-                    factory->arm_solve_->last_ik_error_norm(),
-                    factory->arm_solve_->last_ik_iterations(), error_norm, point.pos(0), point.pos(1), point.pos(2),
-                    point.pos(3), point.pos(4), point.pos(5), seed_joints(0), seed_joints(1), seed_joints(2),
-                    seed_joints(3), seed_joints(4), seed_joints(5), measured_task(0), measured_task(1), measured_task(2),
-                    measured_task(3), measured_task(4), measured_task(5));
+                    factory->arm_solve_->last_ik_error_norm(), factory->arm_solve_->last_ik_position_error_norm(),
+                    factory->arm_solve_->last_ik_rotation_error_norm(), factory->arm_solve_->last_ik_iterations(),
+                    tracking_norm, target_text, seed_text, measured_text);
             }
             return false;
         }
@@ -814,7 +956,7 @@ ServoState::ServoState(const std::string& name, std::any ctx)
     : FSM(name, ctx)
     , factory(std::any_cast<FSMArmControlFactory*>(ctx)) {
     joint_count_ = model_dof_from_context(ctx);
-    task_dof_    = 6;
+    task_dof_    = factory != nullptr ? factory->task_dof_ : 0;
     joint_pos_.resize(static_cast<Eigen::Index>(joint_count_));
     joint_velocity_.resize(static_cast<Eigen::Index>(joint_count_));
     task_position_.resize(static_cast<Eigen::Index>(task_dof_));
@@ -854,6 +996,18 @@ bool ServoState::enter(const std::string& last_state, const rclcpp::Time& time) 
 
     if (factory == nullptr || factory->arm_solve_ == nullptr || factory->state_.size() != joint_count_
         || factory->command_.size() != joint_count_) {
+        return false;
+    }
+
+    // 4 维任务空间下本状态不可用（docs/bugs.md O13）：它积分的是一条 6 维任务空间速度，
+    // 而 4 轴臂只有 4 个任务自由度。这里显式拒绝并报 ERROR——工厂会放弃这次切换请求、
+    // 保持当前位置并回到 idel，而不是让它在 run() 里以「逆解失败」的形式糊掉。
+    if (task_dof_ != 6) {
+        RCLCPP_ERROR(
+            factory->node_->get_logger(),
+            "servo: refused to enter — task_space_dof=%zu. The servo state integrates a 6D task-space velocity and is "
+            "only available on the 6-DOF model with task_space_dof=6; use cart_traj / joint_traj on the 4-DOF arm.",
+            task_dof_);
         return false;
     }
     for (std::size_t i = 0; i < joint_count_; ++i) {
@@ -940,39 +1094,103 @@ bool ServoState::run(const rclcpp::Time& time) {
 AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
     : FSM(name, ctx)
     , factory(std::any_cast<FSMArmControlFactory*>(ctx))
-    , traj(6, static_cast<int>(kMaxArmTrajectoryPoints))
-    , point(6) {
+    , traj(factory != nullptr ? static_cast<int>(factory->task_dof_) : 0, static_cast<int>(kMaxArmTrajectoryPoints))
+    , point(factory != nullptr ? static_cast<int>(factory->task_dof_) : 0) {
     joint_count_ = model_dof_from_context(ctx);
-    task_dof_    = 6;
-    joint_pos_.resize(static_cast<Eigen::Index>(joint_count_));
-    joint_velocity_.resize(static_cast<Eigen::Index>(joint_count_));
-    joint_acceleration_.setZero(static_cast<Eigen::Index>(joint_count_));
-    model_torque_.resize(static_cast<Eigen::Index>(joint_count_));
-    torque_residual_.resize(static_cast<Eigen::Index>(joint_count_));
-    task_force_.setZero(static_cast<Eigen::Index>(task_dof_));
-    task_position_.resize(static_cast<Eigen::Index>(task_dof_));
-    desired_task_position_.resize(static_cast<Eigen::Index>(task_dof_));
-    desired_task_velocity_.resize(static_cast<Eigen::Index>(task_dof_));
-    desired_task_acceleration_.resize(static_cast<Eigen::Index>(task_dof_));
-    position_error_.resize(static_cast<Eigen::Index>(task_dof_));
-    velocity_error_.resize(static_cast<Eigen::Index>(task_dof_));
-    torque_.resize(static_cast<Eigen::Index>(joint_count_));
+    task_dof_    = factory != nullptr ? factory->task_dof_ : 0;
+    const auto dof  = static_cast<Eigen::Index>(joint_count_);
+    const auto tdof = static_cast<Eigen::Index>(task_dof_);
+    joint_pos_.resize(dof);
+    joint_velocity_.resize(dof);
+    joint_acceleration_.setZero(dof);
+    model_torque_.resize(dof);
+    torque_residual_.resize(dof);
+    task_force_.setZero(tdof);
+    raw_task_force_.setZero(tdof);
+    task_position_.resize(tdof);
+    desired_task_position_.resize(tdof);
+    next_task_position_.resize(tdof);
+    last_feasible_task_position_.resize(tdof);
+    desired_task_velocity_.resize(tdof);
+    desired_task_acceleration_.resize(tdof);
+    compliance_velocity_.resize(tdof);
+    position_error_.resize(tdof);
+    velocity_error_.resize(tdof);
+    zero_task_.setZero(tdof);
+    desired_joint_position_.resize(dof);
+    desired_joint_velocity_.resize(dof);
+    last_feasible_joint_position_.resize(dof);
     hold_position_.resize(joint_count_);
     gravity_.initialize(factory, joint_count_, name.c_str());
-    admittance_mass_.resize(static_cast<Eigen::Index>(task_dof_));
-    admittance_damping_.resize(static_cast<Eigen::Index>(task_dof_));
-    admittance_stiffness_.resize(static_cast<Eigen::Index>(task_dof_));
+    admittance_mass_.resize(tdof);
+    admittance_damping_.resize(tdof);
+    admittance_stiffness_.resize(tdof);
     admittance_mass_.setOnes();
     admittance_damping_.setConstant(20.0);
     admittance_stiffness_.setZero();
     load_default_gains(factory, joint_count_, &default_kp_param_, &default_kd_param_, &default_kp_, &default_kd_);
 
-    Eigen::VectorXd default_mass      = Eigen::VectorXd::Ones(static_cast<Eigen::Index>(task_dof_));
-    Eigen::VectorXd default_damping   = Eigen::VectorXd::Constant(static_cast<Eigen::Index>(task_dof_), 20.0);
-    Eigen::VectorXd default_stiffness = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(task_dof_));
+    Eigen::VectorXd default_mass      = Eigen::VectorXd::Ones(tdof);
+    Eigen::VectorXd default_damping   = Eigen::VectorXd::Constant(tdof, 20.0);
+    Eigen::VectorXd default_stiffness = Eigen::VectorXd::Zero(tdof);
     load_admittance_parameters("admittance_mass", default_mass, admittance_mass_);
     load_admittance_parameters("admittance_damping", default_damping, admittance_damping_);
     load_admittance_parameters("admittance_stiffness", default_stiffness, admittance_stiffness_);
+
+    // 热更新快照：把构造阶段读到的值（= YAML 实际生效值）灌进原子量，之后由参数回调修改。
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        const auto index = static_cast<Eigen::Index>(i);
+        param_mass_[i].store(admittance_mass_(index));
+        param_damping_[i].store(admittance_damping_(index));
+        param_stiffness_[i].store(admittance_stiffness_(index));
+    }
+
+    // 限速 / 死区 / 滤波（docs/bugs.md O14）。按 C6 的教训，这些参数必须在 on_init 里
+    // auto_declare，否则 YAML 里写了也读不到；这里把实际生效值打进日志，便于核对。
+    if (factory != nullptr && factory->node_ != nullptr) {
+        double velocity_limit          = velocity_limit_.load();
+        double rotation_velocity_limit = rotation_velocity_limit_.load();
+        double force_deadband          = force_deadband_.load();
+        double torque_deadband         = torque_deadband_.load();
+        double filter_cutoff           = filter_cutoff_.load();
+        double force_limit             = force_limit_.load();
+        double torque_limit            = torque_limit_.load();
+        factory->node_->get_parameter("admittance_velocity_limit", velocity_limit);
+        factory->node_->get_parameter("admittance_rotation_velocity_limit", rotation_velocity_limit);
+        factory->node_->get_parameter("admittance_force_deadband", force_deadband);
+        factory->node_->get_parameter("admittance_torque_deadband", torque_deadband);
+        factory->node_->get_parameter("admittance_force_filter_cutoff", filter_cutoff);
+        factory->node_->get_parameter("admittance_force_limit", force_limit);
+        factory->node_->get_parameter("admittance_torque_limit", torque_limit);
+        if (std::isfinite(velocity_limit) && velocity_limit > 0.0) {
+            velocity_limit_.store(velocity_limit);
+        }
+        if (std::isfinite(rotation_velocity_limit) && rotation_velocity_limit > 0.0) {
+            rotation_velocity_limit_.store(rotation_velocity_limit);
+        }
+        if (std::isfinite(force_deadband) && force_deadband >= 0.0) {
+            force_deadband_.store(force_deadband);
+        }
+        if (std::isfinite(torque_deadband) && torque_deadband >= 0.0) {
+            torque_deadband_.store(torque_deadband);
+        }
+        if (std::isfinite(filter_cutoff) && filter_cutoff >= 0.0) {
+            filter_cutoff_.store(filter_cutoff);
+        }
+        if (std::isfinite(force_limit) && force_limit > 0.0) {
+            force_limit_.store(force_limit);
+        }
+        if (std::isfinite(torque_limit) && torque_limit > 0.0) {
+            torque_limit_.store(torque_limit);
+        }
+        RCLCPP_INFO(
+            factory->node_->get_logger(),
+            "admittance: task_dof=%zu, velocity_limit=%.3f m/s, rotation_velocity_limit=%.3f rad/s, "
+            "force_deadband=%.3f N, torque_deadband=%.3f N·m, force_filter_cutoff=%.1f Hz (0 = off), "
+            "force_limit=%.1f N, torque_limit=%.2f N·m",
+            task_dof_, velocity_limit_.load(), rotation_velocity_limit_.load(), force_deadband_.load(),
+            torque_deadband_.load(), filter_cutoff_.load(), force_limit_.load(), torque_limit_.load());
+    }
 
     admittance_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::AdmittanceCmd>(
         "arm_admittance", rclcpp::QoS(10), [this](const robot_msgs::msg::AdmittanceCmd& msg) {
@@ -981,13 +1199,166 @@ AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
             }
             const auto now = factory->node_->get_clock()->now();
             traj.start(now);
-            traj_start_time_         = now;
-            last_update_time_        = now;
+            traj_start_time_           = now;
+            last_update_time_          = now;
             desired_task_position_     = traj.front().pos;
             desired_task_velocity_     = traj.front().vel;
             desired_task_acceleration_ = traj.front().acc;
             trajectory_active_         = true;
         });
+}
+
+void AdmittanceState::update_impedance_parameters(
+    const std::vector<double>& mass, const std::vector<double>& damping, const std::vector<double>& stiffness) {
+    const auto apply = [this](const std::vector<double>& source, std::array<std::atomic<double>, kMaxTaskDof>& target) {
+        for (std::size_t i = 0; i < source.size() && i < kMaxTaskDof && i < task_dof_; ++i) {
+            target[i].store(source[i]);
+        }
+    };
+    apply(mass, param_mass_);
+    apply(damping, param_damping_);
+    apply(stiffness, param_stiffness_);
+}
+
+std::size_t AdmittanceState::copy_force_estimate(double* raw, double* filtered, std::size_t capacity) const {
+    if (raw == nullptr || filtered == nullptr || capacity < task_dof_) {
+        return 0;
+    }
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        raw[i]      = raw_force_estimate_[i].load(std::memory_order_relaxed);
+        filtered[i] = filtered_force_estimate_[i].load(std::memory_order_relaxed);
+    }
+    return task_dof_;
+}
+
+void AdmittanceState::update_runtime_parameters(
+    double velocity_limit, double rotation_velocity_limit, double force_deadband, double torque_deadband,
+    double filter_cutoff, double force_limit, double torque_limit) {
+    velocity_limit_.store(velocity_limit);
+    rotation_velocity_limit_.store(rotation_velocity_limit);
+    force_deadband_.store(force_deadband);
+    torque_deadband_.store(torque_deadband);
+    filter_cutoff_.store(filter_cutoff);
+    force_limit_.store(force_limit);
+    torque_limit_.store(torque_limit);
+}
+
+void AdmittanceState::clamp_task_force() {
+    if (task_dof_ < 4) {
+        return;
+    }
+    const double force_limit  = force_limit_.load(std::memory_order_relaxed);
+    const double torque_limit = torque_limit_.load(std::memory_order_relaxed);
+    if (force_limit > 0.0) {
+        const double norm = task_force_.head(3).norm();
+        if (std::isfinite(norm) && norm > force_limit) {
+            task_force_.head(3) *= force_limit / norm;
+        }
+    }
+    if (torque_limit > 0.0) {
+        for (Eigen::Index i = 3; i < task_force_.size(); ++i) {
+            const double value = task_force_(i);
+            if (value > torque_limit) {
+                task_force_(i) = torque_limit;
+            } else if (value < -torque_limit) {
+                task_force_(i) = -torque_limit;
+            }
+        }
+    }
+}
+
+void AdmittanceState::limit_task_velocity(Eigen::VectorXd* velocity) const {
+    if (velocity == nullptr || velocity->size() < 3) {
+        return;
+    }
+    const double translation_limit = velocity_limit_.load(std::memory_order_relaxed);
+    const double rotation_limit    = rotation_velocity_limit_.load(std::memory_order_relaxed);
+
+    // 平移按**向量模长**限幅：逐轴截断会在斜推时改变运动方向，手感跟着变。
+    if (translation_limit > 0.0) {
+        const double norm = velocity->head(3).norm();
+        if (std::isfinite(norm) && norm > translation_limit) {
+            velocity->head(3) *= translation_limit / norm;
+        }
+    }
+    if (rotation_limit > 0.0) {
+        for (Eigen::Index i = 3; i < velocity->size(); ++i) {
+            const double value = (*velocity)(i);
+            if (value > rotation_limit) {
+                (*velocity)(i) = rotation_limit;
+            } else if (value < -rotation_limit) {
+                (*velocity)(i) = -rotation_limit;
+            }
+        }
+    }
+}
+
+void AdmittanceState::solve_free_roam_target() {
+    // 以当前实测关节角做逆解初值，让迭代从离目标最近的位形出发。
+    desired_joint_position_ = joint_pos_;
+    bool solved             = false;
+    try {
+        solved = factory->arm_solve_->inverse_kinamic(next_task_position_, &desired_joint_position_);
+    } catch (const std::exception&) {
+        solved = false;
+    }
+    if (!solved || !desired_joint_position_.allFinite()) {
+        // 顶到关节限位 / 工作空间边界：回滚到上一拍可行目标并把速度清零，状态保持。
+        // 不升级成故障——否则推到边界会瞬间掉回 idel，演示与手感都不可用。
+        desired_task_position_     = last_feasible_task_position_;
+        desired_task_velocity_.setZero();
+        desired_task_acceleration_.setZero();
+        desired_joint_position_    = last_feasible_joint_position_;
+        desired_joint_velocity_.setZero();
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "admittance: 目标已到关节限位/工作空间边界，保持当前位置（该方向推不动了）");
+        return;
+    }
+    desired_task_position_        = next_task_position_;
+    last_feasible_task_position_  = next_task_position_;
+    last_feasible_joint_position_ = desired_joint_position_;
+}
+
+bool AdmittanceState::write_task_command(
+    const Eigen::VectorXd& feedforward_task_force, const Eigen::VectorXd& feedforward_task_acceleration) {
+    bool complete = true;
+    try {
+        if (!factory->arm_solve_->inverse_velocity(desired_joint_position_, desired_task_velocity_, &desired_joint_velocity_)
+            || !desired_joint_velocity_.allFinite()) {
+            desired_joint_velocity_.setZero();
+            complete = false;
+        }
+        if (!factory->arm_solve_->inverse_dynamic(
+                desired_joint_position_, desired_task_velocity_, feedforward_task_acceleration, feedforward_task_force,
+                &model_torque_)
+            || !model_torque_.allFinite()) {
+            model_torque_.setZero();
+            complete = false;
+        }
+    } catch (const std::exception&) {
+        desired_joint_velocity_.setZero();
+        model_torque_.setZero();
+        complete = false;
+    }
+    if (!complete && gravity_.refresh(factory, joint_count_, fsm_name_.c_str())) {
+        // 逆动力学前馈失败时退回纯重力前馈：有静差，但不会失控。
+        for (std::size_t i = 0; i < joint_count_; ++i) {
+            model_torque_(static_cast<Eigen::Index>(i)) = gravity_.torque(i);
+        }
+    }
+
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const auto index = static_cast<Eigen::Index>(i);
+        auto& command    = factory->command_[i];
+        command.position = static_cast<float>(desired_joint_position_(index));
+        command.velocity = static_cast<float>(desired_joint_velocity_(index));
+        command.torque   = static_cast<float>(model_torque_(index));
+        command.kp       = default_kp_[i];
+        command.kd       = default_kd_[i];
+        command.ki       = 0.0f;
+    }
+    return complete;
 }
 
 bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -997,6 +1368,9 @@ bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& t
         || factory->command_.size() != joint_count_) {
         return false;
     }
+
+    // 4 轴模型下不再拒绝进入（docs/bugs.md O13 的临时限制已解除）：任务空间的全部语义
+    // 都由 TaskMapping 给出，M/D 也按 task_dof_ 取值，4 维与 6 维走同一套代码。
     for (std::size_t i = 0; i < joint_count_; ++i) {
         joint_pos_(static_cast<Eigen::Index>(i))      = factory->state_[i].position;
         joint_velocity_(static_cast<Eigen::Index>(i)) = factory->state_[i].velocity;
@@ -1011,14 +1385,24 @@ bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& t
     }
 
     traj.stop();
-    trajectory_active_     = false;
-    desired_task_position_ = task_position_;
+    trajectory_active_ = false;
+    // 自由导纳从当前位姿起步：进入那一刻不允许任何跳变。
+    desired_task_position_        = task_position_;
+    next_task_position_           = task_position_;
+    last_feasible_task_position_  = task_position_;
     desired_task_velocity_.setZero();
     desired_task_acceleration_.setZero();
     task_force_.setZero();
+    raw_task_force_.setZero();
+    force_filter_initialized_ = false;
+    desired_joint_position_       = joint_pos_;
+    last_feasible_joint_position_ = joint_pos_;
+    desired_joint_velocity_.setZero();
     last_update_time_ = time;
-    // 轨迹未激活时按锁存值保持；进入时锁存一次当前位置（理由同 CartTrajState::enter）。
     latch_joint_position(factory, joint_count_, &hold_position_);
+    RCLCPP_INFO(
+        factory->node_->get_logger(),
+        "admittance: entered (task_dof=%zu); 没收到 arm_admittance 轨迹时按自由导纳工作（推着走、撤力停）", task_dof_);
     return true;
 }
 
@@ -1039,19 +1423,34 @@ const std::string& AdmittanceState::check_switch() const {
     return fsm_name_;
 }
 
-bool AdmittanceState::run(const rclcpp::Time& time) {
-    if (factory == nullptr || factory->arm_solve_ == nullptr || factory->model_ == nullptr || factory->state_.size() != joint_count_
-        || factory->command_.size() != joint_count_) {
+bool AdmittanceState::run_free_roam(const rclcpp::Time& time, double dt) {
+    (void)time;
+    // M·ẍ + D·ẋ = F_est。自由导纳没有固定参考点，刚度不参与（K = 0 时撤力即停）。
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        const auto index = static_cast<Eigen::Index>(i);
+        desired_task_acceleration_(index) =
+            (task_force_(index) - admittance_damping_(index) * desired_task_velocity_(index)) / admittance_mass_(index);
+    }
+    desired_task_velocity_.noalias() += desired_task_acceleration_ * dt;
+    limit_task_velocity(&desired_task_velocity_);
+    next_task_position_.noalias() = desired_task_position_ + desired_task_velocity_ * dt;
+    if (!desired_task_velocity_.allFinite() || !next_task_position_.allFinite()
+        || !desired_task_acceleration_.allFinite()) {
+        set_fault_stage("Admittance command integration");
         return false;
     }
 
-    if (!trajectory_active_) {
-        write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
-        return true;
-    }
+    solve_free_roam_target(); // 逆解失败会回滚并清零速度，状态保持
+    // 自由导纳的加速度前馈不参与：它的来源是力估计，近奇异位形下会被放大，
+    // 直接把这么大的加速度写进力矩前馈会把机械臂甩出去（实测零位形 78 N → 甩到关节限位外）。
+    write_task_command(zero_task_, zero_task_);
+    return true;
+}
 
+bool AdmittanceState::run_trajectory(const rclcpp::Time& time, double dt) {
     traj.update(time, point);
-    if (point.pos.size() != static_cast<Eigen::Index>(task_dof_) || point.vel.size() != static_cast<Eigen::Index>(task_dof_)
+    if (point.pos.size() != static_cast<Eigen::Index>(task_dof_)
+        || point.vel.size() != static_cast<Eigen::Index>(task_dof_)
         || point.acc.size() != static_cast<Eigen::Index>(task_dof_) || !point.pos.allFinite() || !point.vel.allFinite()
         || !point.acc.allFinite()) {
         traj.stop();
@@ -1060,69 +1459,37 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         return false;
     }
 
-    double dt         = (time - last_update_time_).seconds();
-    last_update_time_ = time;
-    if (!std::isfinite(dt) || dt < 0.0) {
-        dt = 0.0;
-    }
-    for (std::size_t i = 0; i < joint_count_; ++i) {
-        const auto index       = static_cast<Eigen::Index>(i);
-        joint_pos_(index)      = factory->state_[i].position;
-        joint_velocity_(index) = factory->state_[i].velocity;
-    }
-    joint_acceleration_.setZero();
-
-    try {
-        if (!factory->model_->inverse_dynamic(joint_pos_, joint_velocity_, joint_acceleration_, &model_torque_)) {
-            traj.stop();
-            trajectory_active_ = false;
-            set_fault_stage("Admittance inverse dynamics");
-            return false;
-        }
-    } catch (const std::exception&) {
-        traj.stop();
-        trajectory_active_ = false;
-        set_fault_stage("Admittance inverse dynamics");
-        return false;
-    }
-    for (std::size_t i = 0; i < joint_count_; ++i) {
-        torque_residual_(static_cast<Eigen::Index>(i)) = factory->state_[i].torque - model_torque_(static_cast<Eigen::Index>(i));
-    }
-    try {
-        if (!factory->arm_solve_->static_force(joint_pos_, torque_residual_, &task_force_)) {
-            traj.stop();
-            trajectory_active_ = false;
-            set_fault_stage("Admittance static force mapping");
-            return false;
-        }
-    } catch (const std::exception&) {
-        traj.stop();
-        trajectory_active_ = false;
-        set_fault_stage("Admittance static force mapping");
-        return false;
-    }
-
     position_error_.noalias() = desired_task_position_ - point.pos;
     velocity_error_.noalias() = desired_task_velocity_ - point.vel;
-    desired_task_acceleration_ =
-        point.acc
-        + (task_force_ - admittance_damping_.cwiseProduct(velocity_error_) - admittance_stiffness_.cwiseProduct(position_error_))
-              .cwiseQuotient(admittance_mass_);
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        const auto index = static_cast<Eigen::Index>(i);
+        desired_task_acceleration_(index) =
+            point.acc(index)
+            + (task_force_(index) - admittance_damping_(index) * velocity_error_(index)
+               - admittance_stiffness_(index) * position_error_(index))
+                  / admittance_mass_(index);
+    }
     desired_task_velocity_.noalias() += desired_task_acceleration_ * dt;
+
+    // 只限「柔顺部分」的速度：轨迹本身的前馈速度（例如 cart 那样的 0.1 m/s 量级）不截断，
+    // 否则 4 维下 admittance_move 的正常跟踪会被限速改坏。
+    compliance_velocity_.noalias() = desired_task_velocity_ - point.vel;
+    limit_task_velocity(&compliance_velocity_);
+    desired_task_velocity_.noalias() = point.vel + compliance_velocity_;
+
     desired_task_position_.noalias() += desired_task_velocity_ * dt;
-    if (!desired_task_position_.allFinite() || !desired_task_velocity_.allFinite() || !desired_task_acceleration_.allFinite()) {
+    if (!desired_task_position_.allFinite() || !desired_task_velocity_.allFinite()
+        || !desired_task_acceleration_.allFinite()) {
         traj.stop();
         trajectory_active_ = false;
         set_fault_stage("Admittance command integration");
         return false;
     }
 
+    desired_joint_position_ = joint_pos_;
     try {
-        task_force_.setZero();
-        if (!factory->arm_solve_->inverse_kinamic(desired_task_position_, &joint_pos_)
-            || !factory->arm_solve_->inverse_velocity(joint_pos_, desired_task_velocity_, &torque_)
-            || !factory->arm_solve_->inverse_dynamic(
-                joint_pos_, desired_task_velocity_, desired_task_acceleration_, task_force_, &model_torque_)) {
+        if (!factory->arm_solve_->inverse_kinamic(desired_task_position_, &desired_joint_position_)
+            || !desired_joint_position_.allFinite()) {
             traj.stop();
             trajectory_active_ = false;
             set_fault_stage("Admittance solve");
@@ -1134,23 +1501,125 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
         set_fault_stage("Admittance solve");
         return false;
     }
+    last_feasible_task_position_  = desired_task_position_;
+    last_feasible_joint_position_ = desired_joint_position_;
 
-    for (std::size_t i = 0; i < joint_count_; ++i) {
-        const auto index = static_cast<Eigen::Index>(i);
-        auto& command    = factory->command_[i];
-        command.position = static_cast<float>(joint_pos_(index));
-        command.velocity = static_cast<float>(torque_(index));
-        command.torque   = static_cast<float>(model_torque_(index));
-        command.kp       = default_kp_[i];
-        command.kd       = default_kd_[i];
-        command.ki       = 0.0f;
-    }
+    // 逆动力学前馈里的任务力必须是零：外力由导纳积分体现，不能再叠加一次 J^T·F。
+    write_task_command(zero_task_, desired_task_acceleration_);
 
     if (trajectory_finished(traj, traj_start_time_, time)) {
         traj.stop();
         trajectory_active_ = false;
+        // 轨迹结束切回自由导纳：期望位置同步到**实测**位姿，避免轨迹期间被推开的偏移在
+        // 轨迹结束时变成一次回弹跳变。
+        desired_task_position_        = task_position_;
+        next_task_position_           = task_position_;
+        last_feasible_task_position_  = task_position_;
+        desired_joint_position_       = joint_pos_;
+        last_feasible_joint_position_ = joint_pos_;
+        desired_task_velocity_.setZero();
+        desired_task_acceleration_.setZero();
     }
     return true;
+}
+
+bool AdmittanceState::run(const rclcpp::Time& time) {
+    if (factory == nullptr || factory->arm_solve_ == nullptr || factory->model_ == nullptr
+        || factory->state_.size() != joint_count_ || factory->command_.size() != joint_count_) {
+        return false;
+    }
+
+    double dt         = (time - last_update_time_).seconds();
+    last_update_time_ = time;
+    if (!std::isfinite(dt) || dt < 0.0) {
+        dt = 0.0;
+    } else if (dt > 0.01) {
+        // 丢拍（例如界面卡顿、启动瞬间）时不让一次积分跳太远：0.01 s × 0.1 m/s = 1 mm。
+        dt = 0.01;
+    }
+
+    // 参数热更新快照：参数回调线程写原子量，这里每拍拷一份给 Eigen 使用，不分配、不加锁。
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        const auto index           = static_cast<Eigen::Index>(i);
+        admittance_mass_(index)      = param_mass_[i].load(std::memory_order_relaxed);
+        admittance_damping_(index)   = param_damping_[i].load(std::memory_order_relaxed);
+        admittance_stiffness_(index) = param_stiffness_[i].load(std::memory_order_relaxed);
+    }
+
+    const bool has_acceleration = factory->state_acceleration_.size() == joint_count_;
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const auto index              = static_cast<Eigen::Index>(i);
+        joint_pos_(index)             = factory->state_[i].position;
+        joint_velocity_(index)        = factory->state_[i].velocity;
+        // O8 之后仿真导出真实 qacc；用它做 RNEA 能把 M·qdd 从残差里去掉，
+        // 否则机械臂一动惯性项就会被当成外力。实机没有该接口时退回 0（纯静力学残差）。
+        joint_acceleration_(index)    = has_acceleration ? factory->state_acceleration_[i] : 0.0;
+    }
+
+    try {
+        if (!factory->arm_solve_->forward_kinamic(joint_pos_, &task_position_)
+            || task_position_.size() != static_cast<Eigen::Index>(task_dof_) || !task_position_.allFinite()) {
+            set_fault_stage("Admittance forward kinematics");
+            return false;
+        }
+        if (!factory->model_->inverse_dynamic(joint_pos_, joint_velocity_, joint_acceleration_, &model_torque_)) {
+            set_fault_stage("Admittance inverse dynamics");
+            return false;
+        }
+    } catch (const std::exception&) {
+        set_fault_stage("Admittance force estimation");
+        return false;
+    }
+    // 外力的广义力矩 = 模型力矩 − 实测力矩。刚体动力学是 M·qdd + C + g = τ_act + τ_ext，
+    // 所以 τ_act − RNEA(q, dq, ddq) = **−τ_ext**：符号写反时导纳会朝背离受力的方向让开。
+    // 这一条是 O14 第 1 步「注入已知力、比对力估计」实测出来的（5 N 推力被估成 −4.76 N）。
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const auto index       = static_cast<Eigen::Index>(i);
+        torque_residual_(index) = model_torque_(index) - factory->state_[i].torque;
+    }
+    try {
+        if (!factory->arm_solve_->static_force(joint_pos_, torque_residual_, &raw_task_force_)) {
+            set_fault_stage("Admittance static force mapping");
+            return false;
+        }
+    } catch (const std::exception&) {
+        set_fault_stage("Admittance static force mapping");
+        return false;
+    }
+
+    // 死区 + 一阶低通。死区是必需的：K = 0 时导纳对力是无穷大直流增益，
+    // 模型偏差（实测参数误差 0.1% 量级）会被积成肉眼可见的缓慢爬行。
+    constexpr double kPi         = 3.14159265358979323846;
+    const double cutoff          = filter_cutoff_.load(std::memory_order_relaxed);
+    const double alpha           = (cutoff > 0.0 && dt > 0.0) ? 1.0 - std::exp(-2.0 * kPi * cutoff * dt) : 0.0;
+    const double force_deadband  = force_deadband_.load(std::memory_order_relaxed);
+    const double torque_deadband = torque_deadband_.load(std::memory_order_relaxed);
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        const auto index      = static_cast<Eigen::Index>(i);
+        const double deadband = i < 3 ? force_deadband : torque_deadband;
+        double value          = raw_task_force_(index);
+        if (value > deadband) {
+            value -= deadband;
+        } else if (value < -deadband) {
+            value += deadband;
+        } else {
+            value = 0.0;
+        }
+        if (!force_filter_initialized_ || cutoff <= 0.0 || dt <= 0.0) {
+            task_force_(index) = value;
+        } else {
+            task_force_(index) += alpha * (value - task_force_(index));
+        }
+    }
+    force_filter_initialized_ = true;
+    // 近奇异位形下限幅，避免把放大的假力积分成运动（见 clamp_task_force 的说明）。
+    clamp_task_force();
+    for (std::size_t i = 0; i < task_dof_; ++i) {
+        raw_force_estimate_[i].store(raw_task_force_(static_cast<Eigen::Index>(i)), std::memory_order_relaxed);
+        filtered_force_estimate_[i].store(task_force_(static_cast<Eigen::Index>(i)), std::memory_order_relaxed);
+    }
+
+    return trajectory_active_ ? run_trajectory(time, dt) : run_free_roam(time, dt);
 }
 
 TeachPendantState::TeachPendantState(const std::string& name, std::any ctx)
@@ -1165,13 +1634,17 @@ TeachPendantState::TeachPendantState(const std::string& name, std::any ctx)
     joint_count_ = joints.size();
     factory->node_->get_parameter("default_kd", default_kd_param_);
 
+    // 任务维从工厂取（4 轴模型是 4）：原先这里把姿态缓存与零向量写死成 6，
+    // 4 轴下 inverse_dynamic 直接抛「任务长度不对」，示教状态一进去就失败（O13/O14）。
+    task_dof_ = factory->task_dof_;
+
     const std::size_t param_capacity = std::max(joint_count_, default_kd_param_.size());
     default_kd_param_.reserve(param_capacity);
     default_kd_.resize(joint_count_);
     joint_pos_.resize(joint_count_);
-    task_zero_.setZero(6);
+    task_zero_.setZero(static_cast<Eigen::Index>(task_dof_));
     gravity_torque_.resize(joint_count_);
-    end_effector_pose_.resize(6);
+    end_effector_pose_.resize(static_cast<Eigen::Index>(task_dof_));
     for (std::size_t i = 0; i < joint_count_; ++i) {
         default_kd_[i] = i < default_kd_param_.size() ? static_cast<float>(default_kd_param_[i]) : 0.0f;
     }
@@ -1224,8 +1697,8 @@ bool TeachPendantState::run(const rclcpp::Time& time) {
         return false;
     }
 
-    if (gravity_torque_.size() != static_cast<Eigen::Index>(joint_count_) || !gravity_torque_.allFinite() || end_effector_pose_.size() != 6
-        || !end_effector_pose_.allFinite()) {
+    if (gravity_torque_.size() != static_cast<Eigen::Index>(joint_count_) || !gravity_torque_.allFinite()
+        || end_effector_pose_.size() != static_cast<Eigen::Index>(task_dof_) || !end_effector_pose_.allFinite()) {
         RCLCPP_WARN_THROTTLE(
             factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
             "Teach pendant solve returned invalid result: gravity torque size=%ld, pose size=%ld", gravity_torque_.size(),
@@ -1243,12 +1716,20 @@ bool TeachPendantState::run(const rclcpp::Time& time) {
         command.ki       = 0.0f;
     }
 
-    RCLCPP_INFO_THROTTLE(
-        factory->node_->get_logger(), *factory->node_->get_clock(), 200,
-        "Teach pendant end-effector pose: position[x=%.6f, y=%.6f, z=%.6f], "
-        "rotation_vector[rx=%.6f, ry=%.6f, rz=%.6f]",
-        end_effector_pose_(0), end_effector_pose_(1), end_effector_pose_(2), end_effector_pose_(3), end_effector_pose_(4),
-        end_effector_pose_(5));
+    if (task_dof_ == 4) {
+        // 4 轴任务的第 4 维不是旋转向量，而是 joint4 自转（TaskMapping 的语义）。
+        RCLCPP_INFO_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 200,
+            "Teach pendant end-effector pose: position[x=%.6f, y=%.6f, z=%.6f], joint4=%.6f rad", end_effector_pose_(0),
+            end_effector_pose_(1), end_effector_pose_(2), end_effector_pose_(3));
+    } else {
+        RCLCPP_INFO_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 200,
+            "Teach pendant end-effector pose: position[x=%.6f, y=%.6f, z=%.6f], "
+            "rotation_vector[rx=%.6f, ry=%.6f, rz=%.6f]",
+            end_effector_pose_(0), end_effector_pose_(1), end_effector_pose_(2), end_effector_pose_(3), end_effector_pose_(4),
+            end_effector_pose_(5));
+    }
 
     return true;
 }

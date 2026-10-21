@@ -62,6 +62,7 @@ add_library(arm_controller SHARED
   controller/src/sim_pid_controller.cpp
   controller/src/arm_real_interfaces.cpp
   arm/arm_fsm.cpp
+  arm/default4dof_task.cpp
   arm/default6dof_task.cpp
   arm/model_from_urdf.cpp
   lib/calculate/arm.cpp
