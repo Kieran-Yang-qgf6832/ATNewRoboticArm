@@ -133,6 +133,8 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 必须在此声明：本控制器只读取已声明的参数，YAML 里未声明的键会被静默忽略，
     // 取到的是这里的默认值——写错参数名不会有任何提示。
     auto_declare<bool>("gravity_compensation", true);
+    // 重力前馈缩放（0~1）。仿真默认 1.0 保持原行为；实机首启用小值逐步确认方向。
+    auto_declare<double>("gravity_compensation_scale", 1.0);
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
@@ -260,6 +262,14 @@ controller_interface::CallbackReturn ArmController::on_init() {
                         result.reason     = name + " contains an invalid value";
                         return result;
                     }
+                }
+            } else if (name == "gravity_compensation_scale") {
+                // 只允许 [0, 1]：大于 1 会放大模型误差，负值会反向补偿。
+                const double scale = param.as_double();
+                if (!std::isfinite(scale) || scale < 0.0 || scale > 1.0) {
+                    result.successful = false;
+                    result.reason     = "gravity_compensation_scale must be within [0, 1]";
+                    return result;
                 }
             } else if (name == "reset_duration") {
                 // 复位持续时间必须为正。

@@ -215,9 +215,15 @@ void HoldGravityFeedforward::initialize(FSMArmControlFactory* factory, std::size
     bool gravity_compensation_param       = true;
     const bool gravity_compensation_found = factory->node_->get_parameter("gravity_compensation", gravity_compensation_param);
     enabled_                              = gravity_compensation_param;
+
+    double gravity_scale_param = 1.0;
+    factory->node_->get_parameter("gravity_compensation_scale", gravity_scale_param);
+    // 参数回调已经拒绝越界值；这里再夹一次，防止直接改 YAML 绕过校验。
+    scale_ = std::clamp(gravity_scale_param, 0.0, 1.0);
+
     RCLCPP_INFO(
-        factory->node_->get_logger(), "%s: gravity_compensation=%s (param found=%s)", state_name != nullptr ? state_name : "?",
-        enabled_ ? "true" : "false", gravity_compensation_found ? "yes" : "no");
+        factory->node_->get_logger(), "%s: gravity_compensation=%s scale=%.3f (param found=%s)", state_name != nullptr ? state_name : "?",
+        enabled_ ? "true" : "false", scale_, gravity_compensation_found ? "yes" : "no");
 
     const auto dof = static_cast<Eigen::Index>(joint_count);
     joint_pos_.resize(dof);
@@ -239,7 +245,7 @@ float HoldGravityFeedforward::torque(std::size_t index) const {
     if (!available_ || index >= static_cast<std::size_t>(torque_.size())) {
         return 0.0f;
     }
-    return static_cast<float>(torque_(static_cast<Eigen::Index>(index)));
+    return static_cast<float>(torque_(static_cast<Eigen::Index>(index)) * scale_);
 }
 
 void AdmittanceState::load_admittance_parameters(const char* name, const Eigen::VectorXd& fallback, Eigen::VectorXd& destination) {

@@ -1,0 +1,31 @@
+# 实机差异覆盖配置。
+#
+# 与 ros2_controller.yaml **叠加**加载：本文件只写实机与仿真的不同项，
+# 其余参数（状态机、measure、导纳等）沿用仿真那份的默认值。
+# 启动方式见 launch_pack/launch/arm_real.launch.py。
+
+controller_manager:
+  ros__parameters:
+    # MCU 的 CDC 收发能力尚未核对，先取仿真的一半；跑稳后再往 500 加。
+    update_rate: 200
+
+arm_controller:
+  ros__parameters:
+    # 硬件接口的命令键是 <joint>/<interface>，**不带** <ros2_control name> 前缀；
+    # 只有链式控制器（仿真里的 sim_pid_controller）才需要前缀。
+    command_interface_prefix: ""
+
+    # 首次上电只锁住上电姿态，不做自动复位——臂可能停在任意位置。
+    exp_state: idel
+
+    # 仿真增益的 20%，作为未标定的首启占位；确认 MCU 增益单位后再调。
+    default_kp: [40.0, 40.0, 40.0, 2.0, 2.0, 0.2]
+    default_kd: [1.6, 1.6, 1.6, 0.08, 0.04, 0.01]
+
+    # 重力前馈先按 10% 施加：模型质量与力矩符号都没在实机核对过，
+    # 方向错了也能立刻看出、冲击有限；确认后逐档加到 1.0。
+    gravity_compensation: true
+    gravity_compensation_scale: 0.1
+
+    # 实机不支持 measure：MCU 不上报加速度，acc_* 列恒为 0，辨识结果不可用。
+    # 需要参数辨识请回仿真链路。

@@ -84,6 +84,7 @@ public:
 
 private:
     bool enabled_{true};        ///< 是否启用，来自参数 gravity_compensation
+    double scale_{1.0};         ///< 前馈缩放，来自参数 gravity_compensation_scale
     bool available_{false};     ///< 最近一次 refresh 是否成功
     Eigen::VectorXd joint_pos_; ///< 当前关节角，RNEA 输入
     Eigen::VectorXd zero_;      ///< 全零向量，充当 RNEA 的 dq / ddq

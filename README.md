@@ -2,7 +2,8 @@
 
 基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
-> **当前状态**：仿真链路已端到端跑通并验证；**实机从未运行过**。
+> **当前状态**：仿真链路已端到端跑通并验证；实机链路已打通到控制器层，
+> **loopback 冒烟通过，尚未在真机上电验证**。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O10 已全部闭环。
 > **参数辨识链路可用**：measure 记录 MuJoCo 的真实关节加速度（`acc_*` 列）与仿真时间，
 > 辨识出的模型物理可行，参数误差 **0.39%**——见 [O8](docs/bugs.md) 与
@@ -116,7 +117,7 @@ ATNewRoboticArm/
 | --- | --- | --- |
 | `arm_controller/ArmController` | `controller_interface::ControllerInterface` | 上层控制器，读取 URDF 关节名与 `default_kp/default_kd`，每周期把状态送入 FSM，输出 `position/velocity/effort/kp/kd/ki` 命令 |
 | `arm_controller/SimPidController` | `controller_interface::ChainableControllerInterface` | 链式 PID，接收每关节 6 个 reference interface，向仿真硬件输出 `effort` |
-| `arm_controller/ArmRealInterfaces` | `hardware_interface::SystemInterface` | 实机硬件接口，使用 libusb CDC 与 MCU 收发 packed struct 数据包。关节名取自 URDF，**关节数必须等于 MCU 通信帧的电机数（6），否则拒绝启动** |
+| `arm_controller/ArmRealInterfaces` | `hardware_interface::SystemInterface` | 实机硬件接口，使用 libusb CDC 与 MCU 收发 packed struct 数据包。关节名取自 URDF，**关节数必须等于 MCU 通信帧的电机数（6），否则拒绝启动**；补恒 0 的 `acceleration` 状态接口；`loopback` 参数用于无硬件冒烟；状态包超时 100 ms 返回 ERROR |
 
 ## 控制器状态机
 
@@ -236,18 +237,29 @@ ros2 launch launch_pack arm_controller_test_sim.launch.py
 
 > 控制器激活后会自动执行一次 `reset`（`exp_state: reset`），把机械臂拉到零位并回到 `idel`。
 
-### 2. 实机
+### 2. 实机（控制器层）
 
 ```bash
+# 无硬件冒烟：不打开 USB 设备，把指令回读成状态
+ros2 launch launch_pack arm_real.launch.py loopback:=true
+
+# 接真机
 ros2 launch launch_pack arm_real.launch.py
 ```
 
-> **注意**：`arm_real.launch.py` 与 `arm_static_display.launch.py` 引用了不存在的包
-> （`arm`、`arm_calc`、`arm_task`、`robot_driver`、`vision`），是从旧版本遗留的，
-> **当前不可用**。实机路径尚未打通。
+> 硬件插件、控制器与 `joint_state_broadcaster` 由同一个 launch 拉起；任务层不在这个文件里，
+> 确认 `arm_controller` 激活后再单独启动 `task_runner`。
+>
+> 仿真与实机共用同一份 `robotic_arm.urdf`：launch 用 `hardware:=real` 切到
+> `ArmRealInterfaces`，仿真默认 `hardware:=mujoco`。实机参数在
+> `config/ros2_controller_real.yaml` 里**叠加覆盖**仿真默认值（200 Hz、`idel`、
+> 仿真增益 20%、重力前馈 0.1 倍）。
 >
 > 实机模式由 `ArmRealInterfaces` 通过 USB CDC（VID `0x0483` / PID `0x5740`）与 MCU 通信，
 > 数据包格式见 `controller/inc/data_pack.h`（`MCUTarget1Pack` / `MCUTarget2Pack` / `MCUStatePack`）。
+> 超过 100 ms 收不到状态包会返回 ERROR，由 `controller_manager` 停用控制器。
+>
+> **实机不支持 measure**：MCU 不上报加速度，`acc_*` 列恒为 0，辨识结果不可用。
 
 ### 关于 `/arm_robot_description`
 

@@ -7,7 +7,12 @@
 
 - 仿真：`ArmController` -> `SimPidController` -> `mujoco_ros2_control/MujocoSystem`
 - 实机：`ArmController` -> `ArmRealInterfaces` -> USB CDC -> MCU
-- 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，默认 500 Hz。
+- 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，仿真默认 500 Hz；
+  实机差异在 `config/ros2_controller_real.yaml` 叠加覆盖（200 Hz、`idel`、
+  仿真增益 20%、重力前馈 0.1 倍）。
+- 仿真与实机共用同一份 `robotic_arm.urdf`，`arm_real.launch.py` 传
+  `hardware:=real` 切换 `<ros2_control>` 块；`loopback:=true` 不打开 USB 设备，
+  只用于无硬件冒烟。
 
 ## 插件
 
@@ -20,6 +25,9 @@
   关节名从 URDF 的 `<ros2_control>` 段读取，使用 libusb CDC 与 MCU 收发 packed struct
   数据包。MCU 通信帧固定为 6 个电机，**关节数与帧长不符时 `on_init` 直接拒绝启动**
   （越界读写会把垃圾数据当指令发给电机，见 `docs/bugs.md` O3）。
+  导出 `position/velocity/effort` 状态与**恒 0 的 `acceleration`**（控制器无条件请求该接口）；
+  `loopback` 参数跳过 USB 打开、把指令回读成状态；超过 `state_timeout_ms`（默认 100 ms）
+  没收到状态包时 `read()` 返回 ERROR，让 `controller_manager` 停用控制器。
 
 ## 主要目录
 

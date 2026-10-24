@@ -12,7 +12,15 @@
        pinocchio 会忽略 <ros2_control> 整块和 xacro 元素，所以这里加 xacro 是安全的；
        但不要在这里写会影响运动学的 $(arg ...)。 -->
   <xacro:arg name="headless" default="false"/>
+  <!-- hardware：选择 ros2_control 硬件插件。mujoco（默认）= MuJoCo 仿真，
+       real = 实机 USB CDC 接口。只切换 <ros2_control> 块，运动学完全共用；
+       pinocchio 解析时整块被忽略，因此不影响控制器内部的模型。 -->
+  <xacro:arg name="hardware" default="mujoco"/>
+  <!-- loopback：实机接口的本地回环，不打开 USB 设备，只用于无硬件冒烟。
+       默认 false；接真机时必须保持 false。 -->
+  <xacro:arg name="loopback" default="false"/>
 
+  <xacro:if value="${'$(arg hardware)' == 'mujoco'}">
   <ros2_control name="arm_hw" type="system">
     <hardware>
       <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
@@ -82,7 +90,111 @@
       <state_interface name="acceleration"/>
     </joint>
 
-</ros2_control>
+  </ros2_control>
+  </xacro:if>
+
+  <xacro:unless value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>arm_controller/ArmRealInterfaces</plugin>
+      <!-- loopback=true 时跳过 USB 打开、把指令读回状态，只用于无硬件冒烟。 -->
+      <param name="loopback">$(arg loopback)</param>
+      <!-- 超过该时长没收到 MCU 状态包就返回 ERROR，让 controller_manager 停控制器。 -->
+      <param name="state_timeout_ms">100</param>
+    </hardware>
+
+    <joint name="joint1">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint2">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint3">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint4">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint5">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint6">
+      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+  </ros2_control>
+  </xacro:unless>
   <!-- 虚拟根链接，解决KDL根链接惯量问题 -->
   <link name="world"/>
   <joint name="world_to_base" type="fixed">

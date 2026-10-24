@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
-> **现状**：仿真链路已端到端跑通并验证；**实机从未运行过**（仅仿真）。
+> **现状**：仿真链路已端到端跑通并验证；实机链路已打通到控制器层，
+> **loopback 冒烟通过，尚未在真机上电验证**。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
 > `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O11 已全部闭环。
@@ -203,11 +204,10 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   `step_timeout` 默认已从 30 s 提到 240 s。验证工具：
   `src/parameter_identify/tools/check_collision.py`（拿 csv 里的实际关节角复算精确距离）。
   详见 `docs/bugs.md` O12。
-- `src/launch_pack/launch/` 下有**三个** launch 引用了不存在的包、当前不可用：
-  `arm_real.launch.py` / `arm_static_display.launch.py`（引用 `arm`、`arm_calc`、`arm_task`、
-  `robot_driver`、`vision`）、`arm_mujoco_sim.launch.py`（引用 `arm_calc`）。都是从旧版本遗留的，
-  **实机路径尚未打通**。可用入口只有 `arm_controller_test_sim.launch.py` 与
-  `arm_measure_sim.launch.py`。
+- `src/launch_pack/launch/` 下 `arm_static_display.launch.py` 与
+  `arm_mujoco_sim.launch.py` 仍引用不存在的包、当前不可用（`arm`、`arm_calc`、`arm_task`、
+  `robot_driver`、`vision`），是旧版本遗留。可用入口：`arm_controller_test_sim.launch.py`、
+  `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟）。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
@@ -251,6 +251,8 @@ headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理�
   `joint_traj` / `admittance` 的保持阶段）共用 `HoldGravityFeedforward`（`arm_fsm.hpp`）。
   这是实机上唯一一处**主动输出力矩**的保持路径，怀疑模型质量或力矩符号时先关掉它
   （关掉后复位会有约 0.124 rad 静差并触发 WARN）。
+  `gravity_compensation_scale`（0~1，默认 1.0）按比例缩放前馈：实机首启取 0.1，
+  确认方向后再逐档加到 1.0。
 
 ### 修改控制器接口时
 
