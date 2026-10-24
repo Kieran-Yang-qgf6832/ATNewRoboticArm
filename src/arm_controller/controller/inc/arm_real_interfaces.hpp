@@ -44,6 +44,8 @@ private:
         double position{0.0};
         double velocity{0.0};
         double effort{0.0};
+        // MCU 协议不上报加速度；恒 0，仅为满足控制器对 <joint>/acceleration 的请求。
+        double acceleration{0.0};
     };
 
     struct JointCommandData {
@@ -55,7 +57,7 @@ private:
         double ki{0.0};
     };
 
-    static constexpr std::size_t kStateInterfaceCount = 3;
+    static constexpr std::size_t kStateInterfaceCount = 4;
     static constexpr std::size_t kCommandInterfaceCount = 6;
 
     void on_pack_praser(const uint8_t* data, int size);
@@ -66,10 +68,17 @@ private:
     std::vector<JointStateData> received_states_;
     std::vector<JointCommandData> commands_;
     std::mutex received_states_mutex_;
+    // 最近一次收到状态包（或回环刷新）的时刻；read() 用它判断是否掉线。
+    std::chrono::steady_clock::time_point last_state_time_{};
 
     std::unique_ptr<CDCTrans> cdc_;
     std::shared_ptr<std::thread> cdc_event_thread_;
     bool event_thread_running{true};
+    // 来自 URDF <param name="loopback">，默认关闭。开启时不打开 USB 设备，
+    // 把上一帧指令直接读回状态，仅用于无硬件冒烟。
+    bool loopback_{false};
+    // 来自 URDF <param name="state_timeout_ms">，默认 100 ms。
+    std::chrono::milliseconds state_timeout_{100};
     uint16_t vid_{0x0483};
     uint16_t pid_{0x5740};
 };
