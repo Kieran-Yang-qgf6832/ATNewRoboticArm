@@ -80,7 +80,9 @@ private:
     // 来自 URDF <param name="state_timeout_ms">，默认 100 ms。
     std::chrono::milliseconds state_timeout_{100};
     uint16_t vid_{0x0483};
-    uint16_t pid_{0x5740};
+    // 与下位机固件一致：USB_DEVICE/App/usbd_desc.c 里 USBD_PID_FS = 22337 = 0x5741。
+    // ST 官方模板常写 0x5740，本固件不是，按 0x5740 打开会找不到设备。
+    uint16_t pid_{0x5741};
 };
 
 } // namespace arm_controller
