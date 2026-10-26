@@ -255,7 +255,7 @@ ros2 launch launch_pack arm_real.launch.py
 > `config/ros2_controller_real.yaml` 里**叠加覆盖**仿真默认值（200 Hz、`idel`、
 > 仿真增益 20%、重力前馈 0.1 倍）。
 >
-> 实机模式由 `ArmRealInterfaces` 通过 USB CDC（VID `0x0483` / PID `0x5740`）与 MCU 通信，
+> 实机模式由 `ArmRealInterfaces` 通过 USB CDC（VID `0x0483` / PID `0x5741`）与 MCU 通信，
 > 数据包格式见 `controller/inc/data_pack.h`（`MCUTarget1Pack` / `MCUTarget2Pack` / `MCUStatePack`）。
 > 超过 100 ms 收不到状态包会返回 ERROR，由 `controller_manager` 停用控制器。
 >
