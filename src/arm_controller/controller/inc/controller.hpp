@@ -216,6 +216,14 @@ private:
 
     /// 状态机工厂共享指针，持有机器人模型、求解器并承载各控制状态
     std::shared_ptr<FSMArmControlFactory> fsm_factory;
+    /**
+     * @brief 是否在实机模式下运行
+     *
+     * 来自 controller YAML 的 @c real_mode。实机上末端回转关节没有电机（joint6
+     * 机械锁死），且 MCU 不接收阻抗增益、不上报加速度，因此 @c teach_pendant 与
+     * @c measure 两个状态物理上不成立，请求切入时直接拒绝并报错。
+     */
+    bool real_mode_{false};
     /// 关节名称列表，决定命令/状态接口的数量与命名
     std::vector<std::string> joints_name;
     /// 命令接口名称前缀，为空时命令接口直接使用关节名

@@ -561,8 +561,13 @@ bool CartTrajState::exit(const std::string& next_state) {
 }
 
 const std::string& CartTrajState::check_switch() const {
-    if (factory != nullptr && state == TrajPhase::STOP && !factory->exp_state_name.empty()
-        && factory->exp_state_name != fsm_name_) {
+    if (factory == nullptr || factory->exp_state_name.empty() || factory->exp_state_name == fsm_name_) {
+        return fsm_name_;
+    }
+    // 运动中允许被 idel 打断：exit() 会停掉轨迹，IDELState::enter() 再锁存当前位姿并
+    // 保持——这就是「停止」的语义（tasks 的 joint_console stop 依赖它）。
+    // 其余目标仍要求轨迹走完（STOP）才切换，避免中途直接跳进另一条轨迹。
+    if (state == TrajPhase::STOP || factory->exp_state_name == kIdelStateName) {
         return factory->exp_state_name;
     }
     return fsm_name_;
@@ -751,7 +756,13 @@ bool JointTrajState::exit(const std::string& next_state) {
 }
 
 const std::string& JointTrajState::check_switch() const {
-    if (state == TrajPhase::STOP && !factory->exp_state_name.empty() && factory->exp_state_name != fsm_name_) {
+    if (factory == nullptr || factory->exp_state_name.empty() || factory->exp_state_name == fsm_name_) {
+        return fsm_name_;
+    }
+    // 运动中允许被 idel 打断：exit() 会停掉轨迹，IDELState::enter() 再锁存当前位姿并
+    // 保持——这就是「停止」的语义（tasks 的 joint_console stop 依赖它）。
+    // 其余目标仍要求轨迹走完（STOP）才切换，避免中途直接跳进另一条轨迹。
+    if (state == TrajPhase::STOP || factory->exp_state_name == kIdelStateName) {
         return factory->exp_state_name;
     }
     return fsm_name_;

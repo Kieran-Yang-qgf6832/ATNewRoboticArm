@@ -58,6 +58,12 @@
 | **O10** | 激励轨迹不可复现、质量波动极大（CMA-ES 随机种子取自时钟、600 次评估对 36 维欠收敛） | **高** | **已修** | `06af06d` |
 | **O11** | 激励轨迹没避开地面：工具网格钻进地面（−4.6 mm），接触冲量让模型残差出现 81.9 N·m 尖峰 | **高** | **已修** | `340e002` |
 | **O12** | 激励轨迹没有自碰撞与连杆-地面碰撞约束：随机位形 11/1000 处于自碰撞，link4/5/6 可低于 z=0 | **高** | **已修** | （本次，未提交） |
+| **R1** | 上位机通信帧（`0x5B/0x4A`、每电机 6 个 float）与固件（`int 0x01`、每电机 3 个 float）完全不兼容 | **严重** | **已修**（按固件 ABI 重写） | （本次，未提交） |
+| **R2** | USB CDC 的 PID 写成 `0x5740`，固件是 `0x5741`，设备打不开 | **严重** | **已修** | （本次，未提交） |
+| **R3** | 77 字节状态帧被 USB FS 拆成 64+13，上位机按「一次回调一帧」解析，永远收不到状态 | **严重** | **已修**（接口层拼帧） | （本次，未提交） |
+| **R4** | 实机只有 5 个电机，joint6 无电机、机械锁死；6 维到位判据永远不满足 | 高 | **已处理**（joint6 状态回写 + 5 维任务空间） | （本次，未提交） |
+| **R5** | 固件没有指令看门狗：上位机或 USB 断链后，MCU 继续按最后一帧目标跑 | **高** | **已知限制，未修**（本次不动固件） | — |
+| **R6** | 实机上 `teach_pendant` / `measure` 物理不成立（MCU 不接收增益、不上报加速度） | 中 | **已修**（实机模式拒绝切入） | （本次，未提交） |
 
 ---
 
@@ -1648,3 +1654,114 @@ J_task_rot = J_r(ρ_e) · J_geom_rot
 | `tools/fk_dump.cpp` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量，用于与 TF 逐项对比 |
 | `tools/ik_solve.cpp` | 用给定目标与初值跑一次 IK，离线复现仿真失败用例 |
 | `tools/ik_benchmark.cpp` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
+
+---
+
+## 8. 实机联调：与下位机固件的对齐（2026-10-26）
+
+下位机固件（`2026_R2_NEW_ARM_LOWER`）本次**一行未改**，全部适配放在上位机侧。
+下面每一条都对应一次实测/读数，不是推测。
+
+### R1 通信帧完全不兼容【严重，已修】
+
+- 固件 `MyTask/Run.h`：`ArmTarget_t { int pack_type; Motor_t joints[6]; uint8_t air_pump; uint8_t worked; }`，
+  `Motor_t { float rad, omega, torque; }`；上行 `ArmState_t` 多一个 `uint8_t message`。
+- 旧上位机 `data_pack.h`：单字节帧头 `0x5A/0x5B/0x4A`，每电机 6 个 float（多 kp/kd/ki）。
+
+固件只认 `((ArmTarget_t*)src)->pack_type == 0x01`，旧帧首 4 字节被当作 `int` 读出是 `0x5B`，
+**所有指令帧被丢弃**；上行同理，`0x4A` 校验失败后整帧丢弃，100 ms 后 `read()` 报 ERROR
+停用控制器。现按固件 ABI 重写：下行 78 B / 上行 77 B，`int32 pack_type = 0x01`，并用
+`static_assert` 锁死长度。
+
+### R2 USB PID 不一致【严重，已修】
+
+固件 `USB_DEVICE/App/usbd_desc.c`：`USBD_PID_FS = 22337 = 0x5741`；上位机写死 `0x5740`
+（ST 官方模板值）。`libusb_open_device_with_vid_pid` 找不到设备。已改为 `0x5741`。
+
+### R3 状态帧被拆包，收不到反馈【严重，已修】
+
+USB FS bulk 上限 64 字节，77 字节帧在主机侧必然分成 64 + 13 两次回调。旧解析要求
+`size >= sizeof(MCUStatePack)`，两次都被丢弃 → 永远收不到状态 → 100 ms 超时。
+现在 `ArmRealInterfaces` 内部维护字节流缓冲：累加 → 凑满 77 B 且帧头为 1 → 切帧；
+错位时丢 1 字节重同步，并用「数值量级合理」做二次校验。`cdc_trans` 保持纯字节转发不变。
+
+### R4 实机只有 5 个自由度【已处理】
+
+现场确认：joint6 **没有电机，且机械锁死**。因此：
+
+1. `joint_calibration.yaml` 只覆盖 joint1..joint5；
+2. `ArmRealInterfaces::read()` 把 joint6 的状态**回写成指令值**，让 reset/joint_traj 的
+   6 维到位判据自洽（代价：`/joint_states` 里 joint6 是镜像值而非实测）；
+3. 实机 `task_dim: 5`：位置 3 + 工具指向 2，误差里把绕工具轴的分量投影掉。
+   投影后 joint6 在雅可比里那一列精确为 0，IK 的自然步长为 0，它停在初值不动——
+   与「无电机」的物理行为一致。仿真保持 `task_dim: 6`，能力不退化。
+
+### R5 断链无看门狗【已知限制，未修】
+
+固件 `MotorRecTask` 只在收到帧时更新目标，没有指令超时停机；`Motor_Drive` 会一直跑最后
+一帧目标。上位机侧能做的都做了：发送失败（`send` 返回值不符）与状态超时（100 ms）都
+返回 ERROR，让 `controller_manager` 停控制器并停止下发新目标。**拔线 ≠ 停机**，现场须知。
+
+### R6 实机禁用 teach / measure【已修】
+
+`teach_pendant` 依赖「kp = 0 + 纯阻尼」，而固件只跑自己的位置环、根本不接收 kp；
+`measure` 需要关节加速度与 joint6 激励，而固件不上报加速度、joint6 无电机。
+`real_mode: true` 时这两个状态在**切入前**被拒绝（`on_init` 读 YAML 与参数回调两处），
+不会出现「进去了但行为不对」。
+
+### 8.1 关节标定（上机前必做）
+
+固件角度是 `inv_motor × (编码器 − pos_offset)`，零位是固件上电标定的物理姿态，
+与 URDF 的 SolidWorks 零位没有共同基准；`joint[2]` 的 `inv_motor = -1`。
+上位机在 `ArmRealInterfaces` 里做 `q_urdf = dir·(q_raw − zero)`，参数在
+`arm_controller/config/joint_calibration.yaml`（当前是 `dir=1/zero=0` 占位值）。
+
+标定工具 `tools/joint_calibrate.cpp`（不安装，构建后在 `build/arm_controller/`）：
+
+```
+ros2 run 不适用；直接用绝对路径：
+./build/arm_controller/joint_calibrate --ros-args -p joint:=1 -p step:=0.05
+
+- 一次只动一个关节，0.05 rad / 2 s，Ctrl-C 立即切回 idel；
+- 盯实物判 dir（方向一致 = +1，相反 = -1）；
+- 摆到 URDF 零位读 /joint_states，得到 zero（dir = ±1 时 zero 的数值与 q_urdf 相同）。
+```
+
+### 8.2 其它实机配置
+
+- `update_rate: 100`：`write()` 是同步 USB bulk 发送（超时 2 ms），200 Hz 时一次抖动就吃满周期。
+- `gravity_compensation: false`：下发力矩会被固件直接叠加到速度环输出（无上限），
+  而模型质量/惯量只在仿真里辨识过；等通信与标定确认后再逐档打开。
+- `kp/kd/ki` 仍在 ros2_control 接口里保留（`ArmController` 硬性声明了这 6 个命令接口，
+  删掉会激活失败），但**不上总线**，`write()` 里直接丢弃。
+- 气泵 `air_pump` 恒发 0：`/tool_cmd` 的通路本次未接（见 D2）。
+
+### 8.3 验证状态
+
+| 项 | 状态 |
+| --- | --- |
+| `colcon build --packages-select arm_controller` | 通过 |
+| `arm_real_joint_count_test` | 全部通过（顺带修正了状态接口数 18 → 24 的过期断言） |
+| 实机链路 loopback 冒烟 | 通过：标定文件解析、`task_dim=5`、`real_mode=true`、控制器激活 |
+| 仿真链路激活冒烟 | 通过：`task_dim=6`、`real_mode=false`、控制器激活 |
+| 仿真 `reset_only` | 通过 |
+| 仿真 `reset_then_joint` | 通过 |
+| 仿真 `ready_then_cart` | **不稳定**：同代码 2 次里 1 次通过、1 次在 IK 阶段报 `joint6 is outside its model limit` |
+| 仿真 `pick_demo` | **失败**（4/4），都停在 `cart_move` 下降 5 cm 那一步，joint6 冲出限位 → IK 失败 → 安全保持 |
+| 仿真反例 `reset_then_cart` / `unreachable_near` / `unreachable_far` | 均按预期被拒绝（控制器退出 `cart_traj`、无崩溃） |
+| 实机真机联调 | **未做**，需现场标定后执行 |
+
+#### pick_demo 失败的归因（已排除本次改动）
+
+为了区分「本次改动」与「环境本身」，做了 A/B：把 `controller.cpp` 与 `default6dof_task.cpp`
+**还原成改动前的版本**（`/tmp` 备份），重新编译后在本工作区跑 `pick_demo` —— 仍然失败，
+且 `joint6 is outside its model limit` 一模一样。同时 `ready_then_cart` 在**同一份代码**上
+出现了「一次通过、一次失败」，说明这是**时序相关的偶发问题**，与协议/5 维改动无因果关系。
+
+共同特征是 joint6 几乎无刚度（`default_kp[5] = 1.0`，见 O11/O13）并漂到 ±π 限位：
+仿真里 joint6 是真实电机但增益极低，cart 运动时被惯性带到限位；实机上 joint6 **没有电机**，
+5 维任务空间又把它从误差/雅可比里投影掉，因此这个失效模式在实机不会出现（也就不会修它）。
+
+> 另外注意：本工作区的 `install/` 里有若干条目是指向另一份工作区
+>（`/home/kangy/MyProjects/ATNewRoboticArm`）的符号链接，`tasks` 的二进制与 YAML 都来自那里。
+> 想做可信的仿真回归，应先 `rm -rf build install` 从本工作区源码全量重建。

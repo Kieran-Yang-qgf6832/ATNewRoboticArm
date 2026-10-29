@@ -137,6 +137,9 @@ ATNewRoboticArm/
 > `idel` / `reset` 与 `cart_traj` / `joint_traj` / `admittance` 的**保持阶段**都带重力前馈
 > （共用 `HoldGravityFeedforward`，见 O6 / O7）；开关是控制器参数 `gravity_compensation`。
 
+> `cart_traj` / `joint_traj` 在**运动过程中**也响应 `exp_state=idel`：轨迹立即中止并就地保持。
+> 这是 `tasks` 的 `joint_console` 里 `stop` 的实现基础；切到**其他**状态仍要求轨迹走完（STOP）。
+
 运行时切换示例：
 
 ```bash
@@ -148,7 +151,7 @@ ros2 param set /arm_controller exp_state reset
 任务定义在 `src/tasks/config/tasks.yaml`（参数辨识另有 `src/tasks/config/measure.yaml`）。
 **新增目标点或新任务只需编辑 YAML**；但新增**步骤类型**要改 C++——下面的词汇表是封闭集合。
 
-### 步骤类型（封闭集合，共 9 类）
+### 步骤类型（封闭集合，共 10 类）
 
 | 类型 | 说明 |
 | --- | --- |
@@ -156,6 +159,7 @@ ros2 param set /arm_controller exp_state reset
 | `idel` | 切回 `idel` 并锁定当前位置 |
 | `reset` | 复位；等控制器状态回到 `idel` |
 | `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
+| `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止 |
 | `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维） |
 | `admittance_move` | 导纳控制下的期望轨迹；同样用 `offset` |
 | `tool` | 末端执行器开关量；`action` 取 `tool` 段定义的语义名 |
@@ -163,7 +167,10 @@ ros2 param set /arm_controller exp_state reset
 | `measure` | 参数辨识；需 `duration` |
 
 常用字段：`duration`（秒）、`tolerance`（到位容差）。
-`reset` / `teach` / `measure` 只能从 `idel` 进出，执行器会自动先等待控制器空闲。
+`reset` / `joint_console` / `teach` / `measure` 只能从 `idel` 进出，执行器会自动先等待控制器空闲。
+
+`joint_console` 的输入先过 `tasks.yaml` 的 `joint_limits` 段（每关节限位，度）与
+`max_step_deg`（单步最大变化量，相对当前实测角），超限只提示重输、不下发任何指令。
 
 ### 当前序列
 
@@ -173,6 +180,7 @@ ros2 param set /arm_controller exp_state reset
 | `reset_then_joint` | 正常 | 复位后运动到 `ready` 点 |
 | `ready_then_cart` | 正常 | 先关节运动离开奇异位形，再笛卡尔平移 |
 | `pick_demo` | 正常 | 完整取放示例：吸住 → 等待真空 → 抬升 |
+| `joint_console_only` | 正常 | 交互式：终端逐行输入关节角（度）+ 可选执行时间，自由试位姿 |
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
@@ -239,6 +247,9 @@ ros2 launch launch_pack arm_controller_test_sim.launch.py
 
 ### 2. 实机（控制器层）
 
+> **第一次上真机请先读 [`docs/real_first_run.md`](docs/real_first_run.md)**：从构建、USB 权限、无硬件冒烟，
+> 到关节标定（`dir` / `zero`）与小步运动验证的完整命令清单，未标定前只能停在 `idel`。
+
 ```bash
 # 无硬件冒烟：不打开 USB 设备，把指令回读成状态
 ros2 launch launch_pack arm_real.launch.py loopback:=true
@@ -252,14 +263,22 @@ ros2 launch launch_pack arm_real.launch.py
 >
 > 仿真与实机共用同一份 `robotic_arm.urdf`：launch 用 `hardware:=real` 切到
 > `ArmRealInterfaces`，仿真默认 `hardware:=mujoco`。实机参数在
-> `config/ros2_controller_real.yaml` 里**叠加覆盖**仿真默认值（200 Hz、`idel`、
-> 仿真增益 20%、重力前馈 0.1 倍）。
+> `config/ros2_controller_real.yaml` 里**叠加覆盖**仿真默认值（100 Hz、`idel`、
+> `real_mode: true`、`task_dim: 5`、重力前馈关闭）。
 >
 > 实机模式由 `ArmRealInterfaces` 通过 USB CDC（VID `0x0483` / PID `0x5741`）与 MCU 通信，
-> 数据包格式见 `controller/inc/data_pack.h`（`MCUTarget1Pack` / `MCUTarget2Pack` / `MCUStatePack`）。
+> 数据包格式是**固件 ABI 的字节级镜像**：`controller/inc/data_pack.h` 里的
+> `MCUTargetPack`（78 B，下行）/ `MCUStatePack`（77 B，上行），帧头 `int32 0x01`。
+> 77 字节帧在 USB FS 上会被拆成 64 + 13，接口内部自行拼帧。
 > 超过 100 ms 收不到状态包会返回 ERROR，由 `controller_manager` 停用控制器。
 >
-> **实机不支持 measure**：MCU 不上报加速度，`acc_*` 列恒为 0，辨识结果不可用。
+> **上真机前必须标定关节**：固件角度零位与 URDF 零位没有共同基准，符号也可能相反。
+> 换算参数在 `arm_controller/config/joint_calibration.yaml`（`q_urdf = dir·(q_raw − zero)`），
+> 标定工具 `build/arm_controller/joint_calibrate`（不安装）。流程见
+> [`docs/bugs.md` §8.1](docs/bugs.md)。
+>
+> 实机只有 5 个自由度（joint6 无电机、机械锁死），所以任务空间降为 5 维
+> （位置 + 工具指向，不控绕工具轴滚转），`teach_pendant` 与 `measure` 在实机模式下被拒绝。
 
 ### 关于 `/arm_robot_description`
 

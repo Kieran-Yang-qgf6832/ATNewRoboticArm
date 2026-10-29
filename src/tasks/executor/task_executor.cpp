@@ -1,10 +1,18 @@
 #include "task_executor.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <deque>
 #include <exception>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -88,6 +96,125 @@ void sleep_with_spin(const rclcpp::Node::SharedPtr& node, double seconds) {
     }
 }
 
+/// 圆周率常量：-std=c++17（关闭 GNU 扩展）下不保证 M_PI 可用。
+constexpr double kPi = 3.14159265358979323846;
+
+/// 角度换算系数：度 -> 弧度。
+constexpr double kDegToRad = kPi / 180.0;
+
+/**
+ * @brief 定长小数格式化成文本（仅用于日志与提示）
+ * @param value     数值
+ * @param precision 小数位数
+ * @return 形如 "12.30" 的字符串
+ */
+std::string format_number(double value, int precision) {
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
+}
+
+/// 把弧度格式化成一两位小数的角度文本（用于限位提示）。
+std::string format_deg(double radians) {
+    return format_number(radians / kDegToRad, 1);
+}
+
+/**
+ * @brief 终端输入队列：全进程唯一的 stdin 读者线程
+ *
+ * 不能让主线程直接读 stdin：读取是阻塞的，主线程一旦阻塞就停止 spin，等待期间
+ * @c /joint_states 与控制器状态都停在旧值（下一轮拿它当轨迹起点会跳变），Ctrl+C
+ * 也要等回车才生效。这里用一条分离线程把整行推进队列，主线程照常自旋。
+ *
+ * 读者线程只访问本对象的堆上状态，不引用节点或执行器；对象故意用 @c new 创建且
+ * 永不释放，使该线程在进程退出时仍阻塞在 @c getline 上也不会碰到已析构的静态对象。
+ */
+class ConsoleQueue {
+public:
+    /// @return 全进程单例
+    static ConsoleQueue& instance() {
+        static ConsoleQueue* queue = new ConsoleQueue();
+        return *queue;
+    }
+
+    /// 把一行插回队首（运动中收到的非 stop 输入要按顺序留给下一轮）
+    void push_front(const std::string& line) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lines_.push_front(line);
+    }
+
+    /**
+     * @brief 取出一行（非阻塞）
+     * @param line 输出：队首的一行（不含换行符）
+     * @return true 取到一行；false 队列为空
+     */
+    bool try_pop(std::string* line) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lines_.empty()) {
+            return false;
+        }
+        *line = lines_.front();
+        lines_.pop_front();
+        return true;
+    }
+
+    /// @return 读者线程是否已因 EOF 结束（终端被关闭或输入被重定向到空文件）
+    bool eof() const { return eof_.load(); }
+
+private:
+    ConsoleQueue() {
+        std::thread([this]() {
+            std::string line;
+            while (std::getline(std::cin, line)) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    lines_.push_back(line);
+                }
+            }
+            eof_.store(true);
+        }).detach();
+    }
+
+    mutable std::mutex mutex_;  ///< 保护 lines_
+    std::deque<std::string> lines_; ///< 待消费的整行
+    std::atomic<bool> eof_{false};  ///< 读者线程是否已结束
+};
+
+/// 去掉首尾空白（含制表符与回车），便于解析与命令比较。
+std::string trim(const std::string& text) {
+    const auto begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return {};
+    }
+    const auto end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+
+/// 转小写，使 stop / STOP / Stop 等价。
+std::string to_lower(std::string text) {
+    for (char& ch : text) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
+/**
+ * @brief 把一行文本解析成数字列表
+ * @param text   已 trim 的输入行
+ * @param values 输出：解析出的数字
+ * @return true 全部字段都是数字（允许中间用任意空白分隔）
+ */
+bool parse_numbers(const std::string& text, std::vector<double>* values) {
+    values->clear();
+    std::istringstream stream(text);
+    double value = 0.0;
+    while (stream >> value) {
+        values->push_back(value);
+    }
+    // 出现非数字字段时流会停在错误位，eof 不会置位。
+    return !values->empty() && stream.eof();
+}
+
 }  // namespace
 
 TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx)
@@ -98,6 +225,13 @@ TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx
         idel_hold_       = node_->declare_parameter<double>("idel_hold", idel_hold_);
         state_settle_    = node_->declare_parameter<double>("state_settle", state_settle_);
         settle_duration_ = node_->declare_parameter<double>("settle_duration", settle_duration_);
+        // joint_console 的兵底时长：步骤没写 duration 时才生效。
+        console_default_duration_ = node_->declare_parameter<double>("console_default_duration", console_default_duration_);
+
+        // 关节限位默认全开（±inf = 不检查），由 tasks.yaml 的 joint_limits 段收紧。
+        const std::size_t joint_count = ctx_ != nullptr ? ctx_->options().joints.size() : 0;
+        joint_min_.assign(joint_count, -std::numeric_limits<double>::infinity());
+        joint_max_.assign(joint_count, std::numeric_limits<double>::infinity());
 
         // 末端执行器开关量出口。话题名与缺陷文档中约定的 /tool_cmd 一致；
         // 用 transient_local 让晚启动的订阅者（例如实机侧硬件接口）也能拿到最近一次状态。
@@ -170,6 +304,63 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
                     return fail("point '" + name + "' must be a list of joint values");
                 }
                 points_[name] = entry.second.as<std::vector<double>>();
+            }
+        }
+
+        // ---- joint_limits：joint_console 的输入门禁（整段可省略 = 不检查）----
+        //
+        // 控制器 joint_traj 只校验点数与维度，不查关节限位：手滑把 30 输成 300 会真的
+        // 整条下发。这里在任务层先挡一道，超限只提示重输，不影响序列状态。
+        const std::size_t joint_count = ctx_->options().joints.size();
+        console_max_step_ = 0.0;
+        joint_min_.assign(joint_count, -std::numeric_limits<double>::infinity());
+        joint_max_.assign(joint_count, std::numeric_limits<double>::infinity());
+
+        if (root["joint_limits"]) {
+            const YAML::Node& limits = root["joint_limits"];
+            if (!limits.IsMap()) {
+                return fail("'joint_limits' must be a mapping");
+            }
+            for (const auto& entry : limits) {
+                const std::string key = entry.first.as<std::string>();
+                if (key == "max_step_deg") {
+                    if (!entry.second.IsScalar()) {
+                        return fail("'joint_limits.max_step_deg' must be a number");
+                    }
+                    const double max_step_deg = entry.second.as<double>();
+                    if (max_step_deg < 0.0) {
+                        return fail("'joint_limits.max_step_deg' must be non-negative");
+                    }
+                    console_max_step_ = max_step_deg * kDegToRad;
+                    continue;
+                }
+                if (key != "joints") {
+                    return fail("unknown field '" + key + "' in 'joint_limits' (expected 'max_step_deg' or 'joints')");
+                }
+                if (!entry.second.IsMap()) {
+                    return fail("'joint_limits.joints' must be a mapping of joint name -> {min, max}");
+                }
+                for (const auto& joint_entry : entry.second) {
+                    const std::string joint_name = joint_entry.first.as<std::string>();
+                    const auto it = std::find(ctx_->options().joints.begin(), ctx_->options().joints.end(), joint_name);
+                    if (it == ctx_->options().joints.end()) {
+                        return fail(
+                            "'joint_limits' refers to unknown joint '" + joint_name + "'; known joints: "
+                            + join(ctx_->options().joints));
+                    }
+                    const auto index = static_cast<std::size_t>(std::distance(ctx_->options().joints.begin(), it));
+                    const YAML::Node& range = joint_entry.second;
+                    if (!range.IsMap() || !range["min"] || !range["max"]) {
+                        return fail("joint limit '" + joint_name + "' must be a mapping with 'min' and 'max'");
+                    }
+                    const double min_deg = range["min"].as<double>();
+                    const double max_deg = range["max"].as<double>();
+                    if (!(min_deg < max_deg)) {
+                        return fail("joint limit '" + joint_name + "' requires min < max");
+                    }
+                    joint_min_[index] = min_deg * kDegToRad;
+                    joint_max_[index] = max_deg * kDegToRad;
+                }
             }
         }
 
@@ -304,6 +495,20 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
             return fail(
                 "tool action '" + step->action + "' is neither '" + tool_on_ + "'/'on' nor '" + tool_off_
                 + "'/'off'");
+        }
+        return true;
+    }
+
+    if (step->type == "joint_console") {
+        if (uses_to || uses_target || uses_offset || uses_action) {
+            return fail("joint_console accepts only 'duration' (the default motion time) and 'tolerance'");
+        }
+        // duration 是缺省执行时间，可省略；写了就必须为正，0 表示「用节点参数」。
+        if (step->duration < 0.0) {
+            return fail("joint_console 'duration' must be non-negative");
+        }
+        if (!(step->tolerance > 0.0)) {
+            step->tolerance = kDefaultJointTolerance;
         }
         return true;
     }
@@ -463,6 +668,345 @@ bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
     return true;
 }
 
+bool TaskExecutor::ensure_joint_traj(std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (ctx_->controller_state(2.0) == "joint_traj") {
+        return true;
+    }
+
+    // 不在 joint_traj 就往那儿切：stop 中断后控制器回到 idel，控制器异常退出也走这条路。
+    if (!ctx_->set_exp_state("joint_traj")) {
+        return fail("failed to switch arm_controller to joint_traj");
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state("joint_traj", error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+    return true;
+}
+
+bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (ctx_ == nullptr) {
+        return fail("internal error: joint_console requires a TaskContext");
+    }
+
+    const std::vector<std::string>& joints = ctx_->options().joints;
+    const std::size_t joint_count          = joints.size();
+    const double default_duration          = step.duration > 0.0 ? step.duration : console_default_duration_;
+
+    if (!ensure_joint_traj(error)) {
+        return false;
+    }
+
+    // 关节顺序与限位先打一遍：用户不必凭记忆确认哪一列对应哪个关节。
+    std::string table;
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        if (i != 0) {
+            table += ", ";
+        }
+        table += joints[i];
+        if (std::isfinite(joint_min_[i]) && std::isfinite(joint_max_[i])) {
+            table += "[" + format_deg(joint_min_[i]) + ", " + format_deg(joint_max_[i]) + "]";
+        }
+    }
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "joint_console: 逐项输入 %zu 个关节角（度），再输入执行时间（秒，回车取默认 %.2f）；"
+        "输入途中回车取消本组，exit 结束，运动中 stop 立即停止",
+        joint_count, default_duration);
+    RCLCPP_INFO(node_->get_logger(), "joint_console: 关节顺序与限位（度） %s", table.c_str());
+    if (console_max_step_ > 0.0) {
+        RCLCPP_INFO(node_->get_logger(), "joint_console: 单步最大变化 %s 度", format_deg(console_max_step_).c_str());
+    }
+
+    // 运动期间收到、但本轮不消费的输入；按原顺序留给下一轮，避免丢指令。
+    std::deque<std::string> pending;
+    rclcpp::WallRate idle_rate(50.0);
+
+    // 取一行：优先进运动期间排队的输入，其次等待新行；等待期间照常自旋。
+    // 返回 false 表示终端已关闭或进程正在退出。
+    const auto next_line = [&](std::string* line) {
+        while (rclcpp::ok()) {
+            rclcpp::spin_some(node_);
+            if (!pending.empty()) {
+                *line = pending.front();
+                pending.pop_front();
+                return true;
+            }
+            if (ConsoleQueue::instance().try_pop(line)) {
+                return true;
+            }
+            if (ConsoleQueue::instance().eof()) {
+                return false;
+            }
+            idle_rate.sleep();
+        }
+        return false;
+    };
+
+    while (rclcpp::ok()) {
+        RCLCPP_INFO(
+            node_->get_logger(), "joint_console> 开始输入：逐项敲 %zu 个关节角（度），再敲执行时间（秒）", joint_count);
+
+        // 1. 逐个关节输入角度：一次只收一个数，避免行内看错第几列，也能逐项校验限位。
+        std::vector<double> target(joint_count, 0.0);
+        bool cancelled = false;
+        bool quit      = false;
+        for (std::size_t i = 0; i < joint_count && !cancelled && !quit;) {
+            RCLCPP_INFO(
+                node_->get_logger(), "  [%zu/%zu] %s 角度 (deg)，回车取消本组: ", i + 1, joint_count, joints[i].c_str());
+            std::string line;
+            if (!next_line(&line)) {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 终端输入已关闭，结束步骤");
+                return true;
+            }
+
+            const std::string command = to_lower(trim(line));
+            if (command == "exit" || command == "quit") {
+                quit = true;
+                break;
+            }
+            if (command == "stop") {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 当前没有运动，无需停止");
+                continue; // 重新提示同一个关节
+            }
+            if (command.empty()) {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 已取消本组输入");
+                cancelled = true;
+                break;
+            }
+
+            std::vector<double> values;
+            if (!parse_numbers(command, &values)) {
+                RCLCPP_WARN(node_->get_logger(), "joint_console: 无法解析 '%s'，这里只收一个数字", command.c_str());
+                continue;
+            }
+            if (values.size() != 1) {
+                RCLCPP_WARN(
+                    node_->get_logger(), "joint_console: 一次只输入一个数，收到 %zu 个；请重输 %s", values.size(),
+                    joints[i].c_str());
+                continue;
+            }
+            if (!std::isfinite(values.front())) {
+                RCLCPP_WARN(node_->get_logger(), "joint_console: %s 的角度不是有限值", joints[i].c_str());
+                continue;
+            }
+
+            const double radians = values.front() * kDegToRad;
+            if (radians < joint_min_[i] || radians > joint_max_[i]) {
+                RCLCPP_WARN(
+                    node_->get_logger(), "joint_console: %s = %s deg 超出限位 [%s, %s] deg，请重输", joints[i].c_str(),
+                    format_number(values.front(), 1).c_str(), format_deg(joint_min_[i]).c_str(),
+                    format_deg(joint_max_[i]).c_str());
+                continue;
+            }
+
+            target[i] = radians;
+            RCLCPP_INFO(
+                node_->get_logger(), "  %s = %s deg (%s rad)", joints[i].c_str(), format_number(values.front(), 1).c_str(),
+                format_number(radians, 4).c_str());
+            ++i;
+        }
+        if (quit) {
+            RCLCPP_INFO(node_->get_logger(), "joint_console: 结束交互");
+            return true;
+        }
+        if (cancelled) {
+            continue;
+        }
+
+        // 2. 执行时间：同样一次一个数，直接回车取默认值。
+        double duration  = default_duration;
+        bool duration_ok = false;
+        while (!duration_ok && rclcpp::ok()) {
+            RCLCPP_INFO(
+                node_->get_logger(), "  [%zu/%zu] 执行时间 (s)，回车取默认 %s: ", joint_count + 1, joint_count + 1,
+                format_number(default_duration, 2).c_str());
+            std::string line;
+            if (!next_line(&line)) {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 终端输入已关闭，结束步骤");
+                return true;
+            }
+
+            const std::string command = to_lower(trim(line));
+            if (command == "exit" || command == "quit") {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 结束交互");
+                return true;
+            }
+            if (command == "stop") {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 当前没有运动，无需停止");
+                continue;
+            }
+            if (command.empty()) {
+                RCLCPP_INFO(
+                    node_->get_logger(), "joint_console: 执行时间用默认值 %s s", format_number(duration, 2).c_str());
+                duration_ok = true;
+                break;
+            }
+
+            std::vector<double> values;
+            if (!parse_numbers(command, &values)) {
+                RCLCPP_WARN(node_->get_logger(), "joint_console: 无法解析 '%s'，这里只收一个数字", command.c_str());
+                continue;
+            }
+            if (values.size() != 1) {
+                RCLCPP_WARN(node_->get_logger(), "joint_console: 一次只输入一个数，收到 %zu 个", values.size());
+                continue;
+            }
+            if (!(values.front() > 0.0) || !std::isfinite(values.front())) {
+                RCLCPP_WARN(
+                    node_->get_logger(), "joint_console: 执行时间必须为正数，收到 %s",
+                    format_number(values.front(), 3).c_str());
+                continue;
+            }
+            duration    = values.front();
+            duration_ok = true;
+        }
+        if (!duration_ok) {
+            return fail("interrupted while waiting for terminal input");
+        }
+
+        // 3. 单步幅度相对**最新实测角**判断：这是拦住手滑（例如把 30 输成 300）的第二道闸。
+        if (!ctx_->have_joint_states() || ctx_->joint_positions().size() != joint_count) {
+            return fail("no valid /joint_states before publishing the joint trajectory");
+        }
+        if (console_max_step_ > 0.0) {
+            const std::vector<double>& before = ctx_->joint_positions();
+            bool too_far                      = false;
+            for (std::size_t i = 0; i < joint_count; ++i) {
+                const double delta = std::abs(target[i] - before[i]);
+                if (delta > console_max_step_) {
+                    RCLCPP_WARN(
+                        node_->get_logger(), "joint_console: %s 单步变化 %s deg，超过上限 %s deg；本次输入作废",
+                        joints[i].c_str(), format_number(delta / kDegToRad, 1).c_str(),
+                        format_deg(console_max_step_).c_str());
+                    too_far = true;
+                    break;
+                }
+            }
+            if (too_far) {
+                continue;
+            }
+        }
+
+        // 4. 回显整组目标（度 + 弧度）与执行时间，避免单位误读。
+        std::string echo;
+        for (std::size_t i = 0; i < joint_count; ++i) {
+            echo += (i == 0 ? "" : ", ");
+            echo += joints[i] + "=" + format_number(target[i] / kDegToRad, 1) + "deg/" + format_number(target[i], 4)
+                    + "rad";
+        }
+        RCLCPP_INFO(node_->get_logger(), "joint_console: 目标 %s", echo.c_str());
+        RCLCPP_INFO(node_->get_logger(), "joint_console: 执行时间 %.2f s", duration);
+
+        // 5. 发送前确认状态：stop 之后或控制器异常退回 idel 时自动重新切入。
+        if (!ensure_joint_traj(error)) {
+            return false;
+        }
+        if (!ctx_->have_joint_states() || ctx_->joint_positions().size() != joint_count) {
+            return fail("no valid /joint_states before publishing the joint trajectory");
+        }
+        // 起点取当前实测角：与实测不一致时控制器会在 t=0 跳变。
+        const std::vector<double> start = ctx_->joint_positions();
+
+        const std::vector<std::vector<float>> points{to_float(start), to_float(target)};
+        const std::vector<float> seconds{0.0f, static_cast<float>(duration)};
+        if (!ctx_->publish_joint_traj(points, seconds)) {
+            return fail("failed to publish the joint trajectory");
+        }
+        RCLCPP_INFO(node_->get_logger(), "joint_console: 轨迹已下发，运动中可输入 stop");
+
+        // 6. 运动中等待：只认 stop（切 idel 就地保持），其余输入排队给下一轮。
+        bool stopped = false;
+        {
+            rclcpp::WallRate rate(50.0);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(duration);
+            while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+                rclcpp::spin_some(node_);
+                std::string queued;
+                while (ConsoleQueue::instance().try_pop(&queued)) {
+                    if (to_lower(trim(queued)) == "stop") {
+                        if (ctx_->set_exp_state(kIdleState)) {
+                            RCLCPP_WARN(node_->get_logger(), "joint_console: 收到 stop，控制器将停在当前位姿并切回 idel");
+                            // 必须等它**真的**到 idel 再继续：current_state 由控制器的
+                            // 500 ms timer 刷新，立刻读会读回 joint_traj，下一轮就会把轨迹
+                            // 发给已经退出的状态机实例，那条指令会被静默丢弃。
+                            sleep_with_spin(node_, state_settle_);
+                            wait_for_idel("stop", nullptr);
+                        } else {
+                            RCLCPP_ERROR(node_->get_logger(), "joint_console: 收到 stop，但切换 idel 失败");
+                        }
+                        stopped = true;
+                        break;
+                    }
+                    pending.push_back(queued);
+                }
+                if (stopped) {
+                    break;
+                }
+                rate.sleep();
+            }
+        }
+        if (!rclcpp::ok()) {
+            return fail("interrupted while moving");
+        }
+        if (stopped) {
+            // 下一轮的 ensure_joint_traj 会自动把控制器切回 joint_traj。
+            continue;
+        }
+
+        // 7. 结束后核对：控制器若已回退到 idel，说明这次运动没有走完。
+        const std::string state = ctx_->controller_state(2.0);
+        if (state != "joint_traj") {
+            return fail(
+                "arm_controller left joint_traj (now '" + (state.empty() ? std::string("<unknown>") : state)
+                + "'); see the controller log for the failing stage (inverse kinematics / inverse dynamics)");
+        }
+
+        // 到位判定口径与 joint_move 一致：被忽略 -> 失败；到位但超容差 -> 告警。
+        if (ctx_->have_joint_states() && ctx_->joint_positions().size() == joint_count) {
+            const std::vector<double>& settled = ctx_->joint_positions();
+            double residual                    = 0.0;
+            double commanded                   = 0.0;
+            double moved                       = 0.0;
+            for (std::size_t i = 0; i < joint_count; ++i) {
+                residual  = std::max(residual, std::abs(settled[i] - target[i]));
+                commanded = std::max(commanded, std::abs(target[i] - start[i]));
+                moved     = std::max(moved, std::abs(settled[i] - start[i]));
+            }
+
+            bool off_target = false;
+            if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+                return fail(
+                    "joint trajectory appears to have been ignored: moved " + std::to_string(moved)
+                    + " rad of the commanded " + std::to_string(commanded) + " rad");
+            }
+            if (off_target) {
+                RCLCPP_WARN(
+                    node_->get_logger(), "joint_console: 到位残差 %.4f rad（容差 %.4f rad）", residual, step.tolerance);
+            } else {
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 到位，最大关节误差 %.4f rad", residual);
+            }
+        }
+    }
+
+    return true;
+}
+
 bool TaskExecutor::run_task_space_move(const Step& step, const std::string& state_name, std::string* error) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
@@ -611,6 +1155,10 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
 
     if (step.type == "joint_move") {
         return run_joint_move(step, error);
+    }
+
+    if (step.type == "joint_console") {
+        return run_joint_console(step, error);
     }
 
     if (step.type == "cart_move") {

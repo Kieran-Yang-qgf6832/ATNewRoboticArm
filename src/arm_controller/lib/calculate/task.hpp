@@ -53,4 +53,19 @@ public:
     virtual bool error_map(const Eigen::VectorXd& target,
                            const Eigen::VectorXd& current,
                            Eigen::VectorXd* error) = 0;
+
+    /**
+     * @brief 切换「是否放弃绕工具轴的姿态控制」（5 维任务）
+     *
+     * 实机末端回转关节没有电机（joint6 机械锁死），实际自由度只有 5：
+     * 位置 3 维 + 工具指向 2 维，绕工具轴的滚转不可控。此时把误差里沿工具轴的
+     * 分量投影掉，6 维向量依旧保留（IKSolver 的尺寸断言不变），但姿态部分秩为 2。
+     *
+     * @param roll_free true = 5 维任务（不控滚转）；false = 6 维任务（默认）
+     * @note 默认实现什么都不做，只有支持降维的映射需要重写。
+     */
+    virtual void set_roll_free(bool /*roll_free*/) {}
+
+    /// 当前是否工作在降维（5 维）模式
+    virtual bool roll_free() const { return false; }
 };

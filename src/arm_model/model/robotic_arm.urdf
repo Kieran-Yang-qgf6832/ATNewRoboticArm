@@ -101,10 +101,15 @@
       <param name="loopback">$(arg loopback)</param>
       <!-- 超过该时长没收到 MCU 状态包就返回 ERROR，让 controller_manager 停控制器。 -->
       <param name="state_timeout_ms">100</param>
+      <!-- 关节标定表：q_urdf = dir * (q_raw - zero)。固件零位与 URDF 的 SolidWorks
+           零位没有共同基准，必须现场标定；未标定时文件里是 dir=1/zero=0 的占位值。 -->
+      <param name="joint_calibration_file">$(find arm_controller)/config/joint_calibration.yaml</param>
     </hardware>
 
     <joint name="joint1">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
@@ -119,7 +124,9 @@
     </joint>
 
     <joint name="joint2">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
@@ -134,7 +141,9 @@
     </joint>
 
     <joint name="joint3">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
@@ -149,7 +158,9 @@
     </joint>
 
     <joint name="joint4">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
@@ -164,7 +175,9 @@
     </joint>
 
     <joint name="joint5">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>
@@ -179,7 +192,9 @@
     </joint>
 
     <joint name="joint6">
-      <!-- 实机协议是 MIT 阻抗模式：位置/速度/力矩 + kp/kd/ki。 -->
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
       <command_interface name="position"/>
       <command_interface name="velocity"/>
       <command_interface name="effort"/>

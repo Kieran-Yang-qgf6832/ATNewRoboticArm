@@ -10,8 +10,11 @@
 #include <pluginlib/class_list_macros.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -25,11 +28,11 @@ namespace arm_controller {
 
 namespace {
 
-// MCU 通信帧在 data_pack.h 中固定为 6 个电机。这里从结构体定义反推，避免帧长在两处各写一个数字而失配。
-constexpr std::size_t kProtocolMotorCount = sizeof(MCUTarget2Pack::motor) / sizeof(MCUTarget2Pack::motor[0]);
+// MCU 通信帧在 data_pack.h 中固定为 6 个电机槽。这里从结构体定义反推，避免帧长在两处各写一个数字而失配。
+constexpr std::size_t kProtocolMotorCount = sizeof(MCUTargetPack::joint) / sizeof(MCUTargetPack::joint[0]);
 
 static_assert(
-    sizeof(MCUStatePack::motor) / sizeof(MCUStatePack::motor[0]) == kProtocolMotorCount,
+    sizeof(MCUStatePack::joint) / sizeof(MCUStatePack::joint[0]) == kProtocolMotorCount,
     "MCU 收发帧的电机数量不一致，请检查 data_pack.h");
 
 } // namespace
@@ -93,12 +96,89 @@ hardware_interface::CallbackReturn ArmRealInterfaces::on_init(const hardware_int
         state_timeout_ = std::chrono::milliseconds(100);
     }
 
+    // 关节标定文件：缺省 dir=1/zero=0 等同直接透传（未标定时唯一的“安全”默认）。
+    // 文件路径写在 URDF 的 <hardware><param name="joint_calibration_file">。
+    const auto calib_it = hardware_info.hardware_parameters.find("joint_calibration_file");
+    if (calib_it != hardware_info.hardware_parameters.end() && !calib_it->second.empty()) {
+        if (!load_calibration(calib_it->second)) {
+            RCLCPP_ERROR(
+                rclcpp::get_logger("arm_real_interfaces"), "关节标定文件 %s 无效，拒绝启动。",
+                calib_it->second.c_str());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+    } else {
+        RCLCPP_WARN(
+            rclcpp::get_logger("arm_real_interfaces"),
+            "未提供 joint_calibration_file，按 dir=1/zero=0 直接透传。未标定的机器不要直接跑运动指令。");
+    }
+
     RCLCPP_INFO(
         rclcpp::get_logger("arm_real_interfaces"),
         "Configured ArmRealInterfaces for %zu joints (loopback=%s, state_timeout=%lld ms).",
         joint_names_.size(), loopback_ ? "true" : "false", static_cast<long long>(state_timeout_.count()));
+    for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
+        RCLCPP_INFO(
+            rclcpp::get_logger("arm_real_interfaces"), "  %s: dir=%+.3f zero=%+.6f",
+            i < joint_names_.size() ? joint_names_[i].c_str() : "?", calib_dir_[i], calib_zero_[i]);
+    }
 
     return hardware_interface::CallbackReturn::SUCCESS;
+}
+
+bool ArmRealInterfaces::load_calibration(const std::string& path) {
+    YAML::Node root;
+    try {
+        root = YAML::LoadFile(path);
+    } catch (const std::exception& error) {
+        RCLCPP_ERROR(
+            rclcpp::get_logger("arm_real_interfaces"), "读取标定文件失败（%s）：%s", path.c_str(), error.what());
+        return false;
+    }
+
+    const YAML::Node joints = root["joints"];
+    if (!joints || !joints.IsMap()) {
+        RCLCPP_ERROR(rclcpp::get_logger("arm_real_interfaces"), "标定文件缺少 'joints' 段（%s）。", path.c_str());
+        return false;
+    }
+
+    for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
+        const std::string name = "joint" + std::to_string(i + 1);
+        const YAML::Node entry = joints[name];
+        if (!entry || !entry.IsMap()) {
+            RCLCPP_ERROR(
+                rclcpp::get_logger("arm_real_interfaces"), "标定文件缺少 %s 的 dir/zero（%s）。", name.c_str(),
+                path.c_str());
+            return false;
+        }
+        try {
+            const double dir  = entry["dir"] ? entry["dir"].as<double>() : 0.0;
+            const double zero = entry["zero"] ? entry["zero"].as<double>() : 0.0;
+            // dir 只能是 ±1：其它值没有物理意义，且会让角度换算整体错位。
+            if (std::abs(std::abs(dir) - 1.0) > 1e-9) {
+                RCLCPP_ERROR(
+                    rclcpp::get_logger("arm_real_interfaces"), "%s 的 dir=%.6f 非法，只允许 +1 或 -1。",
+                    name.c_str(), dir);
+                return false;
+            }
+            if (!std::isfinite(zero)) {
+                RCLCPP_ERROR(rclcpp::get_logger("arm_real_interfaces"), "%s 的 zero 不是有限值。", name.c_str());
+                return false;
+            }
+            calib_dir_[i]  = dir;
+            calib_zero_[i] = zero;
+        } catch (const std::exception& error) {
+            RCLCPP_ERROR(
+                rclcpp::get_logger("arm_real_interfaces"), "解析 %s 失败：%s", name.c_str(), error.what());
+            return false;
+        }
+    }
+
+    const YAML::Node joint6 = root["joint6"];
+    if (joint6 && joint6["fixed"]) {
+        joint6_fixed_ = joint6["fixed"].as<double>(0.0);
+    }
+
+    return true;
 }
 
 hardware_interface::CallbackReturn ArmRealInterfaces::on_configure(const rclcpp_lifecycle::State& previous_state) {
@@ -224,9 +304,26 @@ hardware_interface::return_type ArmRealInterfaces::read(const rclcpp::Time& time
         return hardware_interface::return_type::ERROR;
     }
 
-    const auto joint_count = std::min(states_.size(), received_states_.size());
-    for (std::size_t i = 0; i < joint_count; ++i) {
-        states_[i] = received_states_[i];
+    // 有电机的前 5 轴：把固件原始角度换算到 URDF 坐标系（q_urdf = dir * (q_raw - zero)）。
+    // 力矩与角速度同步乘 dir，保证上行的 effort/velocity 与角度在同一套符号下。
+    const auto driven_count = std::min({states_.size(), received_states_.size(), kDrivenJointCount});
+    for (std::size_t i = 0; i < driven_count; ++i) {
+        const double direction = calib_dir_[i];
+        states_[i].position = direction * (received_states_[i].position - calib_zero_[i]);
+        states_[i].velocity = direction * received_states_[i].velocity;
+        states_[i].effort   = direction * received_states_[i].effort;
+        states_[i].acceleration = 0.0;
+    }
+
+    // joint6 无电机、机械锁死：固件那一槽永远是 0，既不能读也不能写。
+    // 这里直接把状态回写成指令值，让所有 6 维到位判据（reset/joint_traj）自洽；
+    // 代价是 /joint_states 里 joint6 是“镜像值”，不是实测——它不参与 5 维任务空间。
+    if (states_.size() > kDrivenJointCount && commands_.size() > kDrivenJointCount) {
+        const std::size_t last           = kDrivenJointCount;
+        states_[last].position           = commands_[last].position;
+        states_[last].velocity           = 0.0;
+        states_[last].effort             = 0.0;
+        states_[last].acceleration       = 0.0;
     }
 
     return hardware_interface::return_type::OK;
@@ -244,43 +341,104 @@ hardware_interface::return_type ArmRealInterfaces::write(const rclcpp::Time& tim
         return hardware_interface::return_type::ERROR;
     }
 
-    MCUTarget2Pack pack{};
-    pack.head = 0x5B;
+    MCUTargetPack pack{};
+    pack.pack_type = 0x01;
 
-    const auto joint_count = std::min(commands_.size(), kProtocolMotorCount);
-    for (std::size_t i = 0; i < joint_count; ++i) {
-        pack.motor[i].position = static_cast<float>(commands_[i].position);
-        pack.motor[i].velocity = static_cast<float>(commands_[i].velocity);
-        pack.motor[i].torque = static_cast<float>(commands_[i].effort);
-        pack.motor[i].kp = static_cast<float>(commands_[i].kp);
-        pack.motor[i].kd = static_cast<float>(commands_[i].kd);
-        pack.motor[i].ki = static_cast<float>(commands_[i].ki);
+    // 只发有电机的前 5 轴，且把 URDF 关节角换算回固件坐标系（write 是 read 的逆映射）：
+    //   q_raw = zero + dir * q_urdf
+    // kp/kd/ki 不上总线：固件用的是自己的双闭环 PID，增益硬编码在 Task_Init.c。
+    const auto driven_count = std::min(commands_.size(), kDrivenJointCount);
+    for (std::size_t i = 0; i < driven_count; ++i) {
+        const double direction = calib_dir_[i];
+        pack.joint[i].rad   = static_cast<float>(calib_zero_[i] + direction * commands_[i].position);
+        pack.joint[i].omega = static_cast<float>(direction * commands_[i].velocity);
+        pack.joint[i].torque = static_cast<float>(direction * commands_[i].effort);
     }
-    cdc_->send_struct(pack);
+
+    // joint[5] 保持 0（固件不读该槽）；气泵本次不接，恒发 0；worked 恒 0。
+    pack.air_pump = 0;
+    pack.worked   = 0;
+
+    // 发送超时收到 2 ms：实机控制周期 10 ms（100 Hz），留足余量。
+    // 发送失败不能当成功：固件会继续按上一帧目标跑（它没有指令看门狗），
+    // 所以这里直接报 ERROR，让 controller_manager 停控制器并停止下发新目标。
+    const int sent = cdc_->send(reinterpret_cast<const uint8_t*>(&pack), static_cast<int>(sizeof(pack)), 2);
+    if (sent != static_cast<int>(sizeof(pack))) {
+        static rclcpp::Clock throttle_clock(RCL_STEADY_TIME);
+        RCLCPP_ERROR_THROTTLE(
+            rclcpp::get_logger("arm_real_interfaces"), throttle_clock, 2000,
+            "USB CDC 发送失败（期望 %zu 字节，实际 %d），停止下发新目标。", sizeof(pack), sent);
+        return hardware_interface::return_type::ERROR;
+    }
+
     return hardware_interface::return_type::OK;
 }
 
 void ArmRealInterfaces::on_pack_praser(const uint8_t* data, int size) {
-    if (data == nullptr || size < static_cast<int>(sizeof(MCUStatePack))) {
+    if (data == nullptr || size <= 0) {
         return;
     }
 
-    MCUStatePack pack{};
-    std::memcpy(&pack, data, sizeof(pack));
-    if (pack.head != 0x4A) {
-        return;
+    // ---- 1. 追加到字节流缓冲 ----
+    // 77 字节的上行帧在 USB FS 上必然被拆成 64 + 13 两次回调，能一次收到整帧只是巧合。
+    if (static_cast<std::size_t>(size) > kRxBufferSize) {
+        data += size - static_cast<int>(kRxBufferSize);
+        size = static_cast<int>(kRxBufferSize);
     }
+    if (rx_len_ + static_cast<std::size_t>(size) > kRxBufferSize) {
+        const std::size_t drop = rx_len_ + static_cast<std::size_t>(size) - kRxBufferSize;
+        std::memmove(rx_buffer_.data(), rx_buffer_.data() + drop, rx_len_ - drop);
+        rx_len_ -= drop;
+    }
+    std::memcpy(rx_buffer_.data() + rx_len_, data, static_cast<std::size_t>(size));
+    rx_len_ += static_cast<std::size_t>(size);
 
-    std::lock_guard<std::mutex> lock(received_states_mutex_);
-    const auto joint_count = std::min(received_states_.size(), kProtocolMotorCount);
-    for (std::size_t i = 0; i < joint_count; ++i) {
-        received_states_[i].position = pack.motor[i].position;
-        received_states_[i].velocity = pack.motor[i].velocity;
-        received_states_[i].effort = pack.motor[i].torque;
-        // 协议里没有加速度字段，显式置 0，避免沿用上一帧的残留值。
-        received_states_[i].acceleration = 0.0;
+    // ---- 2. 定长切帧 ----
+    constexpr std::size_t kFrameSize = sizeof(MCUStatePack);
+    const auto plausible             = [](const MCUStatePack& candidate) {
+        for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
+            const MotorPack& motor = candidate.joint[i];
+            if (!std::isfinite(motor.rad) || !std::isfinite(motor.omega) || !std::isfinite(motor.torque)) {
+                return false;
+            }
+            // 量级检查：真实关节不会超过 ±100 rad 或 ±1000 rad/s。
+            if (std::fabs(motor.rad) > 100.0 || std::fabs(motor.omega) > 1000.0) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    while (rx_len_ >= kFrameSize) {
+        MCUStatePack pack{};
+        std::memcpy(&pack, rx_buffer_.data(), sizeof(pack));
+
+        if (pack.pack_type != 0x01 || !plausible(pack)) {
+            // 头不对或数值离谱 = 字节流错位。丢 1 字节重新对齐，不做更复杂的重传
+            // （USB bulk 本身不丢包，错位只可能来自半帧截断或外部干扰）。
+            std::memmove(rx_buffer_.data(), rx_buffer_.data() + 1, rx_len_ - 1);
+            --rx_len_;
+            continue;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(received_states_mutex_);
+            const auto joint_count = std::min(received_states_.size(), kDrivenJointCount);
+            for (std::size_t i = 0; i < joint_count; ++i) {
+                // 这里存**原始**固件角度，dir/zero 换算在 read() 里做。
+                received_states_[i].position = pack.joint[i].rad;
+                received_states_[i].velocity = pack.joint[i].omega;
+                received_states_[i].effort   = pack.joint[i].torque;
+                // 协议里没有加速度字段，显式置 0，避免沿用上一帧的残留值。
+                received_states_[i].acceleration = 0.0;
+            }
+            last_state_time_ = std::chrono::steady_clock::now();
+        }
+
+        std::memmove(rx_buffer_.data(), rx_buffer_.data() + kFrameSize, rx_len_ - kFrameSize);
+        rx_len_ -= kFrameSize;
     }
-    last_state_time_ = std::chrono::steady_clock::now();
+    // 循环退出时 rx_len_ 一定小于一帧，剩下的就是下一帧的残片。
 }
 
 } // namespace arm_controller

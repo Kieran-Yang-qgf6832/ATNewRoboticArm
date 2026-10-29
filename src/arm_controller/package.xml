@@ -26,6 +26,9 @@
   <depend>coal</depend>
   <depend>ament_index_cpp</depend>
   <depend>arm_model</depend>
+  <!-- 关节标定文件（joint_calibration.yaml）解析 -->
+  <depend>yaml-cpp</depend>
+  <depend>yaml_cpp_vendor</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -26,6 +26,7 @@ const Entry kStepTable[] = {
     {"idel", false, false, "idel"},            // 切回 idel 并锁定当前位置
     {"reset", true, false, "reset"},           // 复位；ResetState::enter 要求 last_state == idel
     {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
+    {"joint_console", true, false, "joint_traj"}, // 终端交互式关节运动；用户接管，要求 idel 进出
     {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹
     {"admittance_move", false, true, "admittance"}, // 导纳控制下的期望轨迹
     {"tool", false, false, nullptr},           // 末端执行器开关量

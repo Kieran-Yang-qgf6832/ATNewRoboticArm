@@ -27,6 +27,10 @@ find_package(robot_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(arm_model REQUIRED)
+# 关节标定文件解析（joint_calibration.yaml）。与 tasks 包同样的写法：
+# yaml_cpp_vendor 只提供定位信息，库本身仍需 find_package(yaml-cpp)。
+find_package(yaml_cpp_vendor REQUIRED)
+find_package(yaml-cpp REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 
 set(LIBCMAES_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
@@ -95,6 +99,7 @@ ament_target_dependencies(
   ament_index_cpp
   kdl_parser
   orocos_kdl
+  yaml_cpp_vendor
 )
 
 target_compile_definitions(arm_controller PRIVATE PINOCCHIO_WITH_COLLISION)
@@ -109,6 +114,7 @@ target_link_libraries(arm_controller
   pinocchio::pinocchio_collision
   PkgConfig::LIBUSB
   libcmaes::cmaes
+  yaml-cpp::yaml-cpp
 )
 
 install(TARGETS arm_controller
@@ -134,11 +140,21 @@ add_executable(arm_real_joint_count_test tools/arm_real_joint_count_test.cpp)
 target_link_libraries(arm_real_joint_count_test arm_controller)
 ament_target_dependencies(arm_real_joint_count_test rclcpp hardware_interface)
 
+# 实机单关节点动标定：确认 joint_calibration.yaml 里的 dir/zero。同样不安装。
+add_executable(joint_calibrate tools/joint_calibrate.cpp)
+target_link_libraries(joint_calibrate arm_controller)
+ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces)
+
 install(
   FILES
     arm_ctrl_plugin.xml
     sim_pid_plugin.xml
     arm_real_plugin.xml
+  DESTINATION share/${PROJECT_NAME}
+)
+
+# 实机关节标定文件：URDF 里通过 $(find arm_controller)/config/joint_calibration.yaml 引用。
+install(DIRECTORY config
   DESTINATION share/${PROJECT_NAME}
 )
 

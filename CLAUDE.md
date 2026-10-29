@@ -83,14 +83,22 @@ ArmController (controller_interface, 500 Hz)
 | 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
 | 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
 | 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 9 类步骤驱动控制器 |
+| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 10 类步骤驱动控制器 |
 | 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
 
-任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `sequences`。
-步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `cart_move` /
-`admittance_move` / `tool` / `teach` / `measure`），类型属性表在
+任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `joint_limits` / `sequences`。
+步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_console` /
+`cart_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
 `src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
 加新**任务**只改 YAML。
+
+`joint_console` 是唯一**交互式**步骤：用户**逐项**输入（一次一个数）——6 个关节角（度）→
+1 个执行时间（秒，回车取默认），步骤内部循环；输入途中回车取消本组、`exit` 结束、
+运动中 `stop` 立即切回 `idel`。每个角度先过 `joint_limits`（每关节限位，度）与
+`max_step_deg`（单步最大变化量）校验。它的 stdin 由一条独立读者线程
+喂队列、主线程照常自旋，否则等待期间 `/joint_states` 会停在旧值（首点不一致即跳变）。
+`stop` 依赖控制器侧改动：`CartTrajState` / `JointTrajState` 的 `check_switch()` 在运动中也
+响应 `exp_state=idel`（其余目标仍要求轨迹走完），否则 `stop` 只能等轨迹跑完才生效。
 
 任务层通过 `TaskContext` 与控制器交互：
 - `exp_state` 参数服务 → 切换控制器工作状态
@@ -212,8 +220,8 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 7 条序列只用到
-  `reset` / `idel` / `joint_move` / `cart_move` / `tool` / `wait` 六类步骤。
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 8 条序列只用到
+  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `tool` / `wait` 七类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
   2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。

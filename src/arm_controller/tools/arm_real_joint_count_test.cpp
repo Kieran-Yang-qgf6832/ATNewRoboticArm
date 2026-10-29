@@ -127,7 +127,9 @@ int main(int argc, char** argv) {
     {
         const auto outcome = run_case(6, "arm_joint_");
         all_ok &= expect(outcome.init_ok, "on_init 成功");
-        all_ok &= expect(outcome.state_interfaces == 18, "导出 18 个状态接口（6 关节 x 3）");
+        // 每关节 4 个状态接口：position / velocity / effort / acceleration
+        // （acceleration 恒 0，见 docs/bugs.md O8；早期版本只有 3 个，这里同步更新）。
+        all_ok &= expect(outcome.state_interfaces == 24, "导出 24 个状态接口（6 关节 x 4）");
         all_ok &= expect(outcome.command_interfaces == 36, "导出 36 个命令接口（6 关节 x 6）");
         all_ok &= expect(outcome.first_joint_name == "arm_joint_1", "首个关节名取自 URDF（实际：" + outcome.first_joint_name + "）");
     }

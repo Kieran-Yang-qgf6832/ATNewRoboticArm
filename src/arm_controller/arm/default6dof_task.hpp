@@ -29,4 +29,26 @@ public:
     bool error_map(const Eigen::VectorXd& target,
                    const Eigen::VectorXd& current,
                    Eigen::VectorXd* error) override;
+
+    /**
+     * @brief 切换 5 维（只控位置 + 工具指向）模式
+     *
+     * 打开后：
+     * - @ref error_map 把旋转误差投影到「垂直于工具轴」的平面（去掉滚转分量）；
+     * - @ref jacobian_map 把姿态雅可比的旋转行左乘投影矩阵 @c I - zzᵀ。
+     * 效果是 joint6（绕工具轴）那一列精确为 0，LM 步长在那一维恒为 0，
+     * 因此 joint6 停在初值不动——正是实机上 joint6 没有电机的行为。
+     *
+     * @param roll_free true = 5 维任务
+     * @note 工具轴取自最近一次 @ref position_map 传入的位姿，求解器在每次
+     *       误差/雅可比求值前都会先调用它，因此缓存始终与当前迭代点一致。
+     */
+    void set_roll_free(bool roll_free) override;
+
+    bool roll_free() const override { return roll_free_; }
+
+private:
+    bool roll_free_{false};
+    /// 当前迭代点处、表达在基座系里的工具 z 轴（单位向量）
+    Eigen::Vector3d tool_axis_{Eigen::Vector3d::UnitZ()};
 };

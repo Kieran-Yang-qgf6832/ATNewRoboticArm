@@ -74,6 +74,16 @@ namespace arm_controller {
  */
 constexpr double kJointLimitFaultSlack = 0.05;
 
+namespace {
+
+/// 实机模式下不可用的状态：teach 依赖「kp = 0 + 纯阻尼」，而 MCU 只跑自己的位置环；
+/// measure 需要关节加速度与 joint6 激励，而 MCU 既不上报加速度、joint6 也没有电机。
+bool state_unavailable_on_real(const std::string& state_name) {
+    return state_name == "teach_pendant" || state_name == "measure";
+}
+
+} // namespace
+
 /**
  * @brief 构造函数
  *
@@ -164,6 +174,11 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
     auto_declare<double>("measure_traj_collision_safe_distance", 0.0);
     auto_declare<double>("measure_traj_ground_clearance", 0.0);
+    // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
+    // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
+    auto_declare<int>("task_dim", 6);
+    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态。
+    auto_declare<bool>("real_mode", false);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("exp_state", "idel");
@@ -196,6 +211,20 @@ controller_interface::CallbackReturn ArmController::on_init() {
         RCLCPP_ERROR(node->get_logger(), "Failed to initialize arm controller FSM: %s", error.what());
         return controller_interface::CallbackReturn::ERROR;
     }
+
+    // 任务空间维度开关：5 维时把绕工具轴的滚转从误差/雅可比里投影掉（见 TaskMapping）。
+    int task_dim = 6;
+    node->get_parameter("task_dim", task_dim);
+    if (task_dim != 5 && task_dim != 6) {
+        RCLCPP_ERROR(node->get_logger(), "task_dim=%d 非法，只允许 5 或 6。", task_dim);
+        return controller_interface::CallbackReturn::ERROR;
+    }
+    fsm_factory->task_map_->set_roll_free(task_dim == 5);
+
+    node->get_parameter("real_mode", real_mode_);
+    RCLCPP_INFO(
+        node->get_logger(), "task_dim=%d（%s），real_mode=%s", task_dim,
+        task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿", real_mode_ ? "true" : "false");
 
     // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
     // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。
@@ -233,9 +262,18 @@ controller_interface::CallbackReturn ArmController::on_init() {
             auto name = param.get_name();
             if (name == "exp_state") {
                 // 期望状态名允许热更新，直接写入状态机工厂，由各状态的 check_switch() 消费。
-                fsm_factory->exp_state_name = param.as_string();
-            } else if (name == "joints" || name == "command_interface_prefix") {
-                // 接口相关参数在 on_init() 后固定，禁止再修改。
+                const std::string requested = param.as_string();
+                if (real_mode_ && state_unavailable_on_real(requested)) {
+                    // 物理上不成立的状态：拒绝而不是“进去但行为不对”。
+                    result.successful = false;
+                    result.reason     = requested + " is unavailable in real mode (MCU has no impedance gains / "
+                                                 "acceleration feedback, and joint6 has no motor)";
+                    return result;
+                }
+                fsm_factory->exp_state_name = requested;
+            } else if (name == "joints" || name == "command_interface_prefix" || name == "task_dim"
+                       || name == "real_mode") {
+                // 接口与任务空间维度在 on_init() 后固定，禁止再修改。
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";
                 return result;
@@ -388,6 +426,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 读取初始期望状态并写入状态机工厂，作为状态机启动后的目标状态。
     std::string exp_state;
     node->get_parameter("exp_state", exp_state);
+    if (real_mode_ && state_unavailable_on_real(exp_state)) {
+        // YAML 里配错时不能静默降级成别的行为，直接拒绝并把期望状态拉回 idel。
+        RCLCPP_ERROR(
+            node->get_logger(), "实机模式不支持 exp_state=%s（MCU 无阻抗增益/加速度反馈，joint6 无电机），已改为 idel。",
+            exp_state.c_str());
+        exp_state = "idel";
+    }
 
     fsm_factory->exp_state_name = exp_state;
     return controller_interface::CallbackReturn::SUCCESS;
