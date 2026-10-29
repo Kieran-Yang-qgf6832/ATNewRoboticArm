@@ -66,6 +66,10 @@ Eigen::Matrix3d right_jacobian(const Eigen::Vector3d& rho) {
 
 Default6DofTaskSpaceMapping::Default6DofTaskSpaceMapping() = default;
 
+void Default6DofTaskSpaceMapping::set_roll_free(bool roll_free) {
+    roll_free_ = roll_free;
+}
+
 bool Default6DofTaskSpaceMapping::position_map(const Eigen::VectorXd& joint_pos,
                                                const Eigen::Isometry3d& pose,
                                                Eigen::VectorXd* task_position) {
@@ -78,6 +82,14 @@ bool Default6DofTaskSpaceMapping::position_map(const Eigen::VectorXd& joint_pos,
         return false;
     }
     task_position->head<3>() = pose.translation();
+
+    // 缓存工具轴（基座系）。5 维模式下误差与雅可比都要靠它做投影，
+    // 求解器在求误差/雅可比之前一定先调用本函数，所以缓存与当前迭代点是同步的。
+    tool_axis_ = pose.linear() * Eigen::Vector3d::UnitZ();
+    if (!tool_axis_.allFinite() || tool_axis_.norm() < 1e-9) {
+        return false;
+    }
+    tool_axis_.normalize();
 
     Eigen::AngleAxisd rotation(pose.linear());
     if (std::abs(rotation.angle()) < 1e-12) {
@@ -109,7 +121,19 @@ bool Default6DofTaskSpaceMapping::jacobian_map(const Eigen::VectorXd& joint_pos,
     // = +J_r(ρ_e)·J_geom_rot。少了这一步等于默认 J_r = I，只在小误差下成立；
     // 误差接近 π 时线性化失准，逆解会停滞在判据之上（见 docs/bugs.md O5）。
     const Eigen::Matrix3d rotation_error_jacobian = right_jacobian(error.tail<3>());
-    task_jacobian->bottomRows<3>()                = rotation_error_jacobian * jacobian.bottomRows<3>();
+    // 必须是动态尺寸：right_jacobian 是 3x3，乘上 3xN 的旋转行得到 3xN，
+    // 写成 Matrix3d 会在 N != 3 时触发 Eigen 的 resize 断言（进程直接 abort）。
+    const Eigen::MatrixXd rotation_rows = rotation_error_jacobian * jacobian.bottomRows<3>();
+
+    if (roll_free_) {
+        // 5 维任务：P = I - z·zᵀ 把绕工具轴的旋转行投影掉。
+        // 末端回转关节那一列经投影后精确为 0，LM 步长在该维恒为 0，
+        // 于是 joint6 停在初值——与实机「无电机、机械锁死」的物理行为一致。
+        const Eigen::Matrix3d projector = Eigen::Matrix3d::Identity() - tool_axis_ * tool_axis_.transpose();
+        task_jacobian->bottomRows<3>()  = projector * rotation_rows;
+    } else {
+        task_jacobian->bottomRows<3>() = rotation_rows;
+    }
 
     return task_jacobian->allFinite();
 }
@@ -137,6 +161,12 @@ bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target,
         error->tail<3>().setZero();
     } else {
         error->tail<3>() = relative_rotation.angle() * relative_rotation.axis();
+    }
+
+    if (roll_free_) {
+        // 5 维任务：只保留「垂直于工具轴」的旋转误差，绕工具轴的滚转不再参与求解。
+        // 位置 3 维不变，姿态部分实际只张成 2 维。
+        error->tail<3>() -= error->tail<3>().dot(tool_axis_) * tool_axis_;
     }
 
     return error->allFinite();

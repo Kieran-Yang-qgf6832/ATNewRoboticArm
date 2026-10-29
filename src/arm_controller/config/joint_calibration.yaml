@@ -1,0 +1,26 @@
+# 实机关节标定表（由 ArmRealInterfaces 在 on_init 读取）
+#
+# 换算关系：
+#   q_urdf = dir * (q_raw - zero)
+#   q_raw  = zero + dir * q_urdf          （下发时用这条逆映射）
+#
+# q_raw 是固件上报的弧度值，它已经包含固件内部的 inv_motor 与 pos_offset，
+# 与 URDF 的 SolidWorks 零位没有任何共同基准，必须现场实测：
+#   1. 用 joint_calibrate 工具逐关节点动，确认 dir（+1 / -1）；
+#   2. 把机械臂摆到 URDF 的零位，读 /joint_states 得到 q_raw，令 zero = q_raw。
+#
+# 下面全部是占位值（dir = 1、zero = 0，等同直接透传）。未标定完之前不要下发
+# 绝对关节角目标，否则会在错误方向上满力矩运动。
+
+joints:
+  joint1: {dir: -1.0, zero: 0.0}
+  joint2: {dir:  1.0, zero: 0.0}   # 固件 joint[2] 的 inv_motor = -1，符号待实机确认
+  joint3: {dir: -1.0, zero: 0.0}
+  joint4: {dir:  1.0, zero: 0.0}
+  joint5: {dir:  1.0, zero: 0.0}
+
+# joint6 无电机、机械锁死：固件那一槽既不读也不写。
+# 上位机把它的状态回写成指令值（见 ArmRealInterfaces::read），这里只记录
+# 一个名义固定角，方便日后加装电机时对照。
+joint6:
+  fixed: 0.0

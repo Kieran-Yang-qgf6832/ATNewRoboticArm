@@ -82,6 +82,31 @@ private:
     /// 执行关节空间两点轨迹（joint_move）
     bool run_joint_move(const Step& step, std::string* error);
 
+    /**
+     * @brief 执行终端交互式关节运动（joint_console）
+     *
+     * 在步骤内部循环读终端：**逐项**输入，一次一个数——先 6 个关节角（**度**），
+     * 再 1 个执行时间（秒，回车取默认值）。校验通过后以当前实测关节角为起点下发
+     * @c JointTrajCmd。输入途中回车取消本组，@c exit 结束步骤；运动过程中输入
+     * @c stop 会立刻把控制器切回 @c idel（在当前位置保持）。
+     *
+     * @param step  步骤；@c duration 作为缺省执行时间（0 表示用节点参数）
+     * @param error 输出：失败原因
+     * @return true 正常结束（用户主动退出）；运动失败或控制器离开 joint_traj 时返回 false
+     */
+    bool run_joint_console(const Step& step, std::string* error);
+
+    /**
+     * @brief 确保控制器处于 @c joint_traj 且轨迹阶段已就绪
+     *
+     * 该步骤只在开头切一次状态，之后每轮发送前复用本函数：@c stop 中断与控制器异常
+     * 退回 @c idel 都靠它恢复，用户不需要记额外的恢复命令。
+     *
+     * @param error 输出：失败原因
+     * @return true 控制器已在 joint_traj
+     */
+    bool ensure_joint_traj(std::string* error);
+
     /// 执行任务空间两点轨迹（cart_move / admittance_move）
     bool run_task_space_move(const Step& step, const std::string& state_name, std::string* error);
 
@@ -129,6 +154,14 @@ private:
     double step_timeout_{30.0};                              ///< 单步骤超时（秒）
     double idel_hold_{0.3};                                  ///< 切到 idel 后的稳定时长（秒）
     double settle_duration_{0.3};                            ///< 切入运动状态后的稳定时长（秒）
+
+    /// joint_console 缺省执行时间（秒），仅在步骤未写 duration 时使用
+    double console_default_duration_{3.0};
+    /// joint_console 单步允许的最大关节变化量（弧度）；0 表示不限制
+    double console_max_step_{0.0};
+    /// joint_console 每关节下限/上限（弧度）；未配置的关节取 ±inf，即不检查
+    std::vector<double> joint_min_;
+    std::vector<double> joint_max_;
     /**
      * @brief 切换状态后的稳定期（秒）
      *

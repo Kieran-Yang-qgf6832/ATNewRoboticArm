@@ -60,16 +60,41 @@ private:
     static constexpr std::size_t kStateInterfaceCount = 4;
     static constexpr std::size_t kCommandInterfaceCount = 6;
 
+    /// 固件实际驱动的电机数。MCU 通信帧固定 6 槽，但第 6 槽既不应答也不驱动
+    /// （实机末端回转 joint6 无电机、机械锁死）。上位机对它的处理见 read()。
+    static constexpr std::size_t kDrivenJointCount = 5;
+
+    /// 接收缓冲：USB FS bulk 上限 64 字节，77 字节的状态帧必然被拆包，
+    /// 这里按字节流累加后再切帧（见 on_pack_praser）。
+    static constexpr std::size_t kRxBufferSize = 256;
+
     void on_pack_praser(const uint8_t* data, int size);
+
+    /// 从 joint_calibration.yaml 载入 dir/zero（joint1..joint5）与 joint6 的固定角。
+    bool load_calibration(const std::string& path);
 
     // 关节名在 on_init 中从 URDF 的 <ros2_control> 段读取，不再硬编码。
     std::vector<std::string> joint_names_;
     std::vector<JointStateData> states_;
+    // 固件上报的**原始**角度（未做 dir/zero 换算），换算在 read() 里做。
     std::vector<JointStateData> received_states_;
     std::vector<JointCommandData> commands_;
     std::mutex received_states_mutex_;
     // 最近一次收到状态包（或回环刷新）的时刻；read() 用它判断是否掉线。
     std::chrono::steady_clock::time_point last_state_time_{};
+
+    // ---- 关节标定：q_urdf = dir * (q_raw - zero) ----
+    // 固件上报的角度零位是它自己上电标定的物理姿态，与 URDF 的 SolidWorks 零位无关；
+    // 方向也可能相反（固件 joint[2] 的 inv_motor = -1）。这两组值必须现场标定，
+    // 缺省为 dir = 1、zero = 0（等同于直接透传）。
+    std::array<double, kDrivenJointCount> calib_dir_{{1.0, 1.0, 1.0, 1.0, 1.0}};
+    std::array<double, kDrivenJointCount> calib_zero_{{0.0, 0.0, 0.0, 0.0, 0.0}};
+    // joint6 无电机：它的状态位由指令回写（见 read()），此值仅用于日志与上电占位。
+    double joint6_fixed_{0.0};
+
+    // 接收字节流缓冲与已填充长度。
+    std::array<uint8_t, kRxBufferSize> rx_buffer_{};
+    std::size_t rx_len_{0};
 
     std::unique_ptr<CDCTrans> cdc_;
     std::shared_ptr<std::thread> cdc_event_thread_;
