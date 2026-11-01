@@ -6,25 +6,31 @@
 #
 # 步骤类型说明见 tasks.yaml 顶部；measure 只能从 idel 进出，所以首尾各留一步。
 #
-# 关于 duration：它是**任务层等待的上界**，不是测量时长本身。控制器侧 measure
-# 状态的总耗时约为
-#     measure_move_to_start_duration + measure_trajectory_period x repeat_cnt
-# （默认 3 + 10 x 1 = 13 s，另加激励轨迹的生成时间）。测量结束后状态停在
-# HoldingEnd 等 idel 请求，所以 duration 略大于实际测量即可：取小了不会丢数据，
-# 只是让随后的 wait_for_idel 多等一会儿；取大了则是空等。
-# O12 之后激励轨迹生成实测约 50 s（1500 次 CMA-ES 评估 + 碰撞约束），
-# arm_measure_sim.launch.py 的 step_timeout 默认已从 30 s 提到 240 s；
-# 如果自己写 launch 或直接跑 task_runner，记得把 step_timeout 放大。
-# 改了 ros2_controller.yaml 里的 measure_* 参数后记得同步这里。
+# 关于 duration 与超时（2026-10-31 实测更正）：
+#   - duration **不是**测量总超时，只是任务层「跑多久后请求 idel」的时刻。到点后任务层
+#     会写 exp_state=idel，控制器只在 measure 走到 HoldingEnd 才接受，期间测量照跑、数据不丢。
+#   - 真正会掐断测量的是 task_runner 的 step_timeout（从发出 idel 请求时开始计）。
+#     控制器侧总耗时 = 激励轨迹生成 + measure_move_to_start_duration
+#                      + measure_trajectory_period x repeat_cnt
+#   - 生成时间是 CMA-ES（默认 1500 次评估，耗时 ≈ 采样点数 x 评估次数），本机实测：
+#       T=10 s（每周期 1000 点）生成 53 s，加移动 3 s + 轨迹 10 s ≈ 66 s，落盘 4952 行；
+#       T>=20 s 时 eval_dt = max(0.01, T/2000) 让每周期封顶 2000 点 → 生成约 106 s，
+#       且不再随 T 继续增长（T=120 的总耗时 ≈ 106 + 3 + 120 ≈ 229 s）。
+#   - 结论：launch 的 step_timeout 默认 300 s（≈2.3 倍余量，覆盖到 T=120 的 139 s 需求）。
+#     手动跑 task_runner 时没有 launch 的默认值，必须自己传。换更慢的机器、或把
+#     measure_traj_max_fevals 调大时要按比例上调。
+#   - period / repeat_cnt / move_to_start / seed / csv 这 5 个参数**由 launch 覆盖**
+#     （见 arm_measure_sim.launch.py 文件头）：走该 launch 时改 ros2_controller.yaml 里的
+#     同名项无效，必须用 launch 参数（trajectory_period:=...）。其余 measure_* 只认 YAML。
 
 sequences:
   measure_only:
     steps:
       # 控制器被激活时会按 ros2_controller.yaml 的 exp_state: reset 先做一次启动复位，
       # 所以不能一上来就切 measure。先用 idel 步骤等它回到空闲——wait_for_idel 会一直
-      # 等到 current_state 真的变成 idel（step_timeout 默认 30 s），复位后的零位就是
-      # 本次测量的起点。少了这一步，紧跟 spawner 之后启动的 task_runner 会在控制器
+      # 等到 current_state 真的变成 idel（受 step_timeout 约束，launch 默认 300 s），
+      # 复位后的零位就是本次测量的起点。少了这一步，紧跟 spawner 之后启动的 task_runner 会在控制器
       # 仍处于 reset 时被拒绝（reset/measure 都要求从 idel 进入）。
       - {type: idel}
-      - {type: measure, duration: 20.0}
+      - {type: measure, duration: 90.0}
       - {type: idel}

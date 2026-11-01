@@ -12,28 +12,46 @@
                               （idel -> measure -> idel），跑完即退出并关掉本 launch
   6. rviz2                  ：由 show_rviz 控制，默认关（测量不需要界面）
 
+日志策略（本 launch 统一收口，避免终端刷屏）：
+  - 启动/就绪状态只在**全部控制器激活后**汇报一次，不再逐节点打中间状态；
+  - robot_state_publisher 的日志压到 ERROR：仿真时间偶发回跳时它会对每帧
+    /joint_states 打一条 "Moved backwards in time"，一条信息重复上千次；
+  - task_runner 的默认日志级别压到 ERROR，仅保留它自己的 INFO/WARN/ERROR，
+    用于屏蔽 tf2_buffer 的 "Detected jump back in time" 同类刷屏。
+  这两类信息都是「时间基准噪声」，不影响测量；真正的故障由 task_runner /
+  arm_controller 自己一次性上报。
+
 用法：
     # 完整测量：起仿真 + 跑序列 + 落盘，结束后 launch 自动退出
     ros2 launch launch_pack arm_measure_sim.launch.py
 
-    # 只起仿真，测量另开终端手动触发（便于反复测量、换参数）
+    # 只起仿真，测量另开终端手动触发（便于反复测量、换参数；手动跑要自己传 step_timeout）
     ros2 launch launch_pack arm_measure_sim.launch.py run_measure:=false
     ros2 run tasks task_runner --ros-args \\
         -p tasks_config:=$(ros2 pkg prefix tasks)/share/tasks/config/measure.yaml \\
-        -p task_sequence:=measure_only -p use_sim_time:=true -p exit_when_idle:=true
+        -p task_sequence:=measure_only -p use_sim_time:=true -p exit_when_idle:=true -p step_timeout:=300.0
 
     # 换输出位置 / 需要界面
     ros2 launch launch_pack arm_measure_sim.launch.py csv_file_path:=/tmp/foo.csv show_rviz:=true
 
     # 迭代辨识：用上一轮辨识出的 URDF 生成激励轨迹，测量 120 s
+    # （本机 T=120 总耗时约 229 s，默认 300 s 够用；慢机器再往上加）
     ros2 launch launch_pack arm_measure_sim.launch.py \\
         controller_urdf_path:=$PWD/identified_iter_30.urdf \\
         trajectory_period:=120.0 trajectory_repeat_cnt:=1 \\
-        csv_file_path:=$PWD/identify_loop2/meas_iter_01.csv step_timeout:=600.0
+        csv_file_path:=$PWD/identify_loop2/meas_iter_01.csv
 
 输出：控制器参数 measure_csv_file_path，默认 <项目根目录>/measured_for_identification.csv。
-      该参数由控制器在**构造阶段**读取，所以只能用 launch 传入；只改
-      ros2_controller.yaml 必须重启控制器才生效（docs/bugs.md C6）。
+
+@warning 本 launch 会**覆盖** ros2_controller.yaml 里的 5 个 measure 参数：
+      measure_trajectory_period / measure_trajectory_repeat_cnt /
+      measure_move_to_start_duration / measure_trajectory_seed / measure_csv_file_path。
+      它们取自同名 launch 参数，且补充 params 文件在 ParameterFile(controller_yaml)
+      **之后**加载，同名参数以后者为准。所以「改了 YAML 的 period 却没生效」不是 bug：
+      走本 launch 就必须用 launch 参数（trajectory_period:=20.0）。其余 measure 参数
+      （软限位 / 速度 / 谐波 / 评估次数 / 力矩 / 碰撞 / 箱式 / 冻结关节 / 采样率）
+      launch 不覆盖，仍然只认 YAML。所有 measure_* 都在控制器构造阶段读取，
+      运行中 ros2 param set 无效（docs/bugs.md C6）。
 
 后续离线辨识：
     ros2 run parameter_identify identify_arm \\
@@ -45,8 +63,9 @@
 
 @note controller_urdf_path 只改**控制器内部模型**（激励轨迹生成、动力学计算），
       被控对象仍是 robot_description 里的 arm_model URDF——否则就没有"真值"可辨识了。
-      注意 measure.yaml 里的 duration 必须 >= move_to_start_duration + period x repeat_cnt
-      （另加激励轨迹生成时间），否则任务层会提前请求 idel。
+      配时关系：measure.yaml 的 duration 只是任务层「开始请求 idel」的时刻，不是超时；
+      控制器在激励结束（HoldingEnd）前不接受 idel，真正的上界是本 launch 的 step_timeout。
+      必须满足「生成 + move_to_start + period x repeat_cnt ≲ duration + step_timeout」。
 
 @note 2026-10-10 重写：旧版依赖已删除的 parameter_measure 包、且没有 spawn
       joint_state_broadcaster，实际不可用。参数辨识现在由控制器 ParamterMeasureState
@@ -70,7 +89,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction, RegisterEventHandler, Shutdown
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -173,6 +192,8 @@ def _launch_setup(context):
         parameters=[robot_description, {"use_sim_time": use_sim_time}],
         remappings=robot_description_remap,
         output="screen",
+        # 见文件头「日志策略」：时间回跳时该节点的 WARN 会按帧刷屏，压到 ERROR。
+        ros_arguments=["--log-level", "robot_state_publisher:=ERROR"],
     )
 
     # 参数源顺序即优先级：后面的同名参数覆盖前面的。补充文件必须放在
@@ -250,6 +271,9 @@ def _launch_setup(context):
         ],
         condition=IfCondition(LaunchConfiguration("run_measure")),
         on_exit=Shutdown(),
+        # 默认级别压到 ERROR，只保留 task_runner 自己的日志：屏蔽 tf2_buffer 的
+        # "Detected jump back in time" 刷屏，同时不丢任务层的失败上报。
+        ros_arguments=["--log-level", "ERROR", "--log-level", "task_runner:=INFO"],
     )
 
     rviz2 = Node(
@@ -264,28 +288,42 @@ def _launch_setup(context):
     load_joint_state_broadcaster = RegisterEventHandler(
         OnProcessStart(
             target_action=mujoco,
-            on_start=[
-                LogInfo(msg="MuJoCo ros2_control node started, spawning joint_state_broadcaster"),
-                joint_state_broadcaster,
-            ],
+            on_start=[joint_state_broadcaster],
         )
     )
 
     load_controller_chain = RegisterEventHandler(
         OnProcessExit(
             target_action=joint_state_broadcaster,
-            on_exit=[
-                LogInfo(msg="joint_state_broadcaster spawned, spawning arm controller chain"),
-                controller_chain,
-            ],
+            on_exit=[controller_chain],
         )
     )
 
-    run_measure_task = RegisterEventHandler(
+    # 就绪汇报只打一次：等 controller_chain 退出（两个控制器都已激活）后才输出。
+    # 中间过程不再逐节点打状态，避免「启动中」日志与就绪日志交替刷屏。
+    system_ready = RegisterEventHandler(
         OnProcessExit(
             target_action=controller_chain,
             on_exit=[
-                LogInfo(msg="controllers active, running the measure_only task sequence"),
+                LogInfo(
+                    condition=IfCondition(LaunchConfiguration("run_measure")),
+                    msg=[
+                        "[READY] 仿真与控制器已就绪：MuJoCo + joint_state_broadcaster + "
+                        "sim_pid_controller/arm_controller 已激活；开始执行 measure_only 序列（csv=",
+                        LaunchConfiguration("csv_file_path"),
+                        "，period=",
+                        LaunchConfiguration("trajectory_period"),
+                        "s，repeat=",
+                        LaunchConfiguration("trajectory_repeat_cnt"),
+                        "，seed=",
+                        LaunchConfiguration("trajectory_seed"),
+                        "），测量完成后本 launch 自动退出。",
+                    ],
+                ),
+                LogInfo(
+                    condition=UnlessCondition(LaunchConfiguration("run_measure")),
+                    msg="[READY] 仿真与控制器已就绪；run_measure=false，未自动执行测量，等 task_runner 手动触发。",
+                ),
                 task_runner,
             ],
         )
@@ -296,7 +334,7 @@ def _launch_setup(context):
         mujoco,
         load_joint_state_broadcaster,
         load_controller_chain,
-        run_measure_task,
+        system_ready,
         rviz2,
     ]
 
@@ -361,11 +399,15 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "step_timeout",
-                # O12 之前默认 30 s。加碰撞约束后激励轨迹生成（1500 次 CMA-ES 评估，
-                # 每个采样点做 AABB 预筛 + 带安全裕度的碰撞查询）实测约 50 s，再加上
-                # move_to_start 3 s 与一个轨迹周期 10 s，30 s 一定会误判失败。
-                default_value="240.0",
-                description="任务层单步骤超时（秒）；默认已按 O12 的生成耗时放大，长测量再自行调大",
+                # 2026-10-31 实测（ThinkBook 16 G6，6 关节全开 + 碰撞约束，seed=0，T=10 s）：
+                # 生成 53.4 s + move_to_start 3 s + 执行 10 s ≈ 66 s，落盘 4952 样本。
+                # 生成耗时 ≈ 采样点数 × 评估次数：T=10 每周期 1000 点；T ≥ 20 时
+                # eval_dt = max(0.01, T/2000) 使点数封顶 2000 → 生成约 106 s（不再随 T 增长）。
+                # 任务层在 duration(90 s) 之后才开始等 idel，所以 T=120 只需约 139 s。
+                # 取 300 s（≈2.3 倍余量）覆盖到 T=120；换更慢的机器或加大 max_fevals 时再上调。
+                # 旧值 900 s 来自另一台机器（当时实测生成 570–660 s），在本机上过于浪费。
+                default_value="300.0",
+                description="任务层单步骤超时（秒）；默认已覆盖本机实测的生成+执行耗时，更长测量再自行调大",
             ),
             DeclareLaunchArgument(
                 "controller_manager_timeout",

@@ -15,10 +15,17 @@
                               admittance/teach_pendant/measure）；tasks 通过 exp_state 参数
                               与各轨迹话题驱动它
   6. rviz2                  ：由 show_rviz 控制是否启动
+  7. ros2 bag record        ：把**上位机下发的关节轨迹指令**与 /joint_states 录成 bag
+                              （record_bag:=false 可关；默认目录见 bag_path）
 
 用法：
     ros2 launch launch_pack arm_controller_test_sim.launch.py
     ros2 launch launch_pack arm_controller_test_sim.launch.py show_rviz:=false
+    # 不录 bag（例如只是快速冒烟）
+    ros2 launch launch_pack arm_controller_test_sim.launch.py record_bag:=false
+    # 指定 bag 目录（目录必须尚不存在，否则 ros2 bag record 直接报错）
+    ros2 launch launch_pack arm_controller_test_sim.launch.py \
+        bag_path:=$HOME/ros2_bag/my_run
     # 起好之后另开终端跑任务链（task_sequence 是**序列名**，不是步骤列表）
     ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="ready_then_cart"
     # 参数辨识用专门的一份配置（见 arm_measure_sim.launch.py）
@@ -27,19 +34,37 @@
 
 @note 状态：可用。依赖（arm_model / arm_controller / mujoco_ros2_control / launch_pack）
       均在本工作区；控制器参数取自 config/ros2_controller.yaml。
+@note bag 录制默认**开启**，输出到 @c ~/ros2_bag/arm_sim_<启动时间戳>：落地后可以直接
+      @c ros2 bag info 查看，或 @c ros2 bag play <dir> --clock 回放（bag 内时间戳用仿真
+      时间，见下面 ros2 bag record 的 --use-sim-time）。Ctrl+C 关 launch 时 rosbag2 收
+      SIGINT 正常收尾，metadata.yaml 会写完整。
 @warning mujoco 进程退出会触发整条 launch 关闭（on_exit=Shutdown），RViz 也会一起退。
 """
 
 import os
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    LogInfo,
+    RegisterEventHandler,
+    Shutdown,
+)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue, ParameterFile
+
+# 录制的话题：上位机（tasks/task_runner、joint_calibrate 等）下发的关节轨迹指令，
+# 外加 /joint_states 作为实际关节响应，方便事后对比「指令 vs 实际」。
+# 需要别的模式时直接在下面追加：arm_cart_traj（CartTrajCmd）、arm_servo（ServoCtrlCmd）、
+# arm_admittance（AdmittanceCmd）。此刻还没有发布者的话题不会报错——rosbag2 会持续
+# discovery，发布者一出现就自动订阅（空录退出也是正常的 0）。
+BAG_TOPICS = ["/arm_joint_traj", "/joint_states"]
 
 
 def generate_launch_description():
@@ -114,6 +139,21 @@ def generate_launch_description():
         "service_call_timeout",
         default_value="60",
         description="Seconds to wait for controller manager service responses",
+    )
+
+    # ros2 bag 记录：默认开启，路径带启动时间戳，避免同名目录让 record 直接失败。
+    record_bag_arg = DeclareLaunchArgument(
+        "record_bag",
+        default_value="true",
+        description="是否用 ros2 bag 记录上位机下发的关节指令与 /joint_states",
+    )
+    bag_path_arg = DeclareLaunchArgument(
+        "bag_path",
+        default_value=os.path.join(
+            os.path.expanduser("~/ros2_bag"),
+            "arm_sim_" + time.strftime("%Y%m%d_%H%M%S"),
+        ),
+        description="bag 输出目录（必须尚不存在，默认 ~/ros2_bag/arm_sim_<时间戳>）",
     )
 
     # 用 xacro 展开 URDF 里的 $(find arm_model)：URDF 自身是纯 URDF，但 <ros2_control>
@@ -195,6 +235,32 @@ def generate_launch_description():
         output="screen",
     )
 
+    # 录制进程与 launch 同生命周期：Ctrl+C 时 ExecuteProcess 收到 SIGINT，rosbag2 会
+    # 把缓存写完并落 metadata.yaml，所以不需要额外的收尾动作。
+    # --use-sim-time：bag 里的时间戳取仿真时间（/clock），回放时 ros2 bag play --clock
+    # 才能和 MuJoCo 的时间轴对齐；首帧 /clock 到达前的消息不会写盘。
+    # --disable-keyboard-controls：launch 下没有交互终端，别让它去抢按键/信号。
+    bag_record = ExecuteProcess(
+        cmd=[
+            FindExecutable(name="ros2"),
+            "bag",
+            "record",
+            "--output",
+            LaunchConfiguration("bag_path"),
+            "--use-sim-time",
+            "--topics",
+            *BAG_TOPICS,
+            "--disable-keyboard-controls",
+        ],
+        condition=IfCondition(LaunchConfiguration("record_bag")),
+        output="screen",
+    )
+
+    bag_hint = LogInfo(
+        msg=["[bag] 录制上位机关节指令到 ", LaunchConfiguration("bag_path")],
+        condition=IfCondition(LaunchConfiguration("record_bag")),
+    )
+
     load_joint_state_broadcaster = RegisterEventHandler(
         OnProcessStart(
             target_action=mujoco,
@@ -231,9 +297,13 @@ def generate_launch_description():
             controller_manager_timeout_arg,
             switch_timeout_arg,
             service_call_timeout_arg,
+            record_bag_arg,
+            bag_path_arg,
             double_sim_hint,
             robot_state_pub,
             mujoco,
+            bag_hint,
+            bag_record,
             load_joint_state_broadcaster,
             load_controller_chain,
             rviz2,

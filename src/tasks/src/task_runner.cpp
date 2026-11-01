@@ -197,15 +197,23 @@ public:
         RCLCPP_INFO(get_logger(), "available sequences: %s", join(executor.sequence_names()).c_str());
 
         // 3. 等待控制器与关节反馈就绪；未就绪时持续重试，进程不退出。
+        //    只在第一次失败时提示一次，之后静默重试，避免每 5 s 刷一条同样的警告。
+        bool wait_warned = false;
         while (rclcpp::ok()) {
             if (ctx->wait_for_controller(5.0) && ctx->wait_for_joint_states(startup_timeout_)) {
                 break;
             }
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 5000, "waiting for arm_controller and /joint_states before running tasks");
+            if (!wait_warned) {
+                RCLCPP_WARN(
+                    get_logger(), "arm_controller and /joint_states are not ready yet; retrying silently until they appear");
+                wait_warned = true;
+            }
         }
         if (!rclcpp::ok()) {
             return true;
+        }
+        if (wait_warned) {
+            RCLCPP_INFO(get_logger(), "arm_controller and /joint_states are ready");
         }
 
         // 4. 常驻：执行当前 task_sequence，之后轮询参数等待新序列。

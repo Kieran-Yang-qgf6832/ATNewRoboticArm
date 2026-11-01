@@ -46,6 +46,18 @@ public:
      */
     void set_seed(std::uint64_t seed);
 
+    /**
+     * @brief 冻结若干关节，不参与激励（实机的 joint6 没有电机，机械锁死）。
+     *
+     * 被冻结的关节傅里叶系数恒为 0、位置恒为传入的 @p positions，CMA-ES 的优化维度
+     * 里**根本不含**它们，也不对它们做软限位检查（当前位形可能已经在软限位之外）。
+     *
+     * @param joint_indices 冻结的关节下标（0-based，对应 URDF 的关节顺序）
+     * @param positions 各关节的当前位形（长度 = 关节数）；冻结关节取这里的值
+     * @note 在 measure 的 enter() 里调用：只写预分配的标志/缓存，不做动态分配。
+     */
+    void set_frozen_joints(const std::vector<int>& joint_indices, const Eigen::VectorXd& positions);
+
     bool get_target_position(const rclcpp::Duration& time, Eigen::VectorXd& pos);
 
     int get_available_param_num() const;
@@ -86,7 +98,25 @@ public:
     double end_effector_tool_offset{0.0};
 
     /// 关节位置软限位比例（相对行程中点，0.7 = 只用中间 70%）。日志里会打出实际生效值。
+    ///
+    /// 这是**关节运动幅度**最直接的旋钮：0.7 时 joint5（URDF 行程 ±0.611 rad）只能走
+    /// ±0.428 rad；调到 0.9 会放大激励幅度、0.5 更保守。来自参数
+    /// measure_traj_pos_soft_limit_rate。
     double traj_pos_soft_limit_rate{0.7};
+
+    /// 关节速度上限比例：约束变成 |dq_j| <= 该比例 × URDF 的 velocityLimit。
+    /// <= 0 表示关闭速度约束。默认 1.0 = 直接用 URDF 的额定速度。
+    /// 来自参数 measure_traj_vel_limit_rate（想让动作变慢优先调周期，见 period_s）。
+    double traj_vel_limit_rate{1.0};
+
+    /// 傅里叶谐波数（频率成分 k/T，k = 1..本值；默认 3 = 1/T、2/T、3/T 三个分量）。
+    /// 越大激励信息越丰富、同样幅度下速度/加速度越高，生成也越慢。来自参数
+    /// measure_traj_harmonics。
+    int traj_harmonics{3};
+
+    /// CMA-ES 最大评估次数，**决定生成耗时**（1500 次 ≈ 本机 53 s @ T=10、106 s @ T>=20）。
+    /// 来自参数 measure_traj_max_fevals；调小用于快速试参数，正式取数请保持 1500。
+    int traj_max_fevals{1500};
 
     /// O12：非相邻连杆之间的碰撞安全间距（米，<= 0 表示关闭）。
     ///
@@ -193,6 +223,18 @@ private:
     Eigen::VectorXd S;
     Eigen::MatrixXd best_coefficients_;
     Eigen::MatrixXd param_mat;
+
+    /// 冻结关节标志（长度 = 关节数，构造时定长，之后只写不增删）。
+    std::vector<char> frozen_joint_;
+    /// 冻结关节的初始位置；未冻结关节为 0（傅里叶轨迹以 0 为中心）。
+    Eigen::VectorXd frozen_q0_;
+    /// 非冻结关节下标（构造时按容量预留，generate 时只改内容不扩容）。
+    std::vector<int> active_joint_;
+    /// 把「非冻结关节的优化向量」展开成整机系数向量的预分配缓存。
+    Eigen::VectorXd expanded_coefficients_;
+
+    /// 把 CMA-ES 的降维系数向量展开到整机维度（冻结关节填 0）。
+    void expand_coefficients(const Eigen::VectorXd& reduced, Eigen::VectorXd& full) const;
 
     int identifiable_parameter_num_{0};
 

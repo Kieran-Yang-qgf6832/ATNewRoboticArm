@@ -96,6 +96,11 @@ ExcitationTrajectory::ExcitationTrajectory(const std::string& urdf_path) {
     q.resize(model_.nq);
     dq.resize(model_.nv);
     ddq.resize(model_.nv);
+    // 冻结关节的缓存先按整机维度定长，set_frozen_joints 只写内容不扩容
+    // （它是在 measure 的 enter() 里被实时线程调用的）。
+    frozen_joint_.assign(static_cast<std::size_t>(model_.nq), 0);
+    frozen_q0_ = Eigen::VectorXd::Zero(model_.nq);
+    active_joint_.reserve(static_cast<std::size_t>(model_.nq));
     calc_thread_ = std::thread([this]() { calc_func(); });
 }
 
@@ -143,9 +148,11 @@ void ExcitationTrajectory::calc_func() {
     // 同时 k_initial_sigma = 0.7 让初始种群几乎全部违反软限位（joint5 的软限位
     // 只有 ±0.428 rad），目标函数被惩罚项淹没、优化信息全丢。
     // 现在：1500 次评估（约 42 倍维度）+ 更小的初始 sigma，让初始种群落在可行域内。
-    constexpr int k_harmonics           = 3;
+    // 谐波数与评估次数改由参数 measure_traj_harmonics / measure_traj_max_fevals 控制：
+    // 前者决定激励带宽（k/T），后者以线性方式决定生成耗时，试参数时可以先调到 200。
+    const int harmonics                 = std::clamp(traj_harmonics, 1, 8);
     constexpr double k_eval_dt          = 0.01;
-    constexpr int k_max_fevals          = 1500;
+    const int max_fevals                = std::max(traj_max_fevals, 100);
     constexpr int k_lambda              = 24;
     constexpr double k_coeff_bound      = 2.0;
     constexpr double k_initial_sigma    = 0.25;
@@ -207,9 +214,28 @@ void ExcitationTrajectory::calc_func() {
             continue;
         }
 
-        // 3次谐波，关节个数维度，一个周期
-        FourierTrajectory fourier_traj(model_.nq, k_harmonics, period_s);
-        const int coefficient_num = model_.nq * 2 * fourier_traj.harmonics();
+        // 冻结关节（实机上 joint6 没有电机）不参与优化：优化维度只含非冻结关节，
+        // 被冻结关节的傅里叶系数展开时填 0、位置恒为 frozen_q0_。
+        active_joint_.clear();
+        for (int j = 0; j < model_.nq; ++j) {
+            if (frozen_joint_[static_cast<std::size_t>(j)] == 0) {
+                active_joint_.push_back(j);
+            }
+        }
+        const int active_dof = static_cast<int>(active_joint_.size());
+        if (active_dof <= 0) {
+            std::cerr << "excitation: all joints are frozen, nothing to excite." << std::endl;
+            trajectory_generatefailed   = true;
+            trajectory_generatefinished = true;
+            continue;
+        }
+
+        // 默认 3 次谐波，关节个数维度，一个周期
+        FourierTrajectory fourier_traj(model_.nq, harmonics, period_s);
+        // 冻结关节以当前位形为初值（不冻结的保持 0，即原行为）
+        fourier_traj.set_init_pos(frozen_q0_);
+        expanded_coefficients_    = Eigen::VectorXd::Zero(model_.nq * 2 * harmonics);
+        const int coefficient_num = active_dof * 2 * fourier_traj.harmonics();
         std::vector<double> x0(coefficient_num, 0.0);
         std::vector<double> lbounds(coefficient_num, -k_coeff_bound);
         std::vector<double> ubounds(coefficient_num, k_coeff_bound);
@@ -220,7 +246,7 @@ void ExcitationTrajectory::calc_func() {
         const std::uint64_t seed = seed_.load(std::memory_order_relaxed);
         libcmaes::CMAParameters<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>> cma_params(x0, k_initial_sigma, k_lambda, seed, gp);
         cma_params.set_algo(aCMAES);
-        cma_params.set_max_fevals(k_max_fevals);
+        cma_params.set_max_fevals(max_fevals);
         cma_params.set_quiet(true);
         cma_params.set_mt_feval(false);
 
@@ -228,12 +254,15 @@ void ExcitationTrajectory::calc_func() {
         Eigen::MatrixXd best_mat;
 
         libcmaes::FitFunc objective = [this, &fourier_traj, &best_score, &best_mat, eval_dt, k_infeasible_cost,
-                                       k_violation_weight](const double* x, const int n) {
-            if (n != fourier_traj.dof() * 2 * fourier_traj.harmonics()) {
+                                       k_violation_weight, coefficient_num](const double* x, const int n) {
+            if (n != coefficient_num) {
                 return k_infeasible_cost;
             }
 
-            fourier_traj.set_coefficients(x, n);
+            // CMA-ES 在降维空间（只含非冻结关节）搜索，这里再展开成整机系数
+            Eigen::Map<const Eigen::VectorXd> reduced(x, n);
+            expand_coefficients(reduced, expanded_coefficients_);
+            fourier_traj.set_coefficients(expanded_coefficients_);
 
             const double violation = traj_constraint_violation(fourier_traj, eval_dt);
             if (violation > 0.0) {
@@ -250,7 +279,10 @@ void ExcitationTrajectory::calc_func() {
         const libcmaes::CMASolutions cma_solutions =
             libcmaes::cmaes<libcmaes::GenoPheno<libcmaes::pwqBoundStrategy>>(objective, cma_params);
         Eigen::VectorXd best_x = cma_solutions.get_best_seen_candidate().get_x_pheno_dvec(cma_params);
-        fourier_traj.set_coefficients(best_x);
+        // 展开到整机维度后再检查/缩放：后续的可行缩放作用于整机系数向量。
+        expand_coefficients(best_x, expanded_coefficients_);
+        fourier_traj.set_coefficients(expanded_coefficients_);
+        Eigen::VectorXd& best_full = expanded_coefficients_;
 
         // O10 的关键修正：CMA-ES 交回来的"最优"候选**经常仍然违反软限位**——实测 21 次
         // 测量无一例外，违例 0.12 ~ 6.68 rad。指令远超行程时 PID 会在 20 N·m 上限饱和，
@@ -261,9 +293,9 @@ void ExcitationTrajectory::calc_func() {
         const double raw_violation = traj_constraint_violation(fourier_traj, eval_dt);
         double scale               = 1.0;
         if (!(raw_violation <= 0.0)) {
-            scale = find_feasible_scale(fourier_traj, best_x, eval_dt);
-            best_x *= scale;
-            fourier_traj.set_coefficients(best_x);
+            scale = find_feasible_scale(fourier_traj, best_full, eval_dt);
+            best_full *= scale;
+            fourier_traj.set_coefficients(best_full);
         }
 
         const double final_violation = traj_constraint_violation(fourier_traj, eval_dt);
@@ -288,7 +320,7 @@ void ExcitationTrajectory::calc_func() {
         }
         std::cout << "excitation: seed=" << seed << " raw_violation=" << raw_violation << " scale=" << scale
                   << " violation=" << final_violation << " score=" << final_score << std::endl;
-        std::cout << "best_x:" << best_x << std::endl;
+        std::cout << "best_x:" << best_full << std::endl;
         // 违例仍不为 0 只可能是连 q≡0 都不可行（例如末端箱式约束把原点排除），
         // 这时必须**显式失败**，而不是把一条不可行的轨迹发下去。
         trajectory_generatefailed   = best_traj == nullptr || !(final_violation <= 0.0);
@@ -302,6 +334,39 @@ int ExcitationTrajectory::get_available_param_num() const {
 
 void ExcitationTrajectory::set_seed(std::uint64_t seed) {
     seed_.store(seed, std::memory_order_relaxed);
+}
+
+void ExcitationTrajectory::set_frozen_joints(const std::vector<int>& joint_indices, const Eigen::VectorXd& positions) {
+    // 整机标志先清零，再打开本次指定的关节：先清后设，避免上一次的冻结残留。
+    std::fill(frozen_joint_.begin(), frozen_joint_.end(), 0);
+    frozen_q0_.setZero();
+    if (positions.size() != model_.nq) {
+        return;
+    }
+    for (int joint : joint_indices) {
+        if (joint < 0 || joint >= model_.nq) {
+            continue;
+        }
+        frozen_joint_[static_cast<std::size_t>(joint)] = 1;
+        frozen_q0_[joint]                               = positions[joint];
+    }
+}
+
+void ExcitationTrajectory::expand_coefficients(const Eigen::VectorXd& reduced, Eigen::VectorXd& full) const {
+    // 系数布局与 FourierTrajectory 一致：每个谐波 2*dof 个（先 A 后 B），谐波优先。
+    // harmonics 必须与 calc_func 里的取值保持同一套收敛规则（同一个参数、同一个 clamp）。
+    const int harmonics = std::clamp(traj_harmonics, 1, 8);
+    full.setZero();
+    std::size_t cursor = 0;
+    for (int k = 0; k < harmonics; ++k) {
+        const int a_offset = k * 2 * model_.nq;
+        for (int j : active_joint_) {
+            full[a_offset + j] = reduced[static_cast<Eigen::Index>(cursor++)];
+        }
+        for (int j : active_joint_) {
+            full[a_offset + model_.nq + j] = reduced[static_cast<Eigen::Index>(cursor++)];
+        }
+    }
 }
 
 std::uint64_t ExcitationTrajectory::get_seed() const {
@@ -416,6 +481,11 @@ double ExcitationTrajectory::traj_constraint_violation(const FourierTrajectory& 
         }
 
         for (int j = 0; j < traj.dof(); ++j) {
+            // 冻结关节恒在固定位形：它的位置可能本来就在软限位之外（实机 joint6 机械锁死），
+            // 不能算违例；速度同为 0，不检查。
+            if (frozen_joint_[static_cast<std::size_t>(j)] != 0) {
+                continue;
+            }
             // 位置软限位：将关节行程按软限位比例缩放到行程中点附近
             const double lower = model_.lowerPositionLimit[j];
             const double upper = model_.upperPositionLimit[j];
@@ -435,11 +505,15 @@ double ExcitationTrajectory::traj_constraint_violation(const FourierTrajectory& 
                 }
             }
 
-            // 关节速度超限
+            // 关节速度超限：默认直接用 URDF 的 velocityLimit，
+            // measure_traj_vel_limit_rate 可以把上限压得更低（<= 0 时整条速度约束关闭）。
             const double velocity_limit = model_.velocityLimit[j];
-            if (std::isfinite(velocity_limit) && velocity_limit > 0.0 && std::fabs(dq[j]) > velocity_limit) {
-                const double normalized_violation = (std::fabs(dq[j]) - velocity_limit) / velocity_limit;
-                violation += normalized_violation * normalized_violation;
+            if (traj_vel_limit_rate > 0.0 && std::isfinite(velocity_limit) && velocity_limit > 0.0) {
+                const double allowed_velocity = velocity_limit * traj_vel_limit_rate;
+                if (std::fabs(dq[j]) > allowed_velocity) {
+                    const double normalized_violation = (std::fabs(dq[j]) - allowed_velocity) / allowed_velocity;
+                    violation += normalized_violation * normalized_violation;
+                }
             }
         }
 

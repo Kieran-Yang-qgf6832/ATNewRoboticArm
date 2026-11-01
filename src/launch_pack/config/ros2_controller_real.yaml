@@ -17,9 +17,14 @@ arm_controller:
     # 只有链式控制器（仿真里的 sim_pid_controller）才需要前缀。
     command_interface_prefix: ""
 
-    # 实机标志：teach_pendant / measure 在实机上物理不成立（MCU 不接收阻抗增益、
-    # 不上报加速度，joint6 无电机），这两个状态会被拒绝切入。
+    # 实机标志：teach_pendant 在实机上物理不成立（MCU 不接收阻抗增益，kp=0 的纯阻尼
+    # 环做不出来），会被拒绝切入。measure **可用**：辨识已改成分部积分滤波回归量，
+    # 只吃 q/q̇/τ，不依赖关节加速度；CSV 也不再写 acc_* 列。
     real_mode: true
+
+    # 实机只有 5 个自由度：joint6 无电机、机械锁死。激励轨迹把 joint6 冻结在当前位形，
+    # 优化维度里只含 joint1~joint5。
+    measure_frozen_joints: [joint6]
 
     # 实机只有 5 个自由度：joint6 无电机、机械锁死。
     # 5 维任务 = 位置 3 + 工具指向 2，绕工具轴的滚转不参与求解。
@@ -39,5 +44,27 @@ arm_controller:
     gravity_compensation: false
     gravity_compensation_scale: 0.1
 
-    # 实机不支持 measure：MCU 不上报加速度，acc_* 列恒为 0，辨识结果不可用。
-    # 需要参数辨识请回仿真链路。
+    # 实机上的参数辨识：先跑 measure 录 q/q̇/τ（MCU 报文 50 Hz，控制器 100 Hz 逐拍落盘，
+    # 相邻两行是同一帧报文的重复，不影响最小二乘），再用 parameter_identify 离线辨识。
+    # 验证集要**另录一条**不同 seed 的激励轨迹（measure_trajectory_seed 换个数即可）。
+    # 录出来的 CSV 没有 acc_* 列——辨识链路不再需要加速度。
+    #
+    # 注意 measure_record_sample_rate 只用来**算记录缓冲区大小**（不控制落盘频率），
+    # 实机 100 Hz 控制下必须按 100 Hz 以上估容量，不要按 50 去填，否则会写满丢样本。
+
+    # ---- 激励轨迹形状与生成成本 ----
+    # 下面四项与 ros2_controller.yaml 的值相同，显式写出来只为把「实机可单独收紧」这件事
+    # 放在实机配置里可见的位置（叠加加载，改这里只影响实机）。都只在构造期读取，改完重启。
+    # 实机首测若担心关节5（行程 ±0.611 rad）或撞限位，可先把软限位比例降到 0.5；
+    # 实机激励目标是「力矩幅值够大、又不超额定」，不是把幅度拉到最大。
+    measure_traj_pos_soft_limit_rate: 0.7
+    # 速度上限比例（× URDF velocityLimit）。实机真正的速度上限在 MCU 固件内环里，
+    # 这里只约束生成阶段：压到 0.5 会让激励轨迹更慢更平缓，也更容易被判可跟踪。
+    measure_traj_vel_limit_rate: 1.0
+    # 傅里叶谐波数。实机 100 Hz 控制 + 50 Hz 报文，高频成分跟踪不出来，
+    # 建议不要超过 3（默认值）。
+    measure_traj_harmonics: 3
+    # CMA-ES 评估次数，决定生成耗时（1500 ≈ 本机 53 s @ T=10、106 s @ T>=20）。
+    # 实机同样受任务层 step_timeout 约束：arm_real.launch.py 不启动 task_runner，
+    # 手动跑时自己传（建议 300 s 起，T>=20 s 的生成段约 106 s）。
+    measure_traj_max_fevals: 1500

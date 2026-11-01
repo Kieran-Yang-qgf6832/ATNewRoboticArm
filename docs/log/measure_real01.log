@@ -1,0 +1,222 @@
+[INFO] [launch]: All log files can be found below /home/kangy/.ros/log/2026-11-01-10-09-44-536596-kangy-ThinkBook-16-G6-IMH-226387
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: [提示] 若使用 loopback:=true，本进程不会打开 USB 设备，读到的状态来自指令回读；接真机前务必去掉该参数。
+[INFO] [launch.user]: [bag] 录制上位机关节指令到 /home/kangy/ros2_bag/arm_real_20261101_100944
+[INFO] [robot_state_publisher-1]: process started with pid [226397]
+[INFO] [ros2_control_node-2]: process started with pid [226398]
+[INFO] [ros2-3]: process started with pid [226399]
+[INFO] [rviz2-4]: process started with pid [226400]
+[INFO] [launch.user]: ros2_control_node started, spawning joint_state_broadcaster
+[INFO] [spawner-5]: process started with pid [226401]
+[robot_state_publisher-1] [WARN] [1793498984.802579782] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[robot_state_publisher-1] [WARN] [1793498984.802625215] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[ros2_control_node-2] [WARN] [1793498984.808961022] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[ros2_control_node-2] [WARN] [1793498984.808977159] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[ros2_control_node-2] [INFO] [1793498984.823755185] [controller_manager]: Using Steady (Monotonic) clock for triggering controller manager cycles.
+[ros2_control_node-2] [INFO] [1793498984.828272010] [controller_manager]: Subscribing to '/arm_robot_description' topic for robot description.
+[ros2_control_node-2] [INFO] [1793498984.828350026] [controller_manager]: update rate is 100 Hz
+[ros2_control_node-2] [INFO] [1793498984.828357351] [controller_manager]: Overruns handling is : enabled
+[ros2_control_node-2] [INFO] [1793498984.828362012] [controller_manager]: Spawning controller_manager RT thread with scheduler priority: 50
+[ros2_control_node-2] [WARN] [1793498984.828470842] [controller_manager]: Could not enable FIFO RT scheduling policy: with error number <1>(Operation not permitted). See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details on how to enable realtime scheduling.
+[robot_state_publisher-1] [INFO] [1793498984.833140140] [robot_state_publisher]: Robot initialized
+[ros2_control_node-2] [INFO] [1793498984.833216137] [controller_manager]: Received robot description from topic.
+[ros2_control_node-2] [INFO] [1793498984.833262974] [controller_manager]: Enforcing command limits is disabled. Command limits from URDF will be ignored.
+[ros2_control_node-2] [INFO] [1793498984.835852644] [controller_manager]: Loading hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1793498984.853189239] [controller_manager]: Loaded hardware 'arm_hw' from plugin 'arm_controller/ArmRealInterfaces'
+[ros2_control_node-2] [INFO] [1793498984.853335678] [controller_manager]: Initialize hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1793498984.856635816] [arm_real_interfaces]: Configured ArmRealInterfaces for 6 joints (loopback=false, state_timeout=100 ms).
+[ros2_control_node-2] [INFO] [1793498984.856653227] [arm_real_interfaces]:   joint1: dir=-1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1793498984.856659271] [arm_real_interfaces]:   joint2: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1793498984.856661706] [arm_real_interfaces]:   joint3: dir=-1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1793498984.856663931] [arm_real_interfaces]:   joint4: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1793498984.856666251] [arm_real_interfaces]:   joint5: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1793498984.856683080] [controller_manager]: Successful initialization of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1793498984.857025437] [controller_manager]: Activating component 'arm_hw'.
+[ros2_control_node-2] [INFO] [1793498984.857038993] [resource_manager]: 'configure' hardware 'arm_hw' 
+[ros2_control_node-2] [CDCTrans] Opening USB CDC device
+[ros2_control_node-2] [CDCTrans] Detached kernel driver from interface 1, ret=0
+[ros2_control_node-2] [CDCTrans] Claimed interface 1, ret=0
+[ros2_control_node-2] [CDCTrans] Allocated async transfer at 0x5ffa364647a0
+[ros2_control_node-2] [INFO] [1793498984.861837411] [resource_manager]: Successful 'configure' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1793498984.861858040] [resource_manager]: 'activate' hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1793498984.861872240] [resource_manager]: Successful 'activate' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1793498984.861921973] [controller_manager]: Registering statistics for : arm_hw
+[ros2_control_node-2] [INFO] [1793498984.861995293] [controller_manager]: Resource Manager has been successfully initialized. Starting Controller Manager services...
+[rviz2-4] [WARN] [1793498984.974580274] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[rviz2-4] [WARN] [1793498984.974614308] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[spawner-5] [WARN] [1793498985.203874318] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[spawner-5] [WARN] [1793498985.203894833] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[rviz2-4] [INFO] [1793498985.231736235] [rviz2]: Stereo is NOT SUPPORTED
+[rviz2-4] [INFO] [1793498985.231843216] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[rviz2-4] [INFO] [1793498985.266969243] [rviz2]: Stereo is NOT SUPPORTED
+[ros2-3] [WARN] [1793498985.314250947] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[ros2-3] [WARN] [1793498985.314268755] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[ros2_control_node-2] [INFO] [1793498985.317237451] [controller_manager]: Loading controller : 'joint_state_broadcaster' of type 'joint_state_broadcaster/JointStateBroadcaster'
+[ros2_control_node-2] [INFO] [1793498985.317318931] [controller_manager]: Loading controller 'joint_state_broadcaster'
+[ros2_control_node-2] [INFO] [1793498985.323700377] [controller_manager]: Controller 'joint_state_broadcaster' node arguments: --ros-args --params-file /tmp/launch_params_xqpchk58 --params-file /home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/install/launch_pack/share/launch_pack/config/ros2_controller.yaml --params-file /home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/install/launch_pack/share/launch_pack/config/ros2_controller_real.yaml 
+[ros2-3] [INFO] [1793498985.327326229] [rosbag2_recorder]: Event publisher thread: Started
+[ros2-3] [INFO] [1793498985.329993377] [rosbag2_recorder]: Starting recording to '/home/kangy/ros2_bag/arm_real_20261101_100944'
+[ros2-3] [INFO] [1793498985.332637380] [rosbag2_recorder]: Listening for topics...
+[ros2-3] [INFO] [1793498985.332681510] [rosbag2_recorder]: Recording...
+[ros2-3] [INFO] [1793498985.332742187] [rosbag2_recorder]: Topics discovery started.
+[spawner-5] [INFO] [1793498985.352592913] [spawner_joint_state_broadcaster]: Loaded joint_state_broadcaster
+[ros2_control_node-2] [INFO] [1793498985.353682530] [controller_manager]: Configuring controller: 'joint_state_broadcaster'
+[ros2_control_node-2] [INFO] [1793498985.353858455] [joint_state_broadcaster]: 'joints' or 'interfaces' parameter is empty. All available state interfaces will be published
+[ros2-3] [INFO] [1793498985.359705128] [rosbag2_recorder]: Subscribed to topic '/joint_states'
+[ros2_control_node-2] [INFO] [1793498985.380519989] [controller_manager]: Activating controllers: [ joint_state_broadcaster ]
+[ros2_control_node-2] [INFO] [1793498985.388938753] [controller_manager]: Successfully switched controllers!
+[spawner-5] [INFO] [1793498985.400682116] [spawner_joint_state_broadcaster]: Configured and activated joint_state_broadcaster
+[INFO] [spawner-5]: process has finished cleanly [pid 226401]
+[INFO] [launch.user]: joint_state_broadcaster spawned, spawning arm_controller
+[INFO] [spawner-6]: process started with pid [226517]
+[spawner-6] [WARN] [1793498986.171153608] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[spawner-6] [WARN] [1793498986.171172165] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[ros2_control_node-2] [INFO] [1793498986.288275050] [controller_manager]: Loading controller : 'arm_controller' of type 'arm_controller/ArmController'
+[ros2_control_node-2] [INFO] [1793498986.288364735] [controller_manager]: Loading controller 'arm_controller'
+[ros2_control_node-2] [INFO] [1793498986.289057589] [controller_manager]: Controller 'arm_controller' node arguments: --ros-args --params-file /tmp/launch_params_xqpchk58 --params-file /home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/install/launch_pack/share/launch_pack/config/ros2_controller.yaml --params-file /home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/install/launch_pack/share/launch_pack/config/ros2_controller_real.yaml 
+[ros2_control_node-2] [INFO] [1793498986.300338628] [arm_controller]: idel: gravity_compensation=false scale=0.100 (param found=yes)
+[ros2_control_node-2] [INFO] [1793498986.300516412] [arm_controller]: reset: gravity_compensation=false scale=0.100 (param found=yes)
+[ros2_control_node-2] [INFO] [1793498986.300582413] [arm_controller]: cart_traj: gravity_compensation=false scale=0.100 (param found=yes)
+[ros2_control_node-2] [INFO] [1793498986.301920565] [arm_controller]: joint_traj: gravity_compensation=false scale=0.100 (param found=yes)
+[ros2_control_node-2] [INFO] [1793498986.302733686] [arm_controller]: admittance: gravity_compensation=false scale=0.100 (param found=yes)
+[ros2_control_node-2] [INFO] [1793498986.303192458] [arm_controller]: measure 冻结 1 个关节：激励轨迹的优化维度里不含它们，位置锁在当前位形
+[ros2_control_node-2] [INFO] [1793498987.332707988] [arm_controller]: measure 配置：seed=42，周期 20.00 s x 1 次，move_to_start 3.00 s，采样率 500.0 Hz，CSV=measured_for_identification.csv
+[ros2_control_node-2] [INFO] [1793498987.332837189] [arm_controller]: task_dim=5（位置 + 工具指向，不控滚转），real_mode=true
+[spawner-6] [INFO] [1793498987.359069076] [spawner_arm_controller]: Loaded arm_controller
+[ros2_control_node-2] [INFO] [1793498987.360445370] [controller_manager]: Configuring controller: 'arm_controller'
+[ros2_control_node-2] [INFO] [1793498987.370946263] [controller_manager]: Activating controllers: [ arm_controller ]
+[ros2_control_node-2] [INFO] [1793498987.378952593] [controller_manager]: Successfully switched controllers!
+[spawner-6] [INFO] [1793498987.391019635] [spawner_arm_controller]: Configured and activated arm_controller
+[INFO] [spawner-6]: process has finished cleanly [pid 226517]
+[ros2-3] [INFO] [1793499009.440145835] [rosbag2_recorder]: Subscribed to topic '/arm_joint_traj'
+[ros2-3] [INFO] [1793499009.440210197] [rosbag2_recorder]: All requested topics are subscribed. Stopping discovery...
+[ros2-3] [INFO] [1793499009.440224927] [rosbag2_recorder]: Topics discovery stopped.
+[ros2_control_node-2] [INFO] [1793499009.838894893] [arm_controller]: measure: 开始生成激励轨迹（CMA-ES，seed=42，周期 20.00 s x 1 次；本机实测 T=10 s 约 53 s、T>=20 s 约 106 s，随 max_fevals 线性缩放），期间机械臂保持当前位形；完成后会自动运动（task 层 step_timeout 需大于该耗时）
+[ros2_control_node-2] excitation: seed=42 raw_violation=0 scale=1 violation=0 score=1.59798
+[ros2_control_node-2] best_x:  0.0232648
+[ros2_control_node-2]   -0.415549
+[ros2_control_node-2]    0.560716
+[ros2_control_node-2]  -0.0432786
+[ros2_control_node-2]    0.114449
+[ros2_control_node-2]           0
+[ros2_control_node-2]  -0.0500484
+[ros2_control_node-2]   0.0533647
+[ros2_control_node-2]   -0.289398
+[ros2_control_node-2]    0.212319
+[ros2_control_node-2] -0.00696233
+[ros2_control_node-2]           0
+[ros2_control_node-2]  -0.0477017
+[ros2_control_node-2]    0.132237
+[ros2_control_node-2]   -0.143333
+[ros2_control_node-2]   -0.934237
+[ros2_control_node-2]    0.171709
+[ros2_control_node-2]           0
+[ros2_control_node-2]  -0.0112205
+[ros2_control_node-2]   -0.290337
+[ros2_control_node-2]   0.0402469
+[ros2_control_node-2]   -0.182416
+[ros2_control_node-2]   0.0171825
+[ros2_control_node-2]           0
+[ros2_control_node-2]    -1.05108
+[ros2_control_node-2]   -0.187733
+[ros2_control_node-2]    0.321357
+[ros2_control_node-2]  -0.0399268
+[ros2_control_node-2]   0.0179258
+[ros2_control_node-2]           0
+[ros2_control_node-2]   -0.366323
+[ros2_control_node-2]    0.456084
+[ros2_control_node-2]   -0.617776
+[ros2_control_node-2] -0.00665511
+[ros2_control_node-2]   -0.163354
+[ros2_control_node-2]           0
+[ros2_control_node-2] [INFO] [1793499106.258922704] [arm_controller]: 激励轨迹就绪：可辨识参数 36 个，seed=42，原始违例 0.000e+00 rad，缩放 1.0000，最终违例 0.000e+00 rad，得分 1.5980
+[ros2_control_node-2] [INFO] [1793499106.259047441] [arm_controller]: 激励约束：关节软限位 0.700，速度上限 1.000×额定，谐波 3，力矩上限 1.000×额定，末端工具偏移 0.0700 m，末端 z 下限 -inf m，连杆间安全间距 0.0200 m，地面净空 0.0100 m，碰撞违例 0.000e+00
+[ros2_control_node-2] [INFO] [1793499109.268751415] [arm_controller]: measure: 开始执行激励轨迹（20.00 s x 1 次 = 20.00 s，按控制周期记录 q/q̇/τ）
+[ros2_control_node-2] [INFO] [1793499129.268838709] [arm_controller]: measure: 激励轨迹执行完成，已记录 2000 个样本；正在落盘 CSV：measured_for_identification.csv
+[ros2_control_node-2] [ERROR] [1793499226.698859259] [arm_real_interfaces]: USB CDC 发送失败（期望 78 字节，实际 -2），停止下发新目标。
+[ros2_control_node-2] [ERROR] [1793499226.698978173] [controller_manager]: Deactivating following hardware components as their write cycle resulted in an error: [ arm_hw ]
+[ros2_control_node-2] [ERROR] [1793499226.699024310] [controller_manager]: Deactivating following controllers as their hardware components write cycle resulted in an error: [ joint_state_broadcaster arm_controller ]
+[ros2_control_node-2] [ERROR] [1793499226.699150098] [controller_manager]: Not acceptable command interfaces combination: 
+[ros2_control_node-2] Start interfaces: 
+[ros2_control_node-2] [
+[ros2_control_node-2] ]
+[ros2_control_node-2] Stop interfaces: 
+[ros2_control_node-2] [
+[ros2_control_node-2]   joint1/position
+[ros2_control_node-2]   joint1/velocity
+[ros2_control_node-2]   joint1/effort
+[ros2_control_node-2]   joint1/kp
+[ros2_control_node-2]   joint1/kd
+[ros2_control_node-2]   joint1/ki
+[ros2_control_node-2]   joint2/position
+[ros2_control_node-2]   joint2/velocity
+[ros2_control_node-2]   joint2/effort
+[ros2_control_node-2]   joint2/kp
+[ros2_control_node-2]   joint2/kd
+[ros2_control_node-2]   joint2/ki
+[ros2_control_node-2]   joint3/position
+[ros2_control_node-2]   joint3/velocity
+[ros2_control_node-2]   joint3/effort
+[ros2_control_node-2]   joint3/kp
+[ros2_control_node-2]   joint3/kd
+[ros2_control_node-2]   joint3/ki
+[ros2_control_node-2]   joint4/position
+[ros2_control_node-2]   joint4/velocity
+[ros2_control_node-2]   joint4/effort
+[ros2_control_node-2]   joint4/kp
+[ros2_control_node-2]   joint4/kd
+[ros2_control_node-2]   joint4/ki
+[ros2_control_node-2]   joint5/position
+[ros2_control_node-2]   joint5/velocity
+[ros2_control_node-2]   joint5/effort
+[ros2_control_node-2]   joint5/kp
+[ros2_control_node-2]   joint5/kd
+[ros2_control_node-2]   joint5/ki
+[ros2_control_node-2]   joint6/position
+[ros2_control_node-2]   joint6/velocity
+[ros2_control_node-2]   joint6/effort
+[ros2_control_node-2]   joint6/kp
+[ros2_control_node-2]   joint6/kd
+[ros2_control_node-2]   joint6/ki
+[ros2_control_node-2] ]
+[ros2_control_node-2] Not available: 
+[ros2_control_node-2] [
+[ros2_control_node-2]  joint1/position
+[ros2_control_node-2]  joint1/velocity
+[ros2_control_node-2]  joint1/effort
+[ros2_control_node-2]  joint1/kp
+[ros2_control_node-2]  joint1/kd
+[ros2_control_node-2]  joint1/ki
+[ros2_control_node-2]  joint2/position
+[ros2_control_node-2]  joint2/velocity
+[ros2_control_node-2]  joint2/effort
+[ros2_control_node-2]  joint2/kp
+[ros2_control_node-2]  joint2/kd
+[ros2_control_node-2]  joint2/ki
+[ros2_control_node-2]  joint3/position
+[ros2_control_node-2]  joint3/velocity
+[ros2_control_node-2]  joint3/effort
+[ros2_control_node-2]  joint3/kp
+[ros2_control_node-2]  joint3/kd
+[ros2_control_node-2]  joint3/ki
+[ros2_control_node-2]  joint4/position
+[ros2_control_node-2]  joint4/velocity
+[ros2_control_node-2]  joint4/effort
+[ros2_control_node-2]  joint4/kp
+[ros2_control_node-2]  joint4/kd
+[ros2_control_node-2]  joint4/ki
+[ros2_control_node-2]  joint5/position
+[ros2_control_node-2]  joint5/velocity
+[ros2_control_node-2]  joint5/effort
+[ros2_control_node-2]  joint5/kp
+[ros2_control_node-2]  joint5/kd
+[ros2_control_node-2]  joint5/ki
+[ros2_control_node-2]  joint6/position
+[ros2_control_node-2]  joint6/velocity
+[ros2_control_node-2]  joint6/effort
+[ros2_control_node-2]  joint6/kp
+[ros2_control_node-2]  joint6/kd
+[ros2_control_node-2]  joint6/ki
+[ros2_control_node-2] ]
+[ros2_control_node-2] 
+[ros2_control_node-2] [ERROR] [1793499226.699222626] [controller_manager]: Error while attempting mode switch when deactivating controllers in write cycle!

@@ -191,6 +191,11 @@ private:
     std::vector<double> joint_positions_;  ///< 最近一帧对齐后的关节角
     bool have_joint_states_{false};        ///< 是否已收到有效关节状态
 
+    /// 等待类错误的单次上报标志：只在第一次失败时打一条 ERROR，恢复时打一条 INFO，
+    /// 避免调用方周期性重试时把同类错误反复刷到终端（@c wait_for_controller 为 const）。
+    mutable bool controller_wait_reported_{false};
+    bool joint_state_wait_reported_{false};
+
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_; ///< /joint_states 订阅
     rclcpp::Publisher<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_pub_;       ///< 笛卡尔轨迹发布
     rclcpp::Publisher<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_traj_pub_;     ///< 关节轨迹发布

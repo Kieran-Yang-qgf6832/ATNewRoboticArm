@@ -733,6 +733,10 @@ private:
     double trajectory_period_{10.0};
     double move_to_start_duration_{3.0};
     double measure_record_sample_rate_{500.0};
+    /// 冻结关节下标（来自 measure_frozen_joints）：实机 joint6 无电机，激励不能靠 PID 硬拽。
+    std::vector<int> frozen_joint_indices_;
+    /// 冻结关节位形缓存（长度 = 关节数，构造时定长；enter 里只写值）。
+    Eigen::VectorXd frozen_positions_;
     int trajectory_repeat_cnt_{1};
     bool measure_done_{false};
     bool csv_save_requested_{false};

@@ -12,7 +12,9 @@ class MeasurementData:
     time: np.ndarray
     positions: np.ndarray
     velocities: np.ndarray
-    accelerations: np.ndarray
+    # 实机 CSV 没有 acc_* 列（MCU 不上报加速度），此时为 None。
+    # 辨识链路已不依赖它（见 filtered_identification.py），只有关闭滤波时才必需。
+    accelerations: np.ndarray | None
     torques: np.ndarray
     acceleration_source: str
 
@@ -85,14 +87,19 @@ def _build_accelerations(
     acceleration_source: str,
     smoothing_window: int,
     smoothing_polyorder: int,
-) -> tuple[np.ndarray, str]:
+) -> tuple[np.ndarray | None, str]:
     source = acceleration_source.lower()
     if source == "recorded":
         if recorded_accelerations is None:
-            raise ValueError("CSV does not contain acc_* columns but acceleration_source is 'recorded'")
+            # 实机 CSV 本来就没有 acc_* 列：往下传 None 而不是报错。
+            # 辨识走分部积分滤波回归量时完全不需要加速度；只有 filter.enabled=false
+            # 才会在 identify_arm 里明确拒绝（那里才知道到底需不需要它）。
+            return None, "absent"
         return recorded_accelerations, "recorded"
+    if source == "none":
+        return None, "absent"
     if source != "computed":
-        raise ValueError("acceleration_source must be 'computed' or 'recorded'")
+        raise ValueError("acceleration_source must be 'computed', 'recorded' or 'none'")
 
     if time.size < 2:
         raise ValueError("At least two samples are required to compute acceleration")

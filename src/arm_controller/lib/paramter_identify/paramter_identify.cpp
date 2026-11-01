@@ -42,6 +42,12 @@ void ParamterIdentify::application_memory(int param_num, int dof) {
     torque.assign(buffer_size, Eigen::VectorXd::Zero(dof_));
 }
 
+void ParamterIdentify::set_record_acceleration(bool enabled) {
+    if (!save_requested_.load(std::memory_order_acquire)) {
+        record_acceleration_ = enabled;
+    }
+}
+
 bool ParamterIdentify::reset_recording() {
     if (save_requested_.load(std::memory_order_acquire)) {
         return false;
@@ -159,10 +165,13 @@ bool ParamterIdentify::write_csv_file(std::string_view file_name, std::size_t sa
     for (Eigen::Index joint = 0; joint < dof_; ++joint) {
         stream << ",vel_" << joint;
     }
-    // 真实加速度列（O8）：csv_loader 用 acceleration_source: recorded 直接读它们，
-    // 不再对速度做二次求导。
-    for (Eigen::Index joint = 0; joint < dof_; ++joint) {
-        stream << ",acc_" << joint;
+    // 真实加速度列（O8）只在**硬件真的上报加速度**时写（目前只有 MuJoCo 仿真），
+    // 作为诊断量；实机 MCU 协议没有加速度，CSV 里就不出现 acc_*，辨识链路也不再需要它
+    // （已改成分部积分滤波回归量，见 parameter_identify 的 filtered_identification.py）。
+    if (record_acceleration_) {
+        for (Eigen::Index joint = 0; joint < dof_; ++joint) {
+            stream << ",acc_" << joint;
+        }
     }
     for (Eigen::Index joint = 0; joint < dof_; ++joint) {
         stream << ",torque_" << joint;
@@ -185,8 +194,10 @@ bool ParamterIdentify::write_csv_file(std::string_view file_name, std::size_t sa
         for (Eigen::Index joint = 0; joint < dof_; ++joint) {
             stream << ',' << vel[sample](joint);
         }
-        for (Eigen::Index joint = 0; joint < dof_; ++joint) {
-            stream << ',' << acc[sample](joint);
+        if (record_acceleration_) {
+            for (Eigen::Index joint = 0; joint < dof_; ++joint) {
+                stream << ',' << acc[sample](joint);
+            }
         }
         for (Eigen::Index joint = 0; joint < dof_; ++joint) {
             stream << ',' << torque[sample](joint);

@@ -4,6 +4,9 @@
 
 本包只负责“根据 CSV 生成辨识结果”。激励轨迹生成和测量数据保存由 `arm_controller` 中的 `measure` 状态完成。
 
+> 完整操作步骤（仿真/实机测量 → 辨识 → 留出验证 → 回归测试）见
+> `docs/parameter_identification_guide.md`。
+
 ## 构建
 
 ```bash
@@ -34,7 +37,10 @@ pip install picos cvxopt     # 或 conda install -c conda-forge picos cvxopt
 | `nullspace` | `false` | 只做零空间重建，**不施加物理约束**，结果通常非物理，会被 `require_physical` 拒绝 |
 | `nullspace` | `true` | 先零空间重建，再用 LMI 把每个连杆投影到物理可行集。**能写出文件，但本项目数据下会退化**（见下） |
 
-### ⚠️ 当前辨识不出可用模型——根因是加速度估计，**不是**测量数据
+### ⚠️ 历史问题：旧链路依赖加速度（已被「无加速度辨识」取代）
+
+> 本节是 O8 排查的完整记录，适用于 `filter.enabled: false` 的旧链路。实机现在默认走
+> 上文「无加速度辨识」——它从公式里消掉 `q̈`，与这里的加速度误差无关。
 
 **症状**：`method: auto`（→ sdp）直接报 `status=error`，提示"问题不可行"。
 
@@ -138,15 +144,14 @@ CSV 默认落在**项目根目录**的 `measured_for_identification.csv`（launc
 | `move_to_start_duration` | `3.0` | 移动到激励轨迹起点的时长 |
 | `trajectory_seed` | `0` | 激励轨迹 CMA-ES 随机种子：**0 = 随机（不可复现）**，非 0 = 固定可复现 |
 | `headless` | `true` | **关掉 MuJoCo 自带 UI 窗口**，纯命令行跑（测量不需要界面） |
-| `step_timeout` | `30.0` | 任务层单步骤超时；测量比 `measure.yaml` 的 `duration` 长时**必须放大** |
+| `step_timeout` | `300.0` | 任务层单步骤超时。本机实测（2026-10-31，6 关节 + 碰撞约束）：`T=10 s` 生成 53 s，总耗时 ≈66 s；`T>=20 s` 每周期采样点封顶 2000 → 生成 ≈106 s，**不再随 T 增长**，`T=120 s` 总耗时 ≈229 s。300 s 约有 2.3 倍余量；换更慢机器或调大 `max_fevals` 时再上调 |
 
 例：用上一轮辨识的模型生成 120 s 激励轨迹：
 
 ```bash
 ros2 launch launch_pack arm_measure_sim.launch.py \
     controller_urdf_path:=$PWD/identified_iter_30.urdf \
-    trajectory_period:=120.0 csv_file_path:=$PWD/identify_loop2/csv/meas_01.csv \
-    step_timeout:=900.0
+    trajectory_period:=120.0 csv_file_path:=$PWD/identify_loop2/csv/meas_01.csv
 ```
 
 > 这些参数一度**全部静默失效**（params 文件的 node key 写成了 `/**`，controller_manager
@@ -209,12 +214,38 @@ ros2 run tasks task_runner --ros-args \
 `measure` 状态完成激励轨迹后，会异步保存 CSV。CSV 表头格式为：
 
 ```text
-time,pos_0..pos_5,vel_0..vel_5,acc_0..acc_5,torque_0..torque_5
+time,pos_0..pos_5,vel_0..vel_5,acc_0..acc_5,torque_0..torque_5   # 仿真：带 acc_*
+time,pos_0..pos_5,vel_0..vel_5,torque_0..torque_5               # 实机：无 acc_*（MCU 不上报）
 ```
 
 - `time` 是**仿真时间**（秒，首样本归零），不是墙钟；
-- `acc_*` 是 **MuJoCo 的真实关节加速度 `qacc`**（O8），不是对速度求导得到的。
-  旧 CSV 没有这几列，`acceleration_source: recorded` 会**显式报错**而不是静默退回求导。
+- `acc_*` 是 **MuJoCo 的真实关节加速度 `qacc`**（O8），不是对速度求导得到的；
+- 实机 CSV **没有** `acc_*` 列：`acceleration_source: recorded` 会返回 `None`（报告里
+  `acceleration_source: absent`）而**不再报错**——辨识默认走「无加速度滤波回归量」，本来就不需要它。
+  只有 `filter.enabled: false` 时，缺少加速度才会在 `identify_arm` 里被明确拒绝。
+
+### 无加速度辨识（实机路径，默认开启）
+
+`filter.enabled: true` 时，`identify_arm` 对回归量与力矩施加同一个一阶低通，再用分部积分
+把 `q̈` 解析消掉，只吃 `q/q̇/τ`（推导见 `parameter_identify/filtered_identification.py`
+模块 docstring 与 `docs/bugs.md` §9）。关键配置：
+
+| 键 | 默认 | 含义 |
+| --- | --- | --- |
+| `filter.cutoff_hz` | 2.0 | 低通截止频率（低于结构模态，又不滤掉激励能量） |
+| `filter.drop_initial_seconds` | 0.5 | 丢开头（零初值滤波器的瞬态，**不可调小**） |
+| `filter.derivative_scheme` | `central` | `L(Ḃ)` 的离散格式；`identity` 只留作对照 |
+| `filter.qr_tolerance` | 1.0e-6 | 滤波路径的秩判据（比基线的 1e-8 严，否则弱列进基、参数爆炸） |
+
+验收判据用 **`base_parameter_relative_error_norm`**（`‖θ−θ_true‖/‖θ_true‖`），与 O8 的
+0.39% 同一度量；`base_parameter_relative_error_max` 逐项分母含 0 参数，只用于定位。
+仿真回归（500 Hz、joint6 冻结、无 `acc_*`）：`rmse 0.0021`、范数误差 **0.75%**、52 个基参数；
+100 Hz 0.95%、50 Hz 1.44%（实机判据改为留出力矩 RMS ≤5% 额定）。回归用例：
+
+```bash
+source /opt/ros/jazzy/setup.bash      # pinocchio 在 ROS jazzy 的 site-packages 里
+cd src/parameter_identify && python3 -m pytest test -q
+```
 
 ## 验证辨识结果（**别信报告里的 rmse**）
 
@@ -232,12 +263,22 @@ python3 src/parameter_identify/tools/verify_torque.py \
     --csv <训练数据.csv> --csv <另一条没训练过的.csv>
 ```
 
-工具对每份 CSV 算 `tau_pred = rnea(model, q, dq, acc)`，输出：
+工具按 CSV 列数自动选路径：
 
-1. **总体 + 逐关节的相对误差**（平均/最大）；
-2. **与 `--reference` 真值模型的对比**——多出的误差 ≈0 才说明辨识没引入额外误差；
-3. **残差结构**：`|残差|` 与 `|dq|` / `|acc|` 的相关系数。明显正相关 = 有摩擦/阻尼
-   一类**随速度变化的未建模项**。
+- **有 `acc_*`（仿真，1+4×dof = 25 列）**：逐样本 `tau_pred = rnea(model, q, dq, acc)`，
+  输出总体 + 逐关节相对误差；
+- **无 `acc_*`（实机，1+3×dof = 19 列）**：复用
+  `filtered_identification.build_acceleration_free_regressor`，把该 URDF 的惯性参数当作固定 φ，
+  算 `τ_f − W_f φ` 的残差 RMS 并按**额定力矩**归一。q̈ 被解析消掉，所以实机 CSV 可以直接跑。
+
+判据（**第一份 `--csv` 是训练集，其余是留出集**）：
+
+1. 留出集残差 ≤ **5% 额定力矩**；
+2. 留出 / 训练 ≤ **1.5**；
+3. 被测 / 参照 < **1.0**（1.0–1.05 只提示「持平」，>1.05 判 FAIL）。
+
+同时输出 `|残差|` 与 `|dq|`（RNEA 路径还有 `|acc|`）的相关系数——明显正相关 = 有摩擦/阻尼
+一类**随速度变化的未建模项**。注意比值只在两边同量级时有意义：参照残差接近 0 时比值会被放大。
 
 验收标准：
 

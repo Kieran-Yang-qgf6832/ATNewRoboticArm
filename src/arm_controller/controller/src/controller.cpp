@@ -76,10 +76,11 @@ constexpr double kJointLimitFaultSlack = 0.05;
 
 namespace {
 
-/// 实机模式下不可用的状态：teach 依赖「kp = 0 + 纯阻尼」，而 MCU 只跑自己的位置环；
-/// measure 需要关节加速度与 joint6 激励，而 MCU 既不上报加速度、joint6 也没有电机。
+/// 实机模式下不可用的状态：teach 依赖「kp = 0 + 纯阻尼」，而 MCU 只跑自己的位置环。
+/// measure 在实机上可用——辨识已改成不依赖关节加速度（CSV 也不再写 acc_*），
+/// 只剩 joint6 无电机这一条，由激励轨迹的关节掩码固定住。
 bool state_unavailable_on_real(const std::string& state_name) {
-    return state_name == "teach_pendant" || state_name == "measure";
+    return state_name == "teach_pendant";
 }
 
 } // namespace
@@ -154,6 +155,9 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 保持旧行为），非 0 = 固定，同一 URDF 必然生成同一条激励轨迹。实际使用的种子
     // 会打进日志，可以照抄回来复现某一次测量。
     auto_declare<int64_t>("measure_trajectory_seed", 0);
+    // 冻结关节（实机 joint6 无电机、机械锁死）：激励轨迹把它们的系数固定为 0，
+    // 位置锁在当前位形；仿真里留空，保持原有 6 关节全激励的行为。
+    auto_declare<std::vector<std::string>>("measure_frozen_joints", {});
     auto_declare<std::vector<double>>("admittance_mass", {1.0, 1.0, 1.0, 0.1, 0.1, 0.1});
     auto_declare<std::vector<double>>("admittance_damping", {20.0, 20.0, 20.0, 2.0, 2.0, 2.0});
     auto_declare<std::vector<double>>("admittance_stiffness", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
@@ -174,10 +178,24 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
     auto_declare<double>("measure_traj_collision_safe_distance", 0.0);
     auto_declare<double>("measure_traj_ground_clearance", 0.0);
+    // 激励轨迹的形状与优化成本（原先硬编码在 ExcitationTrajectory 里）。
+    //   关节位置软限位比例：相对行程中点用中间多宽，0.7 = 中间 70%。这是「运动幅度」的
+    //   直接旋钮（joint5 在 0.7 下只能走 ±0.428 rad）。取值 (0, 1]。
+    auto_declare<double>("measure_traj_pos_soft_limit_rate", 0.7);
+    //   关节速度上限比例：|dq| <= rate × URDF 的 velocityLimit。<= 0 = 关闭速度约束。
+    //   想让动作变慢请优先调小 measure_trajectory_period（周期变长、速度自然下降）。
+    auto_declare<double>("measure_traj_vel_limit_rate", 1.0);
+    //   傅里叶谐波数（频率成分 k/T，k = 1..该值）。默认 3 与改动前的硬编码一致；
+    //   调大激励带宽更宽但动作更剧烈，生成也更慢。
+    auto_declare<int>("measure_traj_harmonics", 3);
+    //   CMA-ES 最大评估次数，主要决定生成耗时（1500 ≈ 本机 53 s @ T=10、106 s @ T>=20）。
+    //   试参数时可临时调到 200（约 7 s）快速看轨迹形状，正式取数请保持 1500。
+    auto_declare<int>("measure_traj_max_fevals", 1500);
     // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
     // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
     auto_declare<int>("task_dim", 6);
-    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态。
+    // 实机模式：置 true 时拒绝 teach_pendant（依赖 kp=0 的阻抗，MCU 不接收增益）。
+    // measure 在实机上可用：辨识已不依赖关节加速度，joint6 由激励轨迹掩码固定。
     auto_declare<bool>("real_mode", false);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
@@ -522,6 +540,11 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
     // 步长用「接口总数 / 关节数」推算，而不是写死 3——URDF 里加了 acceleration
     // 之后同一套代码仍然成立（见 docs/bugs.md O8）。
     const std::size_t state_stride = joints_name.empty() ? 0 : state_interfaces_.size() / joints_name.size();
+    // 硬件到底报不报加速度：**不能看接口个数**——arm_real_interfaces 也给每个关节导出一个
+    // acceleration 状态接口，但那只是恒为 0 的占位；state_acceleration_ 的长度更是恒等于
+    // 关节数（on_configure 里 assign）。唯一可靠的事实来源是 real_mode：实机的 MCU 协议
+    // 只上报位置/速度/力矩，仿真才有 MuJoCo 的 qacc。
+    fsm_factory->state_acceleration_available_ = !real_mode_;
     if (state_stride >= 3 && fsm_factory->command_.size() == joints_name.size()) {
         for (std::size_t i = 0; i < joints_name.size(); ++i) {
             fsm_factory->command_[i].position = static_cast<float>(state_interfaces_[i * state_stride + 0].get_value());
@@ -606,11 +629,15 @@ void ArmController::apply_safe_hold_and_idel(const char* reason) {
         }
     }
 
-    RCLCPP_ERROR_THROTTLE(
-        get_node()->get_logger(), *get_node()->get_clock(), 2000,
-        "safety hold (%s) in state '%s'%s%s; holding the current joint position and switching to idel", reason,
-        fsm_factory ? fsm_factory->current_state_name().c_str() : "<unknown>", stage != nullptr ? " at stage: " : "",
-        stage != nullptr ? stage : "");
+    // 每周期都会被调用，因此只在「第一次进入故障」时上报一次，恢复后复位。
+    if (!safety_hold_reported_) {
+        RCLCPP_ERROR(
+            get_node()->get_logger(),
+            "safety hold (%s) in state '%s'%s%s; holding the current joint position and switching to idel", reason,
+            fsm_factory ? fsm_factory->current_state_name().c_str() : "<unknown>", stage != nullptr ? " at stage: " : "",
+            stage != nullptr ? stage : "");
+        safety_hold_reported_ = true;
+    }
 }
 
 int ArmController::first_joint_limit_violation() const {
@@ -685,13 +712,20 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
     // RunResult::Recoverable 分支保持并切回 idel；关节空间运动则不受影响，正好
     // 是恢复路径。本检查的价值在于让越限被**显式看见**，而不是以「逆解莫名失败」
     // 的形式表现出来。
+    // 越限常在恢复过程中持续若干周期（机械臂要运动回限位内），因此按关节下标
+    // 去重：同一个关节只在「刚开始越限」时上报一次，回到限位内后复位。
     const int violated_joint = first_joint_limit_violation();
     if (violated_joint >= 0) {
-        RCLCPP_ERROR_THROTTLE(
-            get_node()->get_logger(), *get_node()->get_clock(), 2000,
-            "joint%zu is outside its model limit (%.4f rad); check the model limits and the commanded motion",
-            static_cast<std::size_t>(violated_joint) + 1,
-            static_cast<double>(fsm_factory->state_[static_cast<std::size_t>(violated_joint)].position));
+        if (violated_joint != reported_limit_joint_) {
+            RCLCPP_ERROR(
+                get_node()->get_logger(),
+                "joint%zu is outside its model limit (%.4f rad); check the model limits and the commanded motion",
+                static_cast<std::size_t>(violated_joint) + 1,
+                static_cast<double>(fsm_factory->state_[static_cast<std::size_t>(violated_joint)].position));
+            reported_limit_joint_ = violated_joint;
+        }
+    } else {
+        reported_limit_joint_ = -1;
     }
 
     // 推进状态机：内部完成状态切换、轨迹求解与控制量计算。
@@ -720,6 +754,9 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
         command_interfaces_[i * 6 + 4].set_value(static_cast<double>(fsm_factory->command_[i].kd));
         command_interfaces_[i * 6 + 5].set_value(static_cast<double>(fsm_factory->command_[i].ki));
     }
+
+    // 正常周期：说明上一轮故障已解除，复位单次上报标志，下一次故障仍会被看见。
+    safety_hold_reported_ = false;
 
     return controller_interface::return_type::OK;
 }

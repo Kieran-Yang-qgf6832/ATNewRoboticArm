@@ -2,28 +2,55 @@ model:
   active_joints: [joint1, joint2, joint3, joint4, joint5, joint6]
 
 data:
-  # 必须与 CSV 实际采样周期一致。实测 CSV 是 500 Hz（0.002），原来写的 0.02（50 Hz）差了 10 倍。
-  # 当前链路不读它（build_regressor_basic / QRDecomposer 都不读 ts），但 vendored FIGAROH 的
-  # 滤波工具会读（cutoff = ts * cut_off_frequency_butterworth / 2），一旦启用就会静默出错。
+  # 采样步长**不再写死**：identify_arm 从 CSV 的 time 列取中位数（实机 50/100 Hz、仿真
+  # 500 Hz 都能自动适配）。这里的值只在时间列不可用（少于 2 个样本）时作为退路。
   sample_time: 0.002
   decimate: false
   decimation_factor: 10
   max_samples: 0
-  # recorded：直接用 CSV 里的 acc_* 列（measure 记录的 MuJoCo 真实 qacc，docs/bugs.md O8）。
-  # 旧 CSV 没有 acc_* 列时会**显式报错**，不会静默退回求导——那时请显式改成 computed。
-  # computed：对 vel_* 做 Savitzky-Golay 平滑再求导，实测相对误差 ~31%，会把辨识结果
-  #           推出物理可行集，只在拿不到真实加速度时用。
+  # recorded：有 acc_* 列就用（仿真的 MuJoCo 真实 qacc，docs/bugs.md O8）。
+  #           实机 CSV 没有 acc_* 列（MCU 不上报加速度）时返回 None，**不再报错**——
+  #           辨识链路走 filter.enabled 的分部积分滤波回归量，本来就不需要加速度。
+  # computed：对 vel_* 做 Savitzky-Golay 平滑再求导，实测相对误差 ~31%，只在 filter.enabled=false
+  #           且确实拿不到真实加速度时才用。
   acceleration_source: recorded
   acceleration_smoothing_window: 11
   acceleration_smoothing_polyorder: 3
 
+filter:
+  # 不依赖关节加速度的辨识：对回归量与力矩施加同一个一阶低通，再用分部积分把 q̈ 解析消掉。
+  # 推导与数值细节见 parameter_identify/filtered_identification.py 的模块 docstring。
+  #
+  # 打开后 CSV 里的 acc_* 列会被**完全忽略**（只用于诊断），所以实机那几条没有加速度的
+  # 测量数据可以直接拿来辨识。
+  enabled: true
+  # 2 Hz：低于机器人前几阶结构频率，能消掉加速度项的高频成分，又不至于把激励能量滤没。
+  cutoff_hz: 2.0
+  # 零初值起步的滤波器瞬态：2 Hz 对应时间常数 ~0.08 s，0.5 s > 6 个时间常数，整段丢掉。
+  drop_initial_seconds: 0.5
+  # 算 Ȧ q̇ 用的方向导数扰动幅度（rad），只影响数值精度。
+  finite_difference_step: 1.0e-6
+  # 求 L(Ḃ) 的离散格式：
+  #   central   —— 离线中心差分（误差 O(dt²)）；仿真无噪声下基参数误差 0.03%，
+  #                有噪声 0.2% 采样下 0.5%–1%，是默认值。
+  #   identity  —— a_eff·B − a_eff·L(B) 的等价变形，隐含后向差分（O(dt)）。
+  #                它会在无噪声数据上留下 ~1% 的模型残差（docs/bugs.md Q6），只留作对照。
+  derivative_scheme: central
+  # 滤波路径的 QR 秩判据必须比基线更严：q̈ 的信息被搬到低频后，少数参数方向只剩
+  # 很弱但非零的响应，1e-8 会把它们当独立列留下（cond_R1 从 1e3 恶化到 1e11，
+  # 基参数直接爆炸）。1e-6 实测能把基参数个数恢复到 52–54，与基线一致。
+  qr_tolerance: 1.0e-6
+
 identification:
   zero_tolerance: 1.0e-8
+  # 基线（filter.enabled=false，直接用 q̈）的秩判据；滤波路径用上面 filter.qr_tolerance。
   qr_tolerance: 1.0e-8
   weighted_least_squares: false
-  has_friction: false
+  # 摩擦进线性回归：每关节两列（fv·ω、fs·sign(ω)）+ 偏置一列（off），共 3 列。
+  # 实机的减速器摩擦不可忽略，不建模的话残差会被它吃掉一大块。
+  has_friction: true
   has_actuator_inertia: false
-  has_joint_offset: false
+  has_joint_offset: true
 
 reconstruction:
   enabled: true

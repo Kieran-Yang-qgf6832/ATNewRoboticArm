@@ -1293,6 +1293,11 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     // O10：激励轨迹的随机种子。0 = 每次按当前时间随机（不可复现），非 0 = 固定可复现。
     int64_t measure_trajectory_seed = 0;
     factory->node_->get_parameter("measure_trajectory_seed", measure_trajectory_seed);
+    // 冻结关节：实机的 joint6 没有电机（机械锁死），激励轨迹必须把它固定住，
+    // 否则 CMA-ES 会为了辨识度往 joint6 要力矩，而 PID 只能把它拽出限位（见 O10 记录）。
+    // 名字对不上时**显式告警**，不静默忽略（C6：参数名写错不会有任何提示）。
+    std::vector<std::string> frozen_joint_names;
+    factory->node_->get_parameter("measure_frozen_joints", frozen_joint_names);
     double end_effector_x_lower_limit;
     double end_effector_x_upper_limit;
     double end_effector_y_lower_limit;
@@ -1308,6 +1313,16 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     // O12：碰撞限制。0 = 关闭。实际生效值会打进 "激励约束：" 日志行。
     factory->node_->get_parameter("measure_traj_collision_safe_distance", traj_collision_safe_distance);
     factory->node_->get_parameter("measure_traj_ground_clearance", traj_ground_clearance);
+    // 激励轨迹的「形状」旋钮：幅度（软限位比例）、速度上限比例、谐波数与优化评估次数。
+    // 四个都在构造期读一次，改 YAML 后必须重启 launch（C6）。
+    double traj_pos_soft_limit_rate;
+    double traj_vel_limit_rate;
+    int traj_harmonics;
+    int traj_max_fevals;
+    factory->node_->get_parameter("measure_traj_pos_soft_limit_rate", traj_pos_soft_limit_rate);
+    factory->node_->get_parameter("measure_traj_vel_limit_rate", traj_vel_limit_rate);
+    factory->node_->get_parameter("measure_traj_harmonics", traj_harmonics);
+    factory->node_->get_parameter("measure_traj_max_fevals", traj_max_fevals);
     factory->node_->get_parameter("measure_end_effector_x_lower_limit", end_effector_x_lower_limit);
     factory->node_->get_parameter("measure_end_effector_x_upper_limit", end_effector_x_upper_limit);
     factory->node_->get_parameter("measure_end_effector_y_lower_limit", end_effector_y_lower_limit);
@@ -1336,7 +1351,24 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     end_point_.pos.resize(joint_count_);
     end_point_.vel.resize(joint_count_);
     end_point_.acc.resize(joint_count_);
+    frozen_positions_.resize(joint_count_);
 
+    frozen_joint_indices_.clear();
+    for (const auto& name : frozen_joint_names) {
+        const auto it = std::find(joints.begin(), joints.end(), name);
+        if (it == joints.end()) {
+            RCLCPP_WARN(
+                factory->node_->get_logger(), "measure_frozen_joints 里的 \"%s\" 不在 joints 列表里，已忽略", name.c_str());
+            continue;
+        }
+        frozen_joint_indices_.push_back(static_cast<int>(std::distance(joints.begin(), it)));
+    }
+    if (!frozen_joint_indices_.empty()) {
+        RCLCPP_INFO(
+            factory->node_->get_logger(),
+            "measure 冻结 %zu 个关节：激励轨迹的优化维度里不含它们，位置锁在当前位形",
+            frozen_joint_indices_.size());
+    }
     trajectory_period_          = trajectory_period_ > 0.0 ? trajectory_period_ : 10.0;
     trajectory_repeat_cnt_      = trajectory_repeat_cnt_ > 0 ? trajectory_repeat_cnt_ : 1;
     move_to_start_duration_     = move_to_start_duration_ > 0.0 ? move_to_start_duration_ : 3.0;
@@ -1362,10 +1394,32 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
     excitation_trajectory_->end_effector_tool_offset  = end_effector_tool_offset;
     excitation_trajectory_->traj_collision_safe_distance = traj_collision_safe_distance;
     excitation_trajectory_->traj_ground_clearance        = traj_ground_clearance;
+    // 激励轨迹的形状与优化成本。默认值与改动前的硬编码常量一致（0.7 / 1.0 / 3 / 1500），
+    // 所以「只调 YAML 不重编译」就能改幅度、速度上限与生成耗时（见 docs 的参数辨识指南）。
+    // 软限位比例必须落在 (0, 1]：>1 会让轨迹越过 URDF 行程（软限位是唯一的位置约束）。
+    excitation_trajectory_->traj_pos_soft_limit_rate = std::clamp(traj_pos_soft_limit_rate, 0.05, 1.0);
+    // 速度上限比例允许 <= 0：语义是关闭速度约束（与力矩上限的约定一致）。
+    excitation_trajectory_->traj_vel_limit_rate = traj_vel_limit_rate;
+    // 谐波数与评估次数的合法范围由 ExcitationTrajectory 内部收敛（clamp / 下限 100），
+    // 这里原样透传，方便日志里看到用户写的是什么。
+    excitation_trajectory_->traj_harmonics  = traj_harmonics;
+    excitation_trajectory_->traj_max_fevals = traj_max_fevals;
     paramter_identify_                                 = std::make_unique<ParamterIdentify>(urdf_path);
     const auto record_capacity =
         static_cast<int>(std::ceil(trajectory_period_ * static_cast<double>(trajectory_repeat_cnt_) * measure_record_sample_rate_)) + 2;
     paramter_identify_->application_memory(record_capacity, static_cast<int>(joint_count_));
+
+    // 构造期打一次关键配置：这些参数只读一次（改 YAML 必须重启），
+    // 不把生效值打出来就无法判断「参数到底有没有读到」（C6：写错名字也不会报错）。
+    RCLCPP_INFO(
+        factory->node_->get_logger(),
+        "measure 配置：seed=%lu，周期 %.2f s x %d 次，move_to_start %.2f s，采样率 %.1f Hz，CSV=%s",
+        static_cast<unsigned long>(excitation_trajectory_->get_seed()),
+        trajectory_period_,
+        trajectory_repeat_cnt_,
+        move_to_start_duration_,
+        measure_record_sample_rate_,
+        measure_csv_file_path_.c_str());
 }
 
 bool ParamterMeasureState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -1395,9 +1449,27 @@ bool ParamterMeasureState::enter(const std::string& last_state, const rclcpp::Ti
     csv_save_requested_           = false;
     record_full_warned_           = false;
     has_prev_sample_              = false;
+    // 硬件真的上报加速度才写 acc_* 列（仿真 true / 实机 false）。
+    paramter_identify_->set_record_acceleration(factory->state_acceleration_available_);
+    // 冻结关节（实机 joint6 无电机）：系数恒 0、位置锁在当前位形，且不做软限位检查。
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        frozen_positions_(static_cast<Eigen::Index>(i)) = hold_position_[i];
+    }
+    excitation_trajectory_->set_frozen_joints(frozen_joint_indices_, frozen_positions_);
     measure_phase_                = MeasurePhase::WaitingForTrajectory;
     phase_start_time_             = time;
     measure_start_time_           = time;
+    // CMA-ES 耗时 ≈ 每周期采样点数 x 评估次数：T=10 s 是 1000 点、生成约 53 s；
+    // T>=20 s 时 eval_dt 放大让点数封顶 2000，生成约 106 s 且不再随 T 增长。
+    // 开始前打一行日志，避免用户误以为卡死。
+    RCLCPP_INFO(
+        factory->node_->get_logger(),
+        "measure: 开始生成激励轨迹（CMA-ES，seed=%lu，周期 %.2f s x %d 次；"
+        "本机实测 T=10 s 约 53 s、T>=20 s 约 106 s，随 max_fevals 线性缩放），"
+        "期间机械臂保持当前位形；完成后会自动运动（task 层 step_timeout 需大于该耗时）",
+        static_cast<unsigned long>(excitation_trajectory_->get_seed()),
+        trajectory_period_,
+        trajectory_repeat_cnt_);
     excitation_trajectory_->generate(trajectory_period_, trajectory_repeat_cnt_);
 
     return true;
@@ -1435,6 +1507,12 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             return false;
         }
         if (!excitation_trajectory_->generate_is_finished()) {
+            // 生成期间不逐拍打进度：enter() 已经给出预计耗时，循环内的周期性日志
+            // 只会刷屏。需要跟踪进度时把本节点的日志级别开到 debug。
+            RCLCPP_DEBUG(
+                factory->node_->get_logger(),
+                "measure: 激励轨迹生成中（CMA-ES），已等待 %.1f s",
+                (time - phase_start_time_).seconds());
             return true;
         }
 
@@ -1481,9 +1559,12 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
         // 约束优化」只能看这一行，不能只看 YAML（C6 的教训）。
         RCLCPP_INFO(
             factory->node_->get_logger(),
-            "激励约束：关节软限位 %.3f，力矩上限 %.3f×额定，末端工具偏移 %.4f m，末端 z 下限 %.4f m，"
+            "激励约束：关节软限位 %.3f，速度上限 %.3f×额定，谐波 %d，力矩上限 %.3f×额定，"
+            "末端工具偏移 %.4f m，末端 z 下限 %.4f m，"
             "连杆间安全间距 %.4f m，地面净空 %.4f m，碰撞违例 %.3e",
             excitation_trajectory_->traj_pos_soft_limit_rate,
+            excitation_trajectory_->traj_vel_limit_rate,
+            excitation_trajectory_->traj_harmonics,
             excitation_trajectory_->traj_torque_limit_rate,
             excitation_trajectory_->end_effector_tool_offset,
             excitation_trajectory_->end_effector_z_lower_limit,
@@ -1517,6 +1598,13 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
 
         measure_start_time_ = time;
         measure_phase_      = MeasurePhase::ExecutingTrajectory;
+        // 激励真正开始运动/记录的时刻：只打一条，便于对照 CSV 的首末时刻。
+        RCLCPP_INFO(
+            factory->node_->get_logger(),
+            "measure: 开始执行激励轨迹（%.2f s x %d 次 = %.2f s，按控制周期记录 q/q̇/τ）",
+            trajectory_period_,
+            trajectory_repeat_cnt_,
+            trajectory_period_ * static_cast<double>(trajectory_repeat_cnt_));
         return true;
     }
 
@@ -1532,16 +1620,16 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             return false;
         }
 
-        const bool has_acceleration = factory->state_acceleration_.size() == joint_count_;
+        // 实机不报加速度，这一组只用于仿真侧的 CSV 诊断列；辨识链路不依赖它。
+        const bool has_acceleration = factory->state_acceleration_available_;
         for (std::size_t i = 0; i < joint_count_; ++i) {
             const auto index              = static_cast<Eigen::Index>(i);
             measured_position_(index)     = factory->state_[i].position;
             measured_velocity_(index)     = factory->state_[i].velocity;
             measured_torque_(index)       = factory->state_[i].torque;
-            // 真实加速度（O8）：MuJoCo 的 qacc。取不到就记 0，报告里会体现出来。
             measured_acceleration_(index) = has_acceleration ? factory->state_acceleration_[i] : 0.0;
         }
-        // O8 的最后一环：**时间对齐**。
+        // O8 的最后一环：**时间对齐**，只对「有加速度」的仿真是必需的。
         //
         // MuJoCo 的 mj_step 是「先 mj_forward 算出 qacc，再积分」：步进结束后
         // mj_data 里的 qacc 是在**步进之前**的状态上算出来的
@@ -1550,9 +1638,17 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
         // M(q)q̈ + h(q,q̇) = τ 对不上——实测模型残差 0.25%（平缓轨迹）。
         // 把位置/速度**延后一拍**再与加速度/力矩配对后，残差降到 **0.0003%**（机器精度）。
         // 时间列同样用上一拍的时间，保持三元组自洽。
-        if (has_prev_sample_) {
+        //
+        // 实机没有加速度：位置/速度/力矩都来自同一帧 MCU 报文，本来就同拍，**不能再延后一拍**，
+        // 否则 q/q̇ 与 τ 差 2 ms，恰好给新的无 q̈ 辨识链路引入相位误差。
+        const bool align_to_previous = has_acceleration;
+        if (!align_to_previous || has_prev_sample_) {
             const std::size_t remaining = paramter_identify_->record_value(
-                prev_position_, prev_velocity_, measured_acceleration_, measured_torque_, prev_time_);
+                align_to_previous ? prev_position_ : measured_position_,
+                align_to_previous ? prev_velocity_ : measured_velocity_,
+                measured_acceleration_,
+                measured_torque_,
+                align_to_previous ? prev_time_ : time.seconds());
             if (remaining == 0 && !record_full_warned_) {
                 // 缓冲区写满：后续样本会被静默丢弃，这里只告警一次，避免实时线程刷屏。
                 record_full_warned_ = true;
@@ -1572,6 +1668,19 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             measure_phase_ = MeasurePhase::HoldingEnd;
             if (!csv_save_requested_) {
                 csv_save_requested_ = paramter_identify_->save_csv(measure_csv_file_path_);
+            }
+            // 激励结束的时刻：报告记录到多少样本、CSV 是否已开始落盘。
+            if (csv_save_requested_) {
+                RCLCPP_INFO(
+                    factory->node_->get_logger(),
+                    "measure: 激励轨迹执行完成，已记录 %zu 个样本；正在落盘 CSV：%s",
+                    paramter_identify_->record_count(),
+                    measure_csv_file_path_.c_str());
+            } else {
+                RCLCPP_ERROR(
+                    factory->node_->get_logger(),
+                    "measure: 激励轨迹执行完成，但 CSV 落盘请求失败（路径过长或上一次落盘尚未结束）：%s",
+                    measure_csv_file_path_.c_str());
             }
         }
     } else if (measure_phase_ == MeasurePhase::HoldingEnd) {

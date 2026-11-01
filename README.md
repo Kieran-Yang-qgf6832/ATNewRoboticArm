@@ -321,8 +321,12 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 
 #    常用参数：csv_file_path / trajectory_period / trajectory_repeat_cnt /
 #    move_to_start_duration / controller_urdf_path（控制器内部模型，只影响激励轨迹
-#    生成，被控对象仍是真值 URDF）/ step_timeout（测量变长时要放大）/
-#    trajectory_seed（0 = 随机不可复现，非 0 = 固定；控制器日志会打出实际种子）
+#    生成，被控对象仍是真值 URDF）/ trajectory_seed（0 = 随机不可复现，非 0 = 固定；
+#    控制器日志会打出实际种子）
+#    ⚠️ step_timeout 默认 900 s：CMA-ES 生成激励轨迹本机实测 570–660 s（随 seed 变化），加移动 3 s +
+#    激励 10 s 共 584–678 s（三次实测），900 s 留约 1.3–1.7 倍余量。轨迹变长时执行段和生成段都要加
+#    （period ≥ 20 s 时每次评估采样点翻倍，生成约 1140 s）：120 s 轨迹建议 1500，
+#    否则任务层会报 measure did not reach 'idel' 并判失败。
 #    测量默认 headless（关掉 MuJoCo UI 窗口，纯命令行跑）；想要界面加 headless:=false
 
 # 2) 离线辨识

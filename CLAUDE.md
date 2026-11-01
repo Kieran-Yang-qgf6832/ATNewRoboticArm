@@ -28,7 +28,7 @@ colcon build --packages-select arm_controller parameter_identify --symlink-insta
 ### 运行
 
 ```bash
-# MuJoCo 仿真（控制器 + RViz）
+# MuJoCo 仿真（控制器 + RViz）；默认同时把上位机关节指令录成 bag，见下文「bag 录制」
 ros2 launch launch_pack arm_controller_test_sim.launch.py
 
 # 任务层：跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
@@ -208,14 +208,27 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   - 两个参数 `0 = 关闭`，实际生效值会打在 `激励约束：` 日志行上。
   **实现要点（别走回头路）**：完整距离查询 79 ms/次（1000 点 × 1500 次 = 33 h，不可用），
   实际用「世界 AABB 预筛 + coal 带 security_margin 的碰撞查询」（约 0.94 ms/点）。
-  代价是**激励轨迹生成从 ~20 s 变成 ~54 s**，`arm_measure_sim.launch.py` 的
-  `step_timeout` 默认已从 30 s 提到 240 s。验证工具：
+  代价是**激励轨迹生成从 ~20 s 变成数分钟**：2026-10-30 在 6 关节全开 + 碰撞约束生效下
+  实测 **570–660 s（随 seed 变化）**（旧记录「约 54 s」来自 4 关节旧模型，已不适用）。因此
+  `arm_measure_sim.launch.py` 的 `step_timeout` 默认已定为 **900 s**
+  （实测总耗时 584–678 s 的约 1.3–1.7 倍）；轨迹变长要同时加执行段和生成段（period ≥ 20 s 时每次评估的
+  采样点翻倍，生成约 1140 s），120 s 轨迹建议 1500。
+  手动跑 `task_runner` 没有 launch 的默认值，必须显式传 `-p step_timeout:=900.0`，
+  否则会报 `measure did not reach 'idel' within <step_timeout> s`。验证工具：
   `src/parameter_identify/tools/check_collision.py`（拿 csv 里的实际关节角复算精确距离）。
   详见 `docs/bugs.md` O12。
 - `src/launch_pack/launch/` 下 `arm_static_display.launch.py` 与
   `arm_mujoco_sim.launch.py` 仍引用不存在的包、当前不可用（`arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`），是旧版本遗留。可用入口：`arm_controller_test_sim.launch.py`、
   `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟）。
+- **bag 录制**：`arm_controller_test_sim.launch.py` 与 `arm_real.launch.py` 默认额外起一个
+  `ros2 bag record`，录 `/arm_joint_traj`（上位机下发的关节指令）+ `/joint_states`（实际
+  响应），默认落在 `~/ros2_bag/arm_sim_<时间戳>` / `~/ros2_bag/arm_real_<时间戳>`。
+  `record_bag:=false` 关闭，`bag_path:=...` 指定目录（**目录必须尚不存在**，否则 record 直接
+  报错）。仿真链路带 `--use-sim-time`，bag 时间戳是仿真时间（显示为 1970 起步），回放要配
+  `--clock`；实机用系统时间戳。话题清单是各 launch 文件顶部的 `BAG_TOPICS` 常量，需要录
+  `arm_cart_traj` / `arm_servo` / `arm_admittance` 时直接往里加；还没有发布者的话题不报错，
+  rosbag2 的 discovery 会在发布者出现后自动订阅。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
@@ -224,7 +237,10 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `tool` / `wait` 七类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
-  2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。
+  2026-10-12 追加验证 120 s 长测量：59948 行、141 s；2026-10-30 在 6 关节 + 碰撞约束下
+  三次跑通：`step_timeout:=600` 时生成 570 s / 总 584 s / CSV 4998 样本；
+  不传覆盖（新的默认 `900`）时生成约 590 s / 总 604 s / CSV 4999 样本；
+  `seed=0` 随机轨迹生成 661 s / 总 678 s / CSV 4999 样本）。
   该 launch 支持 `csv_file_path` / `controller_urdf_path` / `trajectory_period` /
   `trajectory_repeat_cnt` / `move_to_start_duration` / `trajectory_seed` / `step_timeout`
   覆盖（见 O9、O10）。

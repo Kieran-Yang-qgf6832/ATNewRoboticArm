@@ -1,0 +1,11 @@
+[WARN] [1793258093.607808411] [rcl]: ROS_LOCALHOST_ONLY is deprecated but still honored if it is enabled. Use ROS_AUTOMATIC_DISCOVERY_RANGE and ROS_STATIC_PEERS instead.
+[WARN] [1793258093.607828799] [rcl]: 'localhost_only' is enabled, 'automatic_discovery_range' and 'static_peers' will be ignored.
+[INFO] [1793258093.645525776] [joint_calibrate]: 等待 /joint_states ...
+[INFO] [1793258093.686277454] [joint_calibrate]: 标定预览（不动作）：joint5 当前 q_urdf=-0.001917，本步将走到 +0.098083
+[INFO] [1793258093.687134285] [joint_calibrate]: exp_state -> joint_traj
+[INFO] [1793258093.987715083] [joint_calibrate]: [1/1] joint5: -0.0019 -> +0.0981（请盯住实物方向）
+[INFO] [1793258096.988298522] [joint_calibrate]:        实测 q_urdf(joint5) = +0.097794
+[INFO] [1793258096.989168612] [joint_calibrate]: exp_state -> idel
+[INFO] [1793258096.989209354] [joint_calibrate]: 已切回 idel。把观察到的结果记进 joint_calibration.yaml：
+  dir  = 实物转动方向与 URDF 正向一致 ? +1 : -1
+  zero = 机械臂摆到 URDF 零位时读到的 q_urdf（同号）

@@ -119,10 +119,21 @@ TaskContext::TaskContext(const rclcpp::Node::SharedPtr& node, Options options)
 
 bool TaskContext::wait_for_controller(double timeout_sec) const {
     if (!set_param_cli_->wait_for_service(std::chrono::duration<double>(timeout_sec))) {
-        RCLCPP_ERROR(
-            node_->get_logger(), "service /%s/set_parameters is unavailable; is the controller loaded and active?",
-            options_.controller_node.c_str());
+        // 调用方会周期性重试，这里只在第一次失败时上报一次，之后静默；
+        // 恢复可用时再补一条 INFO，保证「一次故障一条日志」。
+        if (!controller_wait_reported_) {
+            RCLCPP_ERROR(
+                node_->get_logger(), "service /%s/set_parameters is unavailable; is the controller loaded and active?",
+                options_.controller_node.c_str());
+            controller_wait_reported_ = true;
+        }
         return false;
+    }
+    if (controller_wait_reported_) {
+        RCLCPP_INFO(
+            node_->get_logger(), "service /%s/set_parameters is available again; controller is ready",
+            options_.controller_node.c_str());
+        controller_wait_reported_ = false;
     }
     return true;
 }
@@ -205,11 +216,19 @@ bool TaskContext::wait_for_joint_states(double timeout_sec) {
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
         spin_some();
         if (have_joint_states_) {
+            if (joint_state_wait_reported_) {
+                RCLCPP_INFO(node_->get_logger(), "/joint_states received; joint feedback is ready");
+                joint_state_wait_reported_ = false;
+            }
             return true;
         }
         rate.sleep();
     }
-    RCLCPP_ERROR(node_->get_logger(), "no usable /joint_states received; is joint_state_broadcaster running?");
+    // 与 wait_for_controller 一致：只在第一次超时时上报，避免调用方重试时反复刷屏。
+    if (!joint_state_wait_reported_) {
+        RCLCPP_ERROR(node_->get_logger(), "no usable /joint_states received; is joint_state_broadcaster running?");
+        joint_state_wait_reported_ = true;
+    }
     return false;
 }
 

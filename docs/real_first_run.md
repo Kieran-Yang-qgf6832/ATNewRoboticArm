@@ -541,7 +541,7 @@ joint6 无电机、机械锁死。`ArmRealInterfaces::read()` 把 joint6 的状�
 | `update_rate` | 500 Hz | **100 Hz** | `write()` 是同步 USB bulk 发送（超时 2 ms），200 Hz 时一次抖动就吃满周期 |
 | `exp_state` | `reset` | **`idel`** | 首次上电只锁存当前姿态，不自动复位 |
 | `task_dim` | 6 | **5** | joint6 无电机，只控位置 3 + 工具指向 2 |
-| `real_mode` | false | **true** | `teach_pendant` / `measure` 在实机物理不成立，切入前就被拒绝 |
+| `real_mode` | false | **true** | `teach_pendant` 物理不成立（切入前拒绝）；`measure` 已支持实机（无 `acc_*`、joint6 冻结） |
 | `command_interface_prefix` | `sim_pid_controller` | **空** | 硬件接口的命令键是 `<joint>/<interface>`，不带控制器前缀 |
 | `gravity_compensation` | true | **false** | 下发力矩会被固件直接叠加到速度环且无上限；模型质量只在仿真里辨识过 |
 | `default_kp/kd` | 200/8 … | 40/1.6 … | 仅满足接口声明，**不上总线、不产生效果** |
@@ -588,7 +588,8 @@ ros2 topic pub --once /arm_joint_traj robot_msgs/msg/JointTrajCmd "{
 | `未提供 joint_calibration_file，按 dir=1/zero=0 直接透传。` | URDF 里 `<param name="joint_calibration_file">` 丢了 | 检查 `src/arm_model/model/robotic_arm.urdf` 的 `hardware:=real` 段 |
 | `无法把控制器切到 joint_traj` / `参数服务不可用` | `arm_controller` 没激活，或节点名不是 `arm_controller` | `ros2 control list_controllers`；用 `-p controller:=<名字>` 指定 |
 | `10 s 内没有收到 /joint_states，退出` | `joint_state_broadcaster` 没起 / 话题被重映射 | `ros2 topic list | grep joint_states`；`ros2 control list_controllers` |
-| 设置 `exp_state: teach_pendant` 或 `measure` 失败 | `real_mode: true` 下的**正常拒绝** | 实机不支持这两个状态，回仿真链路做参数辨识 |
+| 设置 `exp_state: teach_pendant` 失败 | `real_mode: true` 下的**正常拒绝**（MCU 不接收阻抗增益） | 实机不做示教拖动 |
+| `measure` 采集的 CSV 没有 `acc_*` 列 | **正常**：MCU 不上报加速度 | 送 `identify_arm` 时保持 `filter.enabled: true`，它不需要加速度（docs/bugs.md §9） |
 | 机械臂朝**反方向**动、或一下冲到限位 | `dir` 填反了 | 立刻急停；回 Phase 5.3 重新核对 |
 | 机械臂静止时角度**不是 0**，但姿态看起来对 | `zero` 没标定 | 回 Phase 5.4 |
 

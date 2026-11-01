@@ -14,10 +14,13 @@
 /**
  * @brief 参数辨识测量数据的实时记录器（docs/bugs.md O8）
  *
- * 记录 时间 / 位置 / 速度 / **加速度** / 力矩。加速度必须是**真实测量值**
- * （仿真里是 MuJoCo 的 qacc），不能用"对记录速度二次求导"代替——那样相对误差
- * 31.5%，会把辨识结果推出物理可行集。时间列同样记**仿真时间**而不是墙钟，
- * 否则时间戳抖动（实测 dt 标准差 18.7%）会再污染一次求导。
+ * 记录 时间 / 位置 / 速度 / 力矩，**加速度列是可选的**：硬件真的提供 acceleration
+ * 状态接口时（目前只有 MuJoCo 仿真）才把 acc_* 写进 CSV，作为诊断量；实机的 MCU
+ * 协议只上报位置/速度/力矩，CSV 里就不再有 acc_* 列。
+ *
+ * 辨识链路已改成不依赖关节加速度（分部积分滤波回归量），所以实机没有加速度也成立。
+ * 仿真里依旧记录真实 qacc。时间列记**仿真时间**而不是墙钟（墙钟 dt 抖动实测会让
+ * 任何数值微分再污染一次数据）。
  *
  * 记录与落盘分离：record_value() 跑在 500 Hz 实时线程里，只做拷贝；
  * 落盘交给独立线程（save_csv + save_worker_func），避免实时路径做文件 IO。
@@ -29,6 +32,15 @@ public:
 
     // 参数数量，自由度；预先resize内存，防止运行时分配内存
     void application_memory(int param_num, int dof);
+
+    /**
+     * @brief 是否把 acc_* 列写进 CSV（默认写，仿真用）。
+     *
+     * 在 measure 进入时按硬件是否提供 acceleration 状态接口设置一次；
+     * 关闭时 CSV 只有 time, pos_j, vel_j, torque_j 这几组列，辨识链路也不需要加速度。
+     * @param enabled true = 写 acc_* 列（仿真）；false = 不写（实机）。
+     */
+    void set_record_acceleration(bool enabled);
 
     /**
      * @brief 记录一个采样点（实时线程调用，只做拷贝）。
@@ -61,6 +73,8 @@ private:
 
     std::size_t record_index{0};
     Eigen::Index dof_{0};
+    /// 是否写 acc_* 列；实机（硬件不报加速度）为 false。
+    bool record_acceleration_{true};
 
     std::atomic_bool save_requested_{false};
     std::atomic_bool save_finished_{true};

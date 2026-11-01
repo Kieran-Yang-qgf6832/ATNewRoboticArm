@@ -220,8 +220,8 @@ private:
      * @brief 是否在实机模式下运行
      *
      * 来自 controller YAML 的 @c real_mode。实机上末端回转关节没有电机（joint6
-     * 机械锁死），且 MCU 不接收阻抗增益、不上报加速度，因此 @c teach_pendant 与
-     * @c measure 两个状态物理上不成立，请求切入时直接拒绝并报错。
+     * 机械锁死），且 MCU 不收阻抗增益，因此 @c teach_pendant 状态物理上不成立，
+     * 请求切入时直接拒绝并报错。@c measure 已不再依赖关节加速度，实机可用。
      */
     bool real_mode_{false};
     /// 关节名称列表，决定命令/状态接口的数量与命名
@@ -241,6 +241,17 @@ private:
     rclcpp::TimerBase::SharedPtr state_timer_;
     /// 上一次已发布的状态名，用于只在状态变化时发布
     std::string published_state_name_;
+
+    /**
+     * @brief 单次上报标志：同一类持续故障只打一条日志
+     *
+     * 安全保持与关节越限都写在对 500 Hz 实时回调里，用 THROTTLE 会每 2 s 重复一条
+     * 同类错误。这里改成「进入故障时打一次、恢复正常后复位」，确保一个故障周期
+     * 只有一条 ERROR（恢复时补一条 INFO），终端不刷屏。
+     */
+    bool safety_hold_reported_{false};
+    /// 上一次已上报越限的关节下标（-1 表示当前无越限）
+    int reported_limit_joint_{-1};
 };
 
 }  // namespace arm_controller

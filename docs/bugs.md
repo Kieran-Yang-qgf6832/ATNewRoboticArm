@@ -17,8 +17,14 @@
 | §4 | 修复与提交对照 |
 | §5 | 方法论教训 |
 | §6 / §7 | O1 / O5 两轮专项排查的完整记录 |
+| §8 | 实机联调（与下位机固件对齐） |
+| §9 | **无加速度参数辨识改造（Q1–Q7 已闭环，待实机验收）** |
 
-**当前状态**：**F1–F12、O1–O12 全部闭环，参数辨识链路可用。**
+**当前状态**：**F1–F12、O1–O12、R1–R4、R6 全部闭环。**
+`R5`（固件无指令看门狗）是已知限制，本次不动固件。
+`feat/identify-without-qdd` 分支上的「不依赖关节加速度」改造 **Q1–Q7 已闭环**：
+仿真 fixture 的基参数范数相对误差 **0.50%–0.95%（≤1% 判据）**，pytest 回归用例已入库。
+剩余工作是**实机实测 + 第二条 seed 留出验证**（需硬件），详见 §9.3/§9.4。
 
 从「辨识结果非物理」（O8）一路排到「激励轨迹撞地面」（O11），最后一次专项排查（2026-10-13）
 之后：好激励下辨识参数误差 **0.0011%**、力矩预测误差 **0.0003%**，与真值模型一致，
@@ -64,6 +70,13 @@
 | **R4** | 实机只有 5 个电机，joint6 无电机、机械锁死；6 维到位判据永远不满足 | 高 | **已处理**（joint6 状态回写 + 5 维任务空间） | （本次，未提交） |
 | **R5** | 固件没有指令看门狗：上位机或 USB 断链后，MCU 继续按最后一帧目标跑 | **高** | **已知限制，未修**（本次不动固件） | — |
 | **R6** | 实机上 `teach_pendant` / `measure` 物理不成立（MCU 不接收增益、不上报加速度） | 中 | **已修**（实机模式拒绝切入） | （本次，未提交） |
+| **Q1** | 「有没有加速度」用 `state_acceleration_.size()` / `state_stride>=4` 判断，两处都恒真（实机接口导出恒 0 占位） | 高 | **已修**（改判 `!real_mode_`） | 见 §9 |
+| **Q2** | FIGAROH 回归矩阵是「关节优先」`row = joint*N + sample`，滤波代码按样本优先 reshape，数据错列 | **严重** | **已修** | 见 §9 |
+| **Q3** | `reconstruction.enabled=false` 时报告引用未赋值的 `configured_method`，`UnboundLocalError` | 中 | **已修** | 见 §9 |
+| **Q4** | 差分方向导数的广播写成 `(S,1,1)`，与 `(S*nv,C)` 相乘把数组撑到 4.2e9 元素 | 中 | **已修** | 见 §9 |
+| **Q5** | C++ 注释写 `pos_*/vel_*/torque_*`，`*/` 提前终止块注释导致编译报错 | 低 | **已修** | 见 §9 |
+| **Q6** | 分部积分滤波回归量在富激励数据下基参数爆到 2.3e6（连续/离散 `a` 失配 + QR 容差过松 + 导数格式） | **严重** | **已修**（范数误差 0.50%–0.95%） | 见 §9.3 |
+| **Q7** | `base_parameter_relative_error_max` 对名义值为 0 的摩擦/偏置列只用固定下限做分母，指标失真 | 中 | **已定稿**（验收改用 `..._error_norm`） | 见 §9.3 |
 
 ---
 
@@ -1242,7 +1255,8 @@ seed=1 端到端跑 measure（`csv_file_path:=/tmp/o12_measure_final.csv`）：
 - 激励得分 **2.2140**（O11 修复后的 seed=1 是 2.121，O11 之前 2.165）——旧的 0.20 m 末端
   z 下限关掉后激励空间变大，碰撞约束没有把得分压下去；
 - 轨迹生成耗时约 **54 s**，任务层默认 30 s 的 `step_timeout` 会误判失败 →
-  `arm_measure_sim.launch.py` 的 `step_timeout` 默认值提到 **240 s**；
+  `arm_measure_sim.launch.py` 的 `step_timeout` 默认值当时提到 **240 s**
+  （2026-10-30 起已改为 900 s，见 §9.5 Q8）；
 - 记录轨迹（实际关节角，含跟踪误差）用 `check_collision.py` 复算精确距离：
   **见下方验证小节**。
 
@@ -1765,3 +1779,219 @@ ros2 run 不适用；直接用绝对路径：
 > 另外注意：本工作区的 `install/` 里有若干条目是指向另一份工作区
 >（`/home/kangy/MyProjects/ATNewRoboticArm`）的符号链接，`tasks` 的二进制与 YAML 都来自那里。
 > 想做可信的仿真回归，应先 `rm -rf build install` 从本工作区源码全量重建。
+
+---
+
+## 9. 无加速度参数辨识改造（分支 `feat/identify-without-qdd`，2026-10-30）
+
+**状态：Q1–Q7 已闭环，仿真验收通过（≤1%）；待实机实测与留出集验证。**
+本节记录「做到哪、为什么改、踩过什么坑」，避免换手后重复排查。
+
+### 9.0 为什么改
+
+实机约束（见 §8 R4/R6）：MCU 不上报关节加速度，joint6 没有电机。原辨识链路
+`identify_arm.py` 依赖 `acc_*` 列（或由速度二次求导），在实机上根本不成立——
+O8 已经证明二次求导的加速度误差 31.5%，辨识结果非物理。因此把辨识改成**不依赖 q̈**。
+
+已确认的方案（用户逐条拍板）：
+
+| # | 决策 |
+| --- | --- |
+| 1 | 消 q̈ 的形式：**分部积分滤波回归量**（对回归量与 τ 施加同一低通，解析消掉 q̈） |
+| 2 | 滤波只加在 Python 侧，**不**往 `ros2_controller.yaml` 加 `measure_filter_cutoff_hz` |
+| 3 | 摩擦/偏置进线性回归（`has_friction: true`、`has_joint_offset: true`），每关节 3 列 |
+| 4 | 实机 CSV 不写 `acc_*`；loader 把 `acc_*` 降级为可选列 |
+| 5 | 激励轨迹 + CMA-ES 加关节掩码，joint6 固定在当前位形（`measure_frozen_joints: [joint6]`） |
+| 6 | 力矩可行性上限按 URDF `effort` 的真实额定（j1=11 / j2=20 / j3=6 / j4=6 / j5=1.8，j6 不动）；`measure_traj_torque_limit_rate: 1.0` |
+| 7 | 留出集：另录一条不同 seed 的激励轨迹做验证 |
+| 8 | 验收：仿真参数相对误差 ≤1%（对齐 O8 的 0.39% 基准）；实机留出力矩 RMS ≤5% 额定 |
+| 9 | 滤波器零初值 + 丢掉开头 0.5 s |
+
+数学推导（`L(s)=a/(s+a)`，`a=2πf_c`）。「分部积分」指的是恒等式 `s·L(s)=a−a·L(s)`：
+时域上就是把 `Ḃ` 上的导数转嫁给滤波核，`(L Ḃ)(t) = ∫₀ᵗ a·e^{−a(t−s)}·Ḃ(s) ds`。
+
+```
+B = A(q)·q̇            （Y(q,0,q̇) − Y(q,0,0)：速度列传 0，摩擦列恒为 0；重力/偏置相减抵消）
+V = ∂B/∂q·q̇           （方向导数，中心差分，ε = h/‖q̇‖）
+L(Ḃ) = a·B − a·L(B) − a·e^{−at}·B(0)      （末项是零初值滤波的瞬态）
+L(Aq̈) = L(Ḃ) − L(V)
+W_f   = a·B − a·L(B) − L(V) + L(H)，  H = Y(q,q̇,0)，目标 τ_f = Lτ
+```
+
+瞬态项 `a·e^{−at}·B(0)` 随时间指数衰减：2 Hz 时 `a = 12.57`，`e^{−a·0.5} ≈ 0.0019`，
+丢开头 0.5 s 后残余约为 `B` 量级的 0.2%。所以 `drop_initial_seconds` 不是"随便丢点数据"，
+而是这条零初值近似的必要条件，不能再调小。
+
+### 9.1 已落地改动
+
+| 文件 | 内容 |
+| --- | --- |
+| `arm_controller/.../controller.cpp` | `state_unavailable_on_real()` 只拒 `teach_pendant`；新增 `measure_frozen_joints` 声明；`on_activate` 置 `state_acceleration_available_ = !real_mode_` |
+| `arm_fsm_factory.hpp` | 新增 `state_acceleration_available_`，并注明 `state_acceleration_` 长度恒等于关节数、不能用于判断 |
+| `arm_fsm.cpp/.hpp` | `ParamterMeasureState` 读 `measure_frozen_joints` → 索引映射 + `frozen_positions_`；`enter()` 里下发 `set_frozen_joints` 与 `set_record_acceleration(...)`；无加速度时同拍记录（不再延后一拍） |
+| `excitation_trajectory.cpp/.hpp` | `set_frozen_joints`、`expand_coefficients`（只对活跃关节生成 CMA-ES 维度，冻结关节锁定在 `frozen_q0_`）；`traj_constraint_violation` 跳过冻结关节的软限位检查 |
+| `paramter_identify.cpp/.hpp` | `set_record_acceleration(bool)`；`write_csv_file` 的 `acc_*` 表头与数据行按开关省略 |
+| `arm_model/model/robotic_arm.urdf` | 5 个关节 `effort` 改真实额定（joint6 保持 50） |
+| `launch_pack/config/ros2_controller.yaml` | `measure_traj_torque_limit_rate: 1.0`；新增 `measure_frozen_joints: []` |
+| `launch_pack/config/ros2_controller_real.yaml` | `measure_frozen_joints: [joint6]`；measure 段落注释重写（50 Hz 报文、100 Hz 落盘、另录第二条 seed、无 `acc_*`） |
+| `parameter_identify/filtered_identification.py`（新增） | `build_acceleration_free_regressor`、`estimate_sample_time`、`lowpass`、`FilteredRegressor` |
+| `parameter_identify/csv_loader.py` | `accelerations` 允许为 `None`；`recorded` 且缺列时返回 `"absent"` 而不是抛错 |
+| `parameter_identify/identify_arm.py` | 无加速度主管线、采样步长自适应、摩擦/偏置参数名对齐、基参数相对误差写入报告 |
+| `parameter_identify/config/identify.yaml` | 新增 `filter:` 段（`enabled: true`、`cutoff_hz: 2.0`、`drop_initial_seconds: 0.5`、`finite_difference_step: 1.0e-6`、`derivative_scheme: central`、`qr_tolerance: 1.0e-6`） |
+| `parameter_identify/test/test_identification_without_acceleration.py`（新增） | pytest 回归用例；fixture `test/fixtures/sim_joint6_frozen_500hz.csv`（500 Hz、10 s、joint6 冻结、无 `acc_*`） |
+
+`colcon build` 已通过（48.5 s，exit 0），改动**尚未提交**。
+
+### 9.2 已修的坑（Q1–Q5）
+
+**Q1 加速度可用性判断恒真（高）**
+原判据 `state_acceleration_.size() == joint_count_` 与 `state_stride >= 4` 在实机上也成立：
+`on_configure` 无条件 `assign` 了该数组，而 `arm_real_interfaces` 导出一个恒 0 的 acceleration
+占位接口。两者都判断不出「实机没有真加速度」。改为在 `on_activate` 读 `real_mode_`：
+`state_acceleration_available_ = !real_mode_`。
+
+**Q2 回归矩阵行序读错（严重）**
+`build_regressor_basic` 返回的是**关节优先**布局：`row = joint * sample_count + sample`。
+滤波实现按样本优先 `reshape(sample_count, nv, columns)`，把不同关节、不同时刻的数据混在一起，
+再沿「时间轴」做低通。现象是拟合 rmse 看着还行（0.53），基参数却完全错（最大逐项相对误差 1.6e4）。
+修法：先 `reshape(nv, sample_count, columns)`，时间在 `axis=1`，低通按 `axis=1`；
+输出时 `filtered[:, kept].reshape(nv*kept.size, columns)`，与后续 `_select_active_joint_blocks`
+的「每关节一段样本」约定一致。
+
+**Q3 `configured_method` UnboundLocalError（中）**
+`reconstruction.enabled: false` 时 `configured_method` / `effective_recon_method` 只在
+`if` 分支里赋值，报告字典在分支外引用 → `UnboundLocalError`。修法：在 `recon_cfg` 之后、
+`if` 之前给默认值（`effective_recon_method = "disabled"`），分支内只覆盖。
+
+**Q4 广播把数组撑到 4.2e9 元素（中）**
+`(b_plus - b_minus) / (2*eps[:,None,None])` 中 `b_*` 是 `(S*nv, C)`，与 `(S,1,1)` 广播后
+是 `(S, S*nv, C)`，直接 `cannot reshape array of size 4212000000`。修法同上（Q2）：
+先摊平成三维再除以 `(1, S, 1)`。
+
+**Q5 注释里的 `*/` 提前终止块注释（低）**
+`paramter_identify.hpp` 的注释写 `pos_*/vel_*/torque_*`，里面的 `*/` 结束掉块注释，
+后半个 `*/` 变成非法标识符，报 `extended character ，is not valid in an identifier`。
+改成 `time, pos_j, vel_j, torque_j`。
+
+### 9.3 Q6 数值爆炸：根因与修复（已闭环）
+
+**现象**（仿真 fixture，`filter.enabled: true`，cutoff 2 Hz，丢开头 0.5 s）：
+
+| 数据 | 路径 | rmse | 基参数范数相对误差 | 最大逐项相对误差 | 基参数个数 |
+| --- | --- | --- | --- | --- | --- |
+| 6 关节·3 谐波·6 s·500 Hz·3000 样本 | 滤波 | 0.0047 | **4.6%** | — | — |
+| 同上 | 基线（`filter.enabled=false` + 速度求导加速度） | 0.045 | 2.1% | — | — |
+| 6 关节·4 谐波·20 s·100 Hz·2000 样本 | 滤波 | 0.0131 | **2.28e6** | 6.58e7 | 57 |
+| 同上 | 基线 | 0.0453 | **1.03%** | 3.44 | 54 |
+
+基线在富激励数据上已经做到 1.03%，说明管道、QR、参数名对齐都没问题；因此问题全部集中在
+滤波实现，且「激励越丰富越差 + 基参数个数 54→57」指向**弱列被滤波放大后混进 QR**。
+逐层排查后确认是**三重根因叠加**，只修其中任何一个都不够：
+
+1. **连续域 `a` 与离散 IIR 失配（主因）**
+   `a·B − a·L(B)` 里的恒等式 `s·L(s) = a − a·L(s)` 在离散域并不严格成立：
+   一阶 IIR `H(z)=(1−α)/(1−αz⁻¹)` 与后向差分 `D(z)=(1−z⁻¹)/dt` 满足
+   `D·H = a_eff·(1−H)` 当且仅当 `a_eff = (1−α)/(α·dt)`。直接代入连续域的
+   `a = 2πf_c` 会留下 O(a·dt) 的失配（2 Hz 在 100 Hz 采样下约 7%、50 Hz 下约 14%）。
+   判据是「用**真值参数**拟合滤波回归量」——失配下仍残留 0.86% 力矩残差，换 `a_eff` 后
+   降到 0.13%。修法：`_effective_cutoff(cutoff_hz, sample_time)`。
+2. **QR 秩判据过松（1e-8）**
+   滤波后少数参数方向只剩很弱但非零的响应，`1e-8` 把它们当独立列留下：基参数 57 列、
+   `cond_R1` 1.3e11、参数爆到 1e6。改成 `1e-6` 后基参数回到 52–54 列、`cond_R1` 1.01e3。
+   修法：滤波路径专用 `filter.qr_tolerance: 1.0e-6`，基线仍用
+   `identification.qr_tolerance: 1.0e-8`（两者共用会把基线从 1.03% 推到 1.18%）。
+3. **导数离散格式（`identity` 隐含后向差分）**
+   `a_eff` 只修好恒等式，`L(Ḃ)` 的离散误差仍是 O(dt)。改用离线中心差分
+   （`derivative_scheme: central`，`np.gradient` 后再低通）把无噪声真值残差从 1.33e-3
+   降到 1.07e-5。`identity` 保留为对照，不再作为默认。
+
+> **已排除的一条**：早期把「公式漏掉 `−L(ḟ)`」列为第一嫌疑，前提是「`B` 含摩擦项 `f(q̇)`」。
+> 这个前提不成立——`B` 由 `Y(q,0,q̇) − Y(q,0,0)` 得到，求值时速度列传的是 0，摩擦列恒为 0；
+> 摩擦只走 `H` 通道，`L(H)` 已经含 `L(f)`，不存在 `ḟ` 漏项。
+
+**修复后的实测（fixture 冻结 joint6，模拟实机无电机；判据 ≤1%）**：
+
+| 数据 | rmse | 基参数范数相对误差 | 基参数个数 |
+| --- | --- | --- | --- |
+| 500 Hz·2 周期·10000 样本 | 0.002159 | **0.50%** | 52 |
+| 500 Hz·1 周期·5000 样本（入库 fixture） | 0.002075 | **0.75%** | 52 |
+| 100 Hz·2 周期·2000 样本 | 0.01073 | **0.95%** | — |
+| 50 Hz·2 周期·1000 样本（实机采样率） | 0.006713 | 1.44% | — |
+| 500 Hz 无噪声 | — | 0.033% | — |
+
+50 Hz 的 1.44% 判断为样本数减半导致的统计效率损失（cutoff 0.5–5 Hz 扫参无改善），
+**不是公式错误**；实机验收判据是留出力矩 RMS ≤5% 额定，不以参数误差为准。
+
+回归用例：`src/parameter_identify/test/test_identification_without_acceleration.py`
+（`pytest` 通过，断言 `base_parameter_relative_error_norm <= 0.01` 且 `rmse < 0.01`）。
+跑法：`bash -lc 'source /opt/ros/jazzy/setup.bash && cd src/parameter_identify && python3 -m pytest test -q'`
+（pinocchio 在 ROS jazzy 的 site-packages 里，不 source 会 import 失败）。
+
+**Q7 验收度量定稿（已闭环）**
+
+`base_parameter_relative_error_max` 用 `max(|nominal_i|, 1e-3·max|nominal|)` 做分母。
+仿真 URDF 里摩擦与偏置本来就是 0，辨识出的 `fv_/off_` 只有 0.005–0.017 量级，
+按 floor 一除就成了 11–13 的「相对误差」，而范数误差只有 2–5%。
+**O8 的 0.39% 用的是范数度量 `‖θ−θ_true‖/‖θ_true‖`，不是逐项最大值。**
+定稿：验收统一用 `base_parameter_relative_error_norm`（`identify()` 返回字典与报告里都有）；
+`..._error_max` 只作为定位工具看，不进判据。
+
+**遗留观察（不阻塞）**
+
+默认 `identify.yaml`（`reconstruction.enabled: true`）在 500 Hz fixture 上跑通（exit 0、
+`base_parameter_relative_error_norm: 0.00503`），但报告写 `reconstruction_status: error`，
+`physical_projection` 各关节 `message: null`、日志无报错。判断是 vendored FIGAROH 0.6.0
+的既有行为（SDP 不可行 → 投影成功 → 不拒绝写文件），待实机流程再定性。
+
+### 9.4 待办
+
+- [x] 修 Q6（`a_eff` + `filter.qr_tolerance=1e-6` + `derivative_scheme=central`）
+- [x] 定稿 Q7 验收字段：统一用范数误差
+- [x] 仿真 CSV fixture 入库 + pytest 回归用例（判据 ≤1%）
+- [x] 修 Q8：measure 状态无进度日志 + duration 过短导致机械臂看似不动
+- [ ] 更新过期文档/注释：`docs/real_first_run.md`（仍写着「实机不支持 measure」）、`README.md`、
+      `identify.yaml` 注释
+- [ ] 提交 C++ + Python 改动到 `feat/identify-without-qdd`
+- [ ] 实机实测 + 另录第二条 seed 作留出验证（需硬件）
+
+### 9.5 Q8 仿真测量时机械臂不动（2026-10-30，已闭环）
+
+**现象**：`arm_measure_sim.launch.py` 启动后，task_runner 报 `measure active for 20.00 s`，
+但机械臂全程保持零位不动，CSV 没有数据产出。
+
+**根因**：激励轨迹由 CMA-ES 在线优化生成（1500 次评估 × 每周期 1000 个采样点，含碰撞约束
+查询）。**2026-10-30 在 6 关节全开 + 碰撞约束生效的配置下复测：生成实测约 570 s**
+（旧记录里的「约 50 s」来自 4 关节、无碰撞约束的旧模型，已不适用）。
+`ParamterMeasureState::enter()` 调用 `generate()` 后进入 `WaitingForTrajectory` 阶段，
+期间只锁存当前位形、不发运动指令，且不逐拍打日志。
+
+**修复**：
+1. `arm_fsm.cpp`：`enter()` 在 `generate()` 前打一行「开始生成激励轨迹」日志；
+   `run()` 的 `WaitingForTrajectory` 分支只在需要跟踪时用 `RCLCPP_DEBUG` 打进度
+   （2026-10-30 起不再用 5 s 一条的 INFO_THROTTLE，避免终端刷屏）。
+2. `measure.yaml`：`measure` 步骤 `duration` 从 20 s 提到 **90 s**。
+   注意 `duration` **只是任务层请求 idel 的时刻，不是总超时**——控制器到 `HoldingEnd`
+   才接受 idel，期间测量照跑、数据不丢。真正的上界是 task_runner 的 `step_timeout`
+   （从请求 idel 起算）。
+3. **2026-10-30 更正**：默认 `step_timeout = 240 s` 覆盖不了 570 s 的生成时间
+   （90 + 240 = 330 s < 570 s），会在机械臂开始运动前就报
+   `measure did not reach 'idel' within 240 s`。现把 launch 默认值定为 **900 s**
+   （实测 584 s 的约 1.7 倍，可吸收并发编译/更慢机器的波动）；轨迹变长时执行段与生成段
+   都要加（`period >= 20 s` 时每次评估的采样点从 1000 涨到 2000，生成约 1140 s），
+   `120 s` 轨迹建议 `1500`。手动跑 `task_runner`
+   没有 launch 的默认值，必须自己传 `-p step_timeout:=900.0`。
+
+**验证（2026-10-30 两次完整运行）**：
+
+| 运行 | step_timeout | 生成耗时 | 总耗时（自请求 measure 起） | 结果 |
+| --- | --- | --- | --- | --- |
+| seed=1 | 600.0（显式传入） | ≈570 s | ≈584 s | 「激励轨迹就绪」得分 2.2140 → `sequence 'measure_only' finished` → CSV 4998 样本 |
+| seed=1 | **900.0（launch 默认，不传参）** | ≈590 s | ≈604 s | 「激励轨迹就绪」得分 1.8333、碰撞违例 0 → `sequence 'measure_only' finished` → CSV 4999 样本 |
+| seed=0（随机轨迹） | 900.0（默认） | ≈661 s | ≈678 s | 就绪/约束正常（碰撞违例 0）→ `sequence 'measure_only' finished` → CSV 4999 样本 |
+
+三轮 `check_collision.py`/离线辨识前置条件都正常；默认 900 s 的绝对预算是
+`duration(90) + step_timeout(900) = 990 s`，相对最慢一轮 678 s 仍有约 310 s 余量，
+并发编译或更慢机器也不会误判。生成耗时随 seed 变化（570–661 s），`seed=1` 才可复现。
+用旧默认 240 s 复现失败，报错与上述一致。每轮日志约 200 行（其中 24 行
+`legacy anti-windup` 来自 `control_toolbox` 的 `std::cout`，与日志级别无关），无刷屏。
+

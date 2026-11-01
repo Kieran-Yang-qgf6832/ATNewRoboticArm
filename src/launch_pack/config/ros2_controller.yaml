@@ -32,6 +32,7 @@ arm_controller:
       - joint6
     urdf_path: ""
     command_interface_prefix: sim_pid_controller
+
     # 控制器激活后自动进入的状态。
     # 设为 reset：上电（激活）后先自动复位到 reset_joint_pos，复位完成时 ResetState
     # 会把内部期望状态写回 idel，于是自动回到空闲并锁定零位——即"先 reset 再 idel"。
@@ -41,6 +42,7 @@ arm_controller:
     exp_state: reset
     default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
     default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
+
     # 所有保持路径的重力前馈补偿（docs/bugs.md O6 / O7）：reset / idel 与
     # write_hold_command()（cart_traj / joint_traj / admittance 的保持阶段）共用
     # HoldGravityFeedforward（arm_fsm.hpp）。
@@ -54,25 +56,28 @@ arm_controller:
     reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     reset_duration: 3.0
     reset_tolerance: 0.01
+
     # 兜底：复位时长结束后再等这么久仍未全部到位（例如重力静差大于容差），打一条
     # WARN 并强制切回 idel，避免 FSM 卡在 reset 静默吞掉后续 exp_state 请求。
     # 任务层的 reset 步骤会一直等到 current_state 变成 idel，所以这个值直接加在任务的等待
     # 时间上（reset_duration + reset_settle），不宜过大；也不能大到超过任务层的 step_timeout
     # （默认 30 s，见 task_executor.hpp）。
     reset_settle: 2.0
-    measure_trajectory_period: 10.0
+    measure_trajectory_period: 20.0
     measure_move_to_start_duration: 3.0
     measure_trajectory_repeat_cnt: 1
+
     # 辨识测量 CSV 的输出路径。相对路径按启动进程的工作目录解析。
     # 通过 launch_pack/arm_measure_sim.launch.py 启动时，launch 会把它覆盖成
     # <项目根目录>/measured_for_identification.csv 的绝对路径（不再写 /tmp）。
     # 控制器在**构造阶段**读这个参数，只改这里必须重启控制器才生效（docs/bugs.md C6）。
-    measure_csv_file_path: measured_for_identification.csv
+    measure_csv_file_path: measured_for_identification.csv  # measured_for_identification.csv / meas_seed42.csv
     measure_record_sample_rate: 500.0
+
     # 激励轨迹 CMA-ES 的随机种子（docs/bugs.md O10）。0 = 每次按当前时间随机，
     # 生成的轨迹**不可复现**；填任意正整数即可复现同一条轨迹——控制器日志里的
     # "seed=" 会打出实际使用的值，照抄回来即可重放某一次测量。
-    measure_trajectory_seed: 0
+    measure_trajectory_seed: 7
     admittance_mass: [1.0, 1.0, 1.0, 0.1, 0.1, 0.1]
     admittance_damping: [20.0, 20.0, 20.0, 2.0, 2.0, 2.0]
     admittance_stiffness: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -80,6 +85,7 @@ arm_controller:
     measure_end_effector_x_upper_limit: .inf
     measure_end_effector_y_lower_limit: -.inf
     measure_end_effector_y_upper_limit: .inf
+
     # 末端位置箱式约束。注意 **z 下限卡的是"工具最低点"**，不是末端 frame 原点：
     # 实际值 = 末端原点 z - measure_end_effector_tool_offset。
     # 实测（2026-10-13）：只卡原点 z>=0.1 时 link6 的工具网格会钻进地面 4.6 mm，
@@ -91,14 +97,23 @@ arm_controller:
     # 保留这两个参数作 O11 的回归基准与逃生开关：想回到旧的单点约束，把 z 下限设回 0.20 即可。
     measure_end_effector_z_lower_limit: -.inf
     measure_end_effector_z_upper_limit: .inf
+
     # 工具最低点相对末端 frame 原点的偏移（沿 -z，米）。link6 的 STL 实测 0.0569 m，
     # 留一点余量取 0.07；实际生效值见控制器日志 "激励约束：" 那一行。
     # 只在 measure_end_effector_z_lower_limit 有限时才有意义（O12 后默认关闭）。
     measure_end_effector_tool_offset: 0.07
+
     # 指令力矩可行性：RNEA 算出的 |关节力矩| 不得超过 该比例 × 关节额定力矩（URDF 的
-    # effort=50 N·m）。0 = 关闭。实机上力矩超限会直接跟踪失败；仿真里关节会被甩到高速，
-    # 记录到的 qacc 出现尖峰，辨识数据报废。
-    measure_traj_torque_limit_rate: 0.6
+    # effort 现在写的就是**各电机的真实额定值**：joint1 RS06=11、joint2 RS03=20、
+    # joint3 RS01=6、joint4 RS02=6、joint5 EL05=1.8 N·m；joint6 无电机保持 50 不参与激励）。
+    # 0 = 关闭。取 1.0 就是「上限正好等于各关节额定」，按电机实际能力分设的意图才落地；
+    # 实机上力矩超限会直接跟踪失败，仿真里关节会被甩到高速，记录到的数据报废。
+    measure_traj_torque_limit_rate: 1.0
+
+    # 冻结关节：留空 = 全部关节都激励（仿真）。实机那份配置会填 joint6。
+    # 注意：不要在这里写 `measure_frozen_joints: []`——rclcpp 解析空数组时无法推断元素类型，
+    # 会把参数存成 NOT_SET，导致 auto_declare 读 vector<string> 时抛 InvalidParameterValueException。
+    # 留空（不写该键）即可，C++ 侧 auto_declare 的默认空 vector 带类型信息，能正确声明。
     # O12：激励轨迹的碰撞限制（docs/bugs.md O12）。0 = 关闭。
     #   连杆间安全间距：非相邻连杆网格之间的最小距离 >= 该值（米）。相邻连杆对
     #   （joint index 相差 1）被排除，与 MuJoCo scene.xml 的 contact exclude 一致——
@@ -112,3 +127,27 @@ arm_controller:
     # 改完记得看日志 "激励约束：" 行确认实际生效值。
     measure_traj_collision_safe_distance: 0.02
     measure_traj_ground_clearance: 0.01
+
+    # ---- 激励轨迹形状与生成成本（2026-10-31：原先硬编码在 ExcitationTrajectory 里）----
+    # 这四项都在控制器**构造期**读取，改完必须重启 launch，`ros2 param set` 无效（C6）。
+    # 关节位置软限位比例：相对行程中点用中间多宽，0.7 = 只用中间 70%（joint5 的 URDF 行程
+    # 是 ±0.611 rad，所以实际只能走 ±0.428 rad）。这是「运动幅度」最直接的旋钮：
+    # 0.9 更大更激进，0.5 更保守。取值 (0, 1]，大于 1 会被夹到 1.0——软限位是唯一的位置
+    # 约束，超过 1 就意味着允许轨迹越过 URDF 行程。
+    measure_traj_pos_soft_limit_rate: 0.9
+
+    # 关节速度上限比例：|dq| <= 该比例 × URDF 的 velocityLimit（现在各关节都是 10 rad/s）。
+    # 默认 1.0 即额定速度；按 3 谐波 / 10 s 周期估算峰值速度约 1.9 rad/s，这条约束基本不
+    # 生效，所以想让动作变慢请调小 measure_trajectory_period（周期越长速度越低），不要压这里。
+    # <= 0 关闭速度约束（不建议：历史上关掉后仿真里关节被甩到高速、记录的 q̈ 出现尖峰）。
+    measure_traj_vel_limit_rate: 1.0
+
+    # 傅里叶谐波数（频率成分 k/T，k = 1..该值）。默认 3 即 1/T、2/T、3/T 三个分量。
+    # 调大（4–5）激励带宽更宽、辨识信息更多，但同样幅度下速度/加速度更高、生成更慢；
+    # 调到 1 只剩单频，辨识信息明显不足。
+    measure_traj_harmonics: 3
+    # CMA-ES 最大评估次数：**决定生成耗时**（1500 次 ≈ 本机 53 s @ T=10、106 s @ T>=20，近似线性）。
+    # 试参数时临时调到 200 能在几秒内看到轨迹形状；正式取数必须回到 1500，
+    # 否则 CMA-ES 远未收敛，返回的基本是「随机可行解」（docs/bugs.md O10）。
+    # 改这个值后要同步任务层的 step_timeout（见 measure.yaml 顶部说明）。
+    measure_traj_max_fevals: 1500

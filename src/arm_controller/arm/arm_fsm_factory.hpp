@@ -134,12 +134,25 @@ public:
     /**
      * @brief 当前关节加速度缓存（只读）
      * @note 由 ArmController::update() 从 state interface 的 acceleration 读到；
-     *       MuJoCo 仿真里是真实 qacc，实机若不上报则恒为 0。
-     *       参数辨识用它替代"对记录速度二次求导"（docs/bugs.md O8）。
+     *       MuJoCo 仿真里是真实 qacc。
+     *       **向量长度恒为关节数**（on_configure 里 assign），所以「长度等于关节数」
+     *       **不能**用来判断硬件到底报不报加速度——必须看下面的
+     *       @c state_acceleration_available_。
      * @see ArmController::update
      * @see ParamterMeasureState
      */
     std::vector<double> state_acceleration_;
+
+    /**
+     * @brief 硬件是否真的提供 acceleration 状态接口
+     *
+     * 由 @c ArmController::on_activate 按「状态接口总数 / 关节数」推算
+     * （每关节 3 个 = position/velocity/effort，4 个才多一个 acceleration）。
+     * 实机的 MCU 协议只上报位置/速度/力矩，这里是 false；measure 据此决定
+     * 是否把 acc_* 列写进 CSV（实机不写，辨识链路也不再需要它）。
+     * @see ArmController::on_activate
+     */
+    bool state_acceleration_available_{false};
 
     /**
      * @brief 当前关节指令数组

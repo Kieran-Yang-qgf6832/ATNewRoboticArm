@@ -10,6 +10,10 @@ import numpy as np
 import yaml
 
 from .csv_loader import load_measurement_csv
+from .filtered_identification import (
+    build_acceleration_free_regressor,
+    estimate_sample_time,
+)
 from .urdf_writer import (
     INERTIAL_KEYS,
     dynamic_parameters_to_urdf_inertial,
@@ -41,6 +45,8 @@ def main() -> None:
     print(f"base parameter count: {result['base_parameter_count']}")
     print(f"rmse: {result['rmse']:.6g}")
     print(f"correlation: {result['correlation']:.6g}")
+    print(f"base parameter relative error (norm): {result['base_parameter_relative_error_norm']:.6g}")
+    print(f"base parameter relative error (max): {result['base_parameter_relative_error_max']:.6g}")
 
 
 def identify(
@@ -71,6 +77,12 @@ def identify(
         "_figaroh_cad_constraints", "figaroh/identification/cad_constraints.py"
     )
     build_regressor_basic = regressor_module.build_regressor_basic
+    # 摩擦/偏置列的参数名必须由 FIGAROH 自己的 helper 生成，顺序才和回归列对齐
+    # （fv_joint / fs_joint / off_joint，逐块、块内按关节序）。
+    parameter_module = load_vendored_figaroh_module(
+        "_figaroh_parameter", "figaroh/identification/parameter.py"
+    )
+    add_standard_additional_parameters = parameter_module.add_standard_additional_parameters
     QRDecomposer = qr_module.QRDecomposer
     BaseResult = reconstruction_module.BaseResult
     reconstruct_full_parameters = reconstruction_module.reconstruct_full_parameters
@@ -127,19 +139,71 @@ def identify(
     robot = _RobotModel(model)
 
     active_idxv = _active_velocity_indices(model, active_joints)
-    ident_cfg = _figaroh_identification_config(config, active_joints, active_idxv)
+    # 采样步长从 CSV 的 time 列自适应（实机 50/100 Hz、仿真 500 Hz 同一份配置都能用），
+    # 配置里的 data.sample_time 只作为「时间列不可用」时的退路。
+    sample_time = estimate_sample_time(data.time, float(data_cfg.get("sample_time", 0.0)))
+    ident_cfg = _figaroh_identification_config(config, active_joints, active_idxv, sample_time)
 
-    W_full = build_regressor_basic(
-        robot,
-        data.positions,
-        data.velocities,
-        data.accelerations,
-        ident_cfg,
-    )
-    W_active = _select_active_joint_blocks(W_full, active_idxv, data.positions.shape[0])
-    tau_active = _stack_active_torques(data.torques, len(active_idxv))
+    filter_cfg = config.get("filter", {})
+    filter_enabled = bool(filter_cfg.get("enabled", True))
+    filter_info: dict[str, Any] = {
+        "enabled": filter_enabled,
+        "cutoff_hz": float(filter_cfg.get("cutoff_hz", 2.0)),
+        "drop_initial_seconds": float(filter_cfg.get("drop_initial_seconds", 0.5)),
+        "sample_time": float(sample_time),
+        "method": "filtered_regressor_without_acceleration",
+        "derivative_scheme": str(filter_cfg.get("derivative_scheme", "central")),
+    }
+
+    if filter_enabled:
+        # 分部积分滤波回归量：只吃 q/q̇/τ，q̈ 在解析上就被消掉了。
+        filtered = build_acceleration_free_regressor(
+            robot,
+            data.positions,
+            data.velocities,
+            data.torques,
+            ident_cfg,
+            build_regressor_basic,
+            cutoff_hz=filter_info["cutoff_hz"],
+            sample_time=sample_time,
+            drop_initial_seconds=filter_info["drop_initial_seconds"],
+            finite_difference_step=float(filter_cfg.get("finite_difference_step", 1.0e-6)),
+            derivative_scheme=str(filter_cfg.get("derivative_scheme", "central")),
+        )
+        W_full = filtered.regressor
+        torque_matrix = filtered.torques
+        filter_info["dropped_samples"] = int(data.positions.shape[0] - filtered.kept_indices.size)
+        filter_info["kept_samples"] = int(filtered.kept_indices.size)
+        if data.accelerations is not None:
+            filter_info["recorded_acceleration_ignored"] = True
+    else:
+        # 旧路径：直接用记录/求导得到的加速度。实机 CSV 没有 acc_* 时这里会明确报错。
+        if data.accelerations is None:
+            raise ValueError(
+                "filter.enabled=false 需要关节加速度，但这台硬件的 CSV 没有 acc_* 列；"
+                "请打开 filter.enabled（实机唯一可行路径）"
+            )
+        W_full = build_regressor_basic(
+            robot,
+            data.positions,
+            data.velocities,
+            data.accelerations,
+            ident_cfg,
+        )
+        torque_matrix = data.torques
+
+    samples = int(torque_matrix.shape[0])
+    W_active = _select_active_joint_blocks(W_full, active_idxv, samples)
+    tau_active = _stack_active_torques(torque_matrix, len(active_idxv))
 
     params_std = _standard_parameter_dict(model)
+    # 摩擦（fv/fs）与关节偏置（off）各每关节一列，参数名必须补齐，否则 _remove_zero_columns
+    # 会因「列数多于参数名」直接报错（那正是 C6 式静默不生效的反面）。
+    if any(
+        bool(ident_cfg.get(key, False))
+        for key in ("has_friction", "has_actuator_inertia", "has_joint_offset")
+    ):
+        params_std.update(add_standard_additional_parameters(model, ident_cfg))
     W_reduced, tau_reduced, params_reduced = _remove_zero_columns(
         W_active,
         tau_active,
@@ -156,7 +220,11 @@ def identify(
         )
 
     decomposer = QRDecomposer(
-        tolerance=float(config.get("identification", {}).get("qr_tolerance", 1e-8))
+        tolerance=float(
+            filter_cfg.get("qr_tolerance", 1.0e-6)
+            if filter_enabled
+            else config.get("identification", {}).get("qr_tolerance", 1.0e-8)
+        )
     )
     W_base, base_param_dict, base_expr, phi_base, phi_base_nominal = decomposer.double_decomposition(
         tau_reduced,
@@ -169,6 +237,29 @@ def identify(
     residual = tau_reduced - tau_estimated
     full_parameters = dict(params_std)
 
+    # 基参数与「URDF 真值对应的基参数」的相对误差（phi_base_nominal 就是 params_std 投影到
+    # 同一组基组合上的值）。仿真里 URDF 就是真值，这是验收判据（≤1%）；实机上 URDF 是先验，
+    # 这个数只说明「辨识结果离先验有多远」，不代表误差。
+    phi_identified = np.asarray(phi_base, dtype=float).reshape(-1)
+    phi_nominal = (
+        np.asarray(phi_base_nominal, dtype=float).reshape(-1)
+        if phi_base_nominal is not None
+        else None
+    )
+    base_parameter_relative_error_max: float | None = None
+    base_parameter_relative_error_norm: float | None = None
+    if phi_nominal is not None and phi_nominal.size == phi_identified.size and phi_nominal.size > 0:
+        # 逐项相对误差的分母给个下限（真值接近 0 的基参数不能拿 |nominal| 去除）。
+        floor = 1.0e-3 * max(float(np.max(np.abs(phi_nominal))), 1.0e-12)
+        denominator = np.maximum(np.abs(phi_nominal), max(floor, 1.0e-12))
+        base_parameter_relative_error_max = float(
+            np.max(np.abs(phi_identified - phi_nominal) / denominator)
+        )
+        base_parameter_relative_error_norm = float(
+            np.linalg.norm(phi_identified - phi_nominal)
+            / max(float(np.linalg.norm(phi_nominal)), 1.0e-12)
+        )
+
     recon_cfg = config.get("reconstruction", {})
     reconstruction_status = "disabled"
     reconstruction_residual = None
@@ -176,6 +267,11 @@ def identify(
     reconstruction_base_residual_after_projection = None
     physical_projection_report: dict[str, Any] | None = None
     reconstruction_weights: np.ndarray | None = None
+    # 这两个字段要进报告，必须在分支外先定好默认值：reconstruction.enabled=false 时
+    # 报告仍要能写出配置的 method（否则 UnboundLocalError）。
+    configured_method = str(recon_cfg.get("method", "nullspace")).lower().strip()
+    effective_recon_method = "disabled"
+    cad_constraints = None
     if bool(recon_cfg.get("enabled", True)):
         cad_constraints = build_cad_constraints_from_config(
             recon_cfg.get("cad_constraints", {}),
@@ -216,7 +312,7 @@ def identify(
             "tensor_trust_region": recon_cfg.get("tensor_trust_region", {}),
             "central_moment_prior": recon_cfg.get("central_moment_prior", {}),
         }
-        configured_method = str(recon_cfg.get("method", "nullspace")).lower().strip()
+
         effective_recon_method = (
             "sdp" if configured_method in ("sdp", "auto") and sdp_available else "nullspace"
         )
@@ -327,6 +423,7 @@ def identify(
         "samples": int(data.positions.shape[0]),
         "identified_rows": int(tau_reduced.shape[0]),
         "acceleration_source": data.acceleration_source,
+        "filter": filter_info,
         "active_joints": active_joints,
         "model_joints": list(model.names[1:]),
         "base_parameter_count": int(len(phi_base)),
@@ -334,6 +431,8 @@ def identify(
         "base_expressions": list(base_expr),
         "rmse": float(np.sqrt(np.mean(residual * residual))),
         "correlation": _correlation(tau_reduced, tau_estimated),
+        "base_parameter_relative_error_max": base_parameter_relative_error_max,
+        "base_parameter_relative_error_norm": base_parameter_relative_error_norm,
         "reconstruction_status": reconstruction_status,
         "reconstruction_method_configured": configured_method,
         "reconstruction_method_effective": effective_recon_method,
@@ -378,6 +477,9 @@ def identify(
         "base_parameter_count": int(len(phi_base)),
         "rmse": report["rmse"],
         "correlation": report["correlation"],
+        "filter": filter_info,
+        "base_parameter_relative_error_max": base_parameter_relative_error_max,
+        "base_parameter_relative_error_norm": base_parameter_relative_error_norm,
     }
 
 
@@ -419,13 +521,122 @@ class _RobotModel:
         self.data = model.createData()
 
 
+def _regressor_helpers() -> tuple[Any, Any]:
+    """加载 vendored FIGAROH 的回归量与参数名 helper（带缓存）。
+
+    verify_torque 会为「被测 / 参照」两个 URDF 各构建一次回归量，重复 exec 同一份
+    FIGAROH 源码既慢又容易踩到模块重复注册，这里只加载一次。
+    """
+    import sys
+
+    regressor_module = sys.modules.get("_figaroh_regressor")
+    if regressor_module is None:
+        regressor_module = load_vendored_figaroh_module(
+            "_figaroh_regressor", "figaroh/tools/regressor.py"
+        )
+    parameter_module = sys.modules.get("_figaroh_parameter")
+    if parameter_module is None:
+        parameter_module = load_vendored_figaroh_module(
+            "_figaroh_parameter", "figaroh/identification/parameter.py"
+        )
+    return regressor_module.build_regressor_basic, parameter_module.add_standard_additional_parameters
+
+
+def build_filtered_regression(
+    urdf_path: str | Path,
+    csv_path: str | Path,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """构建「一份 CSV + 一个 URDF」的滤波回归量与参数向量，供 verify_torque 使用。
+
+    为什么这样算：滤波回归量 W_f 只由 q、q̇ 决定，**与惯性参数无关**，所以同一份 CSV 下
+    不同 URDF 得到的 W_f 与 τ_f 完全相同，差异只在参数向量 φ。于是
+
+        residual = τ_f − W_f φ
+
+    就是「这个 URDF 解释这份数据的能力」，φ 直接取该 URDF 的惯性参数（摩擦/偏置项为 0），
+    不需要重新做最小二乘——重新拟合会得到几乎相同的残差，就区分不出 URDF 好坏了。
+    """
+    import pinocchio as pin
+
+    active_joints = list(config.get("model", {}).get("active_joints", []))
+    if not active_joints:
+        raise ValueError("config.model.active_joints 必须列出参与辨识的关节")
+    data_cfg = config.get("data", {})
+    filter_cfg = config.get("filter", {})
+    if not bool(filter_cfg.get("enabled", True)):
+        raise ValueError("filter.enabled=false 需要关节加速度，无法处理没有 acc_* 的 CSV")
+
+    data = load_measurement_csv(
+        csv_path,
+        dof=len(active_joints),
+        max_samples=int(data_cfg.get("max_samples", 0)),
+        acceleration_source=str(data_cfg.get("acceleration_source", "computed")),
+        smoothing_window=int(data_cfg.get("acceleration_smoothing_window", 11)),
+        smoothing_polyorder=int(data_cfg.get("acceleration_smoothing_polyorder", 3)),
+    )
+
+    model = pin.buildModelFromUrdf(str(urdf_path))
+    robot = _RobotModel(model)
+    active_idxv = _active_velocity_indices(model, active_joints)
+    sample_time = estimate_sample_time(data.time, float(data_cfg.get("sample_time", 0.0)))
+    ident_cfg = _figaroh_identification_config(config, active_joints, active_idxv, sample_time)
+    build_regressor_basic, add_standard_additional_parameters = _regressor_helpers()
+
+    filtered = build_acceleration_free_regressor(
+        robot,
+        data.positions,
+        data.velocities,
+        data.torques,
+        ident_cfg,
+        build_regressor_basic,
+        cutoff_hz=float(filter_cfg.get("cutoff_hz", 2.0)),
+        sample_time=sample_time,
+        drop_initial_seconds=float(filter_cfg.get("drop_initial_seconds", 0.5)),
+        finite_difference_step=float(filter_cfg.get("finite_difference_step", 1.0e-6)),
+        derivative_scheme=str(filter_cfg.get("derivative_scheme", "central")),
+    )
+
+    kept = int(filtered.kept_indices.size)
+    n_active = len(active_idxv)
+    W = _select_active_joint_blocks(filtered.regressor, active_idxv, kept)
+    tau = _stack_active_torques(filtered.torques, n_active)
+
+    params = _standard_parameter_dict(model)
+    if any(
+        bool(ident_cfg.get(key, False))
+        for key in ("has_friction", "has_actuator_inertia", "has_joint_offset")
+    ):
+        params.update(add_standard_additional_parameters(model, ident_cfg))
+    names = list(params.keys())
+    if W.shape[1] != len(names):
+        raise ValueError(
+            f"回归量列数 {W.shape[1]} 与标准参数个数 {len(names)} 不一致，无法构造参数向量"
+        )
+    phi = np.asarray([params[name] for name in names], dtype=float)
+    effort = np.asarray([float(model.effortLimit[idx]) for idx in active_idxv], dtype=float)
+
+    return {
+        "W": W,
+        "tau": tau,
+        "phi": phi,
+        "names": names,
+        "effort": effort,
+        "kept_samples": kept,
+        "sample_time": float(sample_time),
+        "n_active": n_active,
+    }
+
+
 def _figaroh_identification_config(
     config: Mapping[str, Any],
     active_joints: list[str],
     active_idxv: list[int],
+    sample_time: float | None = None,
 ) -> dict[str, Any]:
     ident = config.get("identification", {})
-    sample_time = float(config.get("data", {}).get("sample_time", 0.02))
+    if sample_time is None:
+        sample_time = float(config.get("data", {}).get("sample_time", 0.02))
     return {
         "active_joints": active_joints,
         "act_idxv": active_idxv,
