@@ -14,6 +14,15 @@ public:
     //                  求解失败时其内容保持不变（不会清零）。
     bool inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd* joint_pos);
 
+    /// 设置按轨迹生效的收敛容差与零空间偏好权重（仅标量赋值，实时路径安全）
+    /// @param tolerance >0 时替代 IKSolver::Tuning::tolerance（米）；<=0 用默认值
+    /// @param nullspace_weight 0 = 关闭偏好
+    void set_solve_options(double tolerance, double nullspace_weight);
+
+    /// 设置/清除零空间偏好的参考位形（轨迹起点关节角）
+    void set_posture_reference(const Eigen::VectorXd& reference);
+    void clear_posture_reference();
+
     // 关节空间状态到用户定义的任务空间状态。
     bool forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_pos);
 

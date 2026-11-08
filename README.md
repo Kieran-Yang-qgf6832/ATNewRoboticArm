@@ -151,7 +151,7 @@ ros2 param set /arm_controller exp_state reset
 任务定义在 `src/tasks/config/tasks.yaml`（参数辨识另有 `src/tasks/config/measure.yaml`）。
 **新增目标点或新任务只需编辑 YAML**；但新增**步骤类型**要改 C++——下面的词汇表是封闭集合。
 
-### 步骤类型（封闭集合，共 10 类）
+### 步骤类型（封闭集合，共 11 类）
 
 | 类型 | 说明 |
 | --- | --- |
@@ -160,7 +160,8 @@ ros2 param set /arm_controller exp_state reset
 | `reset` | 复位；等控制器状态回到 `idel` |
 | `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
 | `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止 |
-| `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维） |
+| `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维），严格保持姿态 |
+| `pos_move` | 只把末端移到基座系绝对位置（`to` / `position`），**姿态不参与收敛** |
 | `admittance_move` | 导纳控制下的期望轨迹；同样用 `offset` |
 | `tool` | 末端执行器开关量；`action` 取 `tool` 段定义的语义名 |
 | `teach` | 示教；需 `duration` |
@@ -168,6 +169,17 @@ ros2 param set /arm_controller exp_state reset
 
 常用字段：`duration`（秒）、`tolerance`（到位容差）。
 `reset` / `joint_console` / `teach` / `measure` 只能从 `idel` 进出，执行器会自动先等待控制器空闲。
+
+`pos_move` 与 `cart_move` 的区别：`cart_move` 用相对 `offset` 且**严格保持起点姿态**；
+`pos_move` 用 `positions` 段的基座系 `[x, y, z]` 绝对目标（或直接给 `position`），
+**姿态不参与 IK 收敛判据**。`CartTrajCmd` 的 `mode` 字段按轨迹下发
+`MODE_POSITION_ONLY`（默认 `MODE_FULL_POSE=0`，旧发布者行为不变，`Vector` 仍是 6 维）：
+控制器在 `TaskMapping` 里显式投影掉 3 个旋转误差/雅可比行，IK 只解位置，
+并用零空间「就近」偏好抑制姿态乱动；预检覆盖终点加有限等分中间点。
+任务层结束时量测姿态漂移，超过 `max_drift_deg`（默认见 `position_move` 段）
+**只告警、不判失败**。`real_mode: true` 时该模式在下发前被拒绝（实机 5 自由度、
+尚未验证）。控制器参数 `pos_move_tolerance` / `pos_move_nullspace_weight` /
+`pos_move_precheck_samples` 在构造阶段读取并打 INFO（C6），实测整定见 `docs/bugs.md` §9。
 
 `joint_console` 的输入先过 `tasks.yaml` 的 `joint_limits` 段（每关节限位，度）与
 `max_step_deg`（单步最大变化量，相对当前实测角），超限只提示重输、不下发任何指令。
@@ -181,6 +193,9 @@ ros2 param set /arm_controller exp_state reset
 | `ready_then_cart` | 正常 | 先关节运动离开奇异位形，再笛卡尔平移 |
 | `pick_demo` | 正常 | 完整取放示例：吸住 → 等待真空 → 抬升 |
 | `joint_console_only` | 正常 | 交互式：终端逐行输入关节角（度）+ 可选执行时间，自由试位姿 |
+| `pos_move_demo` | 正常 | 只约束位置的绝对目标：从 `ready` 向下 5 cm；实测位置残差 0.0009 m，姿态漂移被量测并告警 |
+| `pos_move_direct` | 正常 | 同上，但直接给 `position` 坐标并覆盖 `max_drift_deg` |
+| `pos_move_near` | **反例，预期失败** | +Z 5 cm：放松姿态仍受连杆长度/关节限位限制，position-only 残余约 0.031 m，仍被下发前拒绝 |
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |

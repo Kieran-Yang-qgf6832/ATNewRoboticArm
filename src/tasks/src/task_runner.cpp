@@ -97,6 +97,7 @@ std::string join(const std::vector<std::string>& values) {
  *   - @c "sequence:pending <name>"：开始执行某序列；
  *   - @c "sequence:finished <name>"：序列正常走完；
  *   - @c "sequence:failed: <原因>"：前置条件不满足或某步骤失败；
+ *   - @c "sequence:warning: <原因>"：非致命告警（目前是 pos_move 的姿态漂移超阈值）；
  *   - @c "idle; waiting for a new task_sequence parameter"：已结束，常驻等待新序列。
  */
 class TaskRunner : public rclcpp::Node {
@@ -187,7 +188,8 @@ public:
         auto ctx                        = std::make_unique<TaskContext>(shared_from_this(), options);
 
         // 2. 加载并校验任务配置。配置错误不会自愈，直接以非零码退出，便于 launch 暴露问题。
-        TaskExecutor executor(shared_from_this(), ctx.get());
+        TaskExecutor executor(
+            shared_from_this(), ctx.get(), [this](const std::string& text) { publish_status(text); });
         std::string config_error;
         if (!executor.load_config(tasks_config_, &config_error)) {
             RCLCPP_ERROR(get_logger(), "failed to load task config: %s", config_error.c_str());

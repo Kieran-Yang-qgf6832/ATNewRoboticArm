@@ -19,6 +19,7 @@
 #include <vector>
 
 #include <yaml-cpp/yaml.h>
+#include <robot_msgs/msg/cart_traj_cmd.hpp>
 
 namespace {
 
@@ -120,6 +121,20 @@ std::string format_deg(double radians) {
 }
 
 /**
+ * @brief 两个四元数之间的相对旋转角（度）
+ *
+ * 用 |q0·q1| 取等价四元数里较短的那条路径：q 与 -q 表示同一姿态，
+ * 不取绝对值会把「没有漂移」算成接近 360°。
+ */
+double quaternion_angle_deg(const std::vector<double>& a, const std::vector<double>& b) {
+    if (a.size() != 4 || b.size() != 4) {
+        return 0.0;
+    }
+    const double dot = std::abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
+    return 2.0 * std::acos(std::min(1.0, dot)) / kDegToRad;
+}
+
+/**
  * @brief 终端输入队列：全进程唯一的 stdin 读者线程
  *
  * 不能让主线程直接读 stdin：读取是阻塞的，主线程一旦阻塞就停止 spin，等待期间
@@ -217,9 +232,11 @@ bool parse_numbers(const std::string& text, std::vector<double>* values) {
 
 }  // namespace
 
-TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx)
+TaskExecutor::TaskExecutor(
+    const rclcpp::Node::SharedPtr& node, TaskContext* ctx, std::function<void(const std::string&)> status_sink)
     : node_(node)
-    , ctx_(ctx) {
+    , ctx_(ctx)
+    , status_sink_(std::move(status_sink)) {
     if (node_ != nullptr) {
         step_timeout_    = node_->declare_parameter<double>("step_timeout", step_timeout_);
         idel_hold_       = node_->declare_parameter<double>("idel_hold", idel_hold_);
@@ -269,7 +286,9 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
     }
 
     points_.clear();
+    positions_.clear();
     sequences_.clear();
+    default_max_drift_deg_ = 10.0;
     tool_name_ = "tool";
     tool_on_   = "on";
     tool_off_  = "off";
@@ -304,6 +323,49 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
                     return fail("point '" + name + "' must be a list of joint values");
                 }
                 points_[name] = entry.second.as<std::vector<double>>();
+            }
+        }
+
+        // ---- positions：基座系绝对目标点（pos_move 专用，3 维）----
+        if (root["positions"]) {
+            const YAML::Node& positions = root["positions"];
+            if (!positions.IsMap()) {
+                return fail("'positions' must be a mapping of name -> [x, y, z]");
+            }
+            for (const auto& entry : positions) {
+                const std::string name = entry.first.as<std::string>();
+                if (!entry.second.IsSequence()) {
+                    return fail("position '" + name + "' must be a list of 3 coordinates");
+                }
+                const auto values = entry.second.as<std::vector<double>>();
+                if (values.size() != 3) {
+                    return fail(
+                        "position '" + name + "' needs 3 coordinates, got " + std::to_string(values.size()));
+                }
+                for (const double value : values) {
+                    if (!std::isfinite(value)) {
+                        return fail("position '" + name + "' contains a non-finite value");
+                    }
+                }
+                positions_[name] = values;
+            }
+        }
+
+        // ---- position_move：pos_move 的默认姿态漂移告警阈值（度）----
+        if (root["position_move"]) {
+            const YAML::Node& position_move = root["position_move"];
+            if (!position_move.IsMap()) {
+                return fail("'position_move' must be a mapping");
+            }
+            if (position_move["max_drift_deg"]) {
+                if (!position_move["max_drift_deg"].IsScalar()) {
+                    return fail("'position_move.max_drift_deg' must be a number");
+                }
+                const double value = position_move["max_drift_deg"].as<double>();
+                if (value < 0.0) {
+                    return fail("'position_move.max_drift_deg' must be non-negative");
+                }
+                default_max_drift_deg_ = value;
             }
         }
 
@@ -402,8 +464,8 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
     }
 
     RCLCPP_INFO(
-        node_->get_logger(), "loaded task config '%s': %zu point(s), %zu sequence(s): %s", path.c_str(), points_.size(),
-        sequences_.size(), join(sequence_names()).c_str());
+        node_->get_logger(), "loaded task config '%s': %zu point(s), %zu position(s), %zu sequence(s): %s",
+        path.c_str(), points_.size(), positions_.size(), sequences_.size(), join(sequence_names()).c_str());
     return true;
 }
 
@@ -462,6 +524,46 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         return true;
     }
 
+    if (step->type == "pos_move") {
+        const bool uses_position = !step->position.empty();
+        if (uses_to && uses_position) {
+            return fail("pos_move accepts either 'to' or 'position', not both");
+        }
+        if (!uses_to && !uses_position) {
+            return fail("pos_move requires either 'to' (a position name) or 'position' ([x, y, z])");
+        }
+        if (uses_offset || uses_target || uses_action) {
+            return fail("pos_move accepts only 'to' / 'position' / 'max_drift_deg'");
+        }
+        if (uses_to) {
+            const auto point = positions_.find(step->to);
+            if (point == positions_.end()) {
+                std::vector<std::string> names;
+                names.reserve(positions_.size());
+                for (const auto& entry : positions_) {
+                    names.push_back(entry.first);
+                }
+                return fail("references unknown position '" + step->to + "'; known positions: " + join(names));
+            }
+            step->position = point->second;
+        }
+        if (step->position.size() != 3) {
+            return fail("pos_move needs 3 coordinates, got " + std::to_string(step->position.size()));
+        }
+        for (const double value : step->position) {
+            if (!std::isfinite(value)) {
+                return fail("pos_move position contains a non-finite value");
+            }
+        }
+        if (!(step->tolerance > 0.0)) {
+            step->tolerance = kDefaultCartTolerance;
+        }
+        if (step->max_drift_deg <= 0.0) {
+            step->max_drift_deg = default_max_drift_deg_;
+        }
+        return true;
+    }
+
     if (step->type == "cart_move" || step->type == "admittance_move") {
         if (uses_to || uses_target || uses_action) {
             return fail(step->type + " accepts only 'offset'");
@@ -514,7 +616,8 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     // wait / idel / reset / teach / measure 不接受任何额外字段。
-    if (uses_to || uses_target || uses_offset || uses_action) {
+    if (uses_to || uses_target || uses_offset || uses_action || !step->position.empty()
+        || step->max_drift_deg > 0.0) {
         return fail(step->type + " accepts no fields other than 'duration' and 'tolerance'");
     }
     return true;
@@ -1086,6 +1189,107 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
     return true;
 }
 
+bool TaskExecutor::run_position_move(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    const std::string state_name = "cart_traj";
+    if (!ctx_->set_exp_state(state_name)) {
+        return fail("failed to switch arm_controller to " + state_name);
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state(state_name, error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+
+    // 起点与起点姿态都取实测值：首点必须落在当前位姿上，姿态用于事后量测漂移。
+    std::vector<double> start_pose;
+    if (!ctx_->end_effector_pose(&start_pose)) {
+        return fail(
+            "cannot read the end-effector pose before publishing the position-only trajectory (TF unavailable)");
+    }
+    std::vector<double> start_quaternion;
+    if (!ctx_->end_effector_quaternion(&start_quaternion)) {
+        return fail(
+            "cannot read the end-effector orientation before the position-only trajectory (TF unavailable)");
+    }
+
+    // 6 维消息契约不变：姿态分量照抄起点，控制器按 MODE_POSITION_ONLY 投影掉。
+    std::vector<double> target_pose = start_pose;
+    for (std::size_t i = 0; i < 3; ++i) {
+        target_pose[i] = step.position[i];
+    }
+
+    const std::vector<std::vector<float>> points{to_float(start_pose), to_float(target_pose)};
+    const std::vector<float> seconds{0.0f, static_cast<float>(step.duration)};
+    if (!ctx_->publish_cart_traj(points, seconds, robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY)) {
+        return fail("failed to publish the position-only trajectory");
+    }
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "pos_move: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s (orientation unconstrained)",
+        start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2], step.duration);
+
+    sleep_with_spin(node_, step.duration);
+
+    const std::string state = ctx_->controller_state(2.0);
+    if (state != state_name) {
+        return fail(
+            "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
+            + "'); check the controller log — the position-only pre-check may have rejected the target");
+    }
+
+    // 位置残差：与 cart_move 同一套「是否真的执行了」判据，只看 3 维位置。
+    std::vector<double> current_pose;
+    if (ctx_->end_effector_pose(&current_pose)) {
+        double residual  = 0.0;
+        double commanded = 0.0;
+        double moved     = 0.0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            residual  = std::max(residual, std::abs(current_pose[i] - target_pose[i]));
+            commanded = std::max(commanded, std::abs(target_pose[i] - start_pose[i]));
+            moved     = std::max(moved, std::abs(current_pose[i] - start_pose[i]));
+        }
+        bool off_target = false;
+        if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            return fail(
+                "position-only trajectory appears to have been ignored: moved " + std::to_string(moved)
+                + " m of the commanded " + std::to_string(commanded) + " m");
+        }
+        if (off_target) {
+            RCLCPP_WARN(
+                node_->get_logger(), "pos_move finished with a residual position error of %.4f m (tolerance %.4f m)",
+                residual, step.tolerance);
+        } else {
+            RCLCPP_INFO(node_->get_logger(), "pos_move finished, position error %.4f m", residual);
+        }
+    }
+
+    // 姿态漂移：只量测、只告警，绝不判失败（姿态本来就不约束）。
+    std::vector<double> current_quaternion;
+    if (ctx_->end_effector_quaternion(&current_quaternion)) {
+        const double drift_deg = quaternion_angle_deg(start_quaternion, current_quaternion);
+        if (drift_deg > step.max_drift_deg) {
+            const std::string message = "pos_move orientation drift " + format_number(drift_deg, 2)
+                                        + " deg exceeds " + format_number(step.max_drift_deg, 2) + " deg";
+            RCLCPP_WARN(node_->get_logger(), "%s (warning only; orientation is unconstrained)", message.c_str());
+            if (status_sink_) {
+                status_sink_("sequence:warning: " + message);
+            }
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(), "pos_move orientation drift %.2f deg (warn threshold %.2f deg)", drift_deg,
+                step.max_drift_deg);
+        }
+    }
+    return true;
+}
+
 bool TaskExecutor::run_timed_state(const Step& step, const std::string& state_name, std::string* error) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
@@ -1163,6 +1367,10 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
 
     if (step.type == "cart_move") {
         return run_task_space_move(step, "cart_traj", error);
+    }
+
+    if (step.type == "pos_move") {
+        return run_position_move(step, error);
     }
 
     if (step.type == "admittance_move") {

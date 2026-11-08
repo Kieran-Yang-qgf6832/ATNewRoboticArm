@@ -42,6 +42,24 @@ bool ArmSolve::inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd*
     return ik_solver_->solve(task_pos, *joint_pos) == IKSolver::SolveResult::Converged;
 }
 
+void ArmSolve::set_solve_options(double tolerance, double nullspace_weight) {
+    if (ik_solver_ != nullptr) {
+        ik_solver_->set_solve_options(tolerance, nullspace_weight);
+    }
+}
+
+void ArmSolve::set_posture_reference(const Eigen::VectorXd& reference) {
+    if (ik_solver_ != nullptr) {
+        ik_solver_->set_posture_reference(reference);
+    }
+}
+
+void ArmSolve::clear_posture_reference() {
+    if (ik_solver_ != nullptr) {
+        ik_solver_->clear_posture_reference();
+    }
+}
+
 IKSolver::SolveResult ArmSolve::last_ik_result() const {
     return ik_solver_ != nullptr ? ik_solver_->last_result() : IKSolver::SolveResult::Failed;
 }

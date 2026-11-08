@@ -33,6 +33,7 @@
 
 #include "excitation_trajectory.hpp"
 #include "paramter_identify.hpp"
+#include "task.hpp"
 #include "trajectory.hpp"
 
 #include <robot_msgs/msg/admittance_cmd.hpp>
@@ -311,21 +312,35 @@ private:
     HoldGravityFeedforward gravity_;
 
     /// 下发前可达性预检（docs/bugs.md O2）。全部在构造阶段分配，run() 中不再分配内存。
-    /// 不做预检时，手臂会先沿轨迹走到工作空间边界、再因逆解失败中止（实测末端走约 0.40 m）。
-    ///
-    /// 只查**终点**：终点不可达是绝大多数实际情况，而且单次逆解实测最坏约 386 us
-    /// （200 次迭代），一个控制周期是 2 ms——查 8 个途经点就可能超周期。
+    /// 6 维轨迹只查终点：单次逆解实测最坏约 386 us（200 次迭代），一个控制周期 2 ms。
+    /// position-only 轨迹额外查若干等分中间点（绝对目标可能跨越半个工作空间），
+    /// 次数受 kMaxPrecheckSamples 限制，保证 (1 + samples) × 386 us < 2 ms。
     bool precheck_pending_{false};    ///< 是否有一条新轨迹等待预检
     Eigen::VectorXd precheck_target_; ///< 待检终点（6 维）
+    std::vector<Eigen::VectorXd> precheck_samples_; ///< 等分中间点池（构造期分配）
+    int precheck_count_{0};           ///< 本次实际启用的中间点数
     Eigen::VectorXd precheck_seed_;   ///< 预检用的关节角种子（当前实测关节角）
     Eigen::VectorXd precheck_solution_; ///< 预检的解算结果
 
+    /// 当前轨迹的任务空间模式（由 CartTrajCmd.mode 决定，默认 6 维）
+    PoseMode pose_mode_{PoseMode::kFullPose};
+    /// position-only 的纯位置容差（米）与零空间就近偏好权重
+    double position_tolerance_{1e-3};
+    double nullspace_weight_{0.0};
+    Eigen::VectorXd posture_reference_;  ///< position-only 轨迹起点的关节角（构造期分配）
+    /// position-only 的预检中间采样点数（构造期按实时预算 clamp）
+    int precheck_sample_count_{0};
+    /// 实机模式：position-only 轨迹未经真机验证，拒绝并回 idel
+    bool real_mode_{false};
+    bool reject_position_only_on_real_{false};
+
     /**
-     * @brief 对 @ref precheck_target_ 做一次逆解，确认终点可达
-     * @param[out] residual 不可达时写入「最近可达位姿到终点还有多远」，否则写 0
-     * @return 终点可达返回 true
+     * @brief 对一个 6 维目标做一次逆解，确认可达
+     * @param target   待检目标（6 维；position-only 下姿态分量会被映射层投影掉）
+     * @param[out] residual 不可达时写入「最近可达位姿到目标还有多远」，否则写 0
+     * @return 目标可达返回 true
      */
-    bool check_target_reachable(double* residual);
+    bool check_target_reachable(const Eigen::VectorXd& target, double* residual);
 
     rclcpp::Subscription<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_cmd_sub_; ///< 笛卡尔轨迹指令订阅
 };

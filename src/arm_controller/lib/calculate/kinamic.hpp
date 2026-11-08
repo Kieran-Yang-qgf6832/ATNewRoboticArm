@@ -90,6 +90,27 @@ public:
     SolveResult solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos);
 
     /**
+     * @brief 设置求解选项（只做标量赋值，可在实时路径每周期调用）
+     * @param tolerance position-only 模式使用的纯位置容差（米）；<= 0 表示沿用 Tuning::tolerance
+     * @param nullspace_weight 零空间「就近」偏好权重；0 = 关闭
+     * @note 两个值都是 IKSolver 实例状态，调用方须在每次 solve() 之前按当前轨迹模式设好。
+     */
+    void set_solve_options(double tolerance, double nullspace_weight);
+
+    /**
+     * @brief 设置零空间偏好的参考位形（轨迹起点关节角）
+     *
+     * 控制器每个周期都会用「当前实测关节角」重新调用 solve()，若偏好参考也跟着
+     * 每周期重置，就退化成「偏好当前位形」，抑制不了沿轨迹累积的姿态漂移。
+     * 轨迹开始时设置一次、整条轨迹复用，才是「就近」的正确语义。
+     * @note 只写入构造期已分配的 buffer，不做动态分配。
+     */
+    void set_posture_reference(const Eigen::VectorXd& reference);
+
+    /// 清除参考位形，回到「以本次 solve 的初值为参考」
+    void clear_posture_reference();
+
+    /**
      * @brief 任务误差的 Gauss-Newton 雅可比
      * @param joint_pos     当前关节角
      * @param error         当前任务空间误差（见 @ref TaskMapping::error_map）
@@ -129,6 +150,11 @@ private:
         Eigen::VectorXd trial_error;
         Eigen::VectorXd rhs;
         Eigen::VectorXd joint_step;
+        Eigen::VectorXd seed;              ///< 本次 solve 的初值，作为零空间偏好的参考位形
+        Eigen::VectorXd posture_step;      ///< 偏好方向 w
+        Eigen::VectorXd task_posture_step; ///< J·w（6 维）
+        Eigen::VectorXd rhs_posture;       ///< Jᵀ·(J·w)
+        Eigen::VectorXd joint_step_posture;///< J⁺·(J·w)
         Eigen::MatrixXd geometric_jacobian;
         Eigen::MatrixXd task_jacobian;
         Eigen::MatrixXd hessian;
@@ -141,4 +167,8 @@ private:
     double last_error_norm_{0.0};
     int last_iterations_{0};
     SolveResult last_result_{SolveResult::Failed};
+    double tolerance_override_{0.0};  ///< >0 时替代 Tuning::tolerance（position-only 用纯位置米数）
+    double nullspace_weight_{0.0};    ///< 0 = 关闭零空间就近偏好
+    Eigen::VectorXd posture_reference_;  ///< 轨迹起点关节角（构造期分配）
+    bool has_posture_reference_{false};
 };

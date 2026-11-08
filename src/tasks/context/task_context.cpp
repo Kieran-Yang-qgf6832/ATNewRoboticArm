@@ -241,12 +241,33 @@ bool TaskContext::end_effector_pose(std::vector<double>* pose) const {
     }
 }
 
-bool TaskContext::publish_cart_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const {
+bool TaskContext::end_effector_quaternion(std::vector<double>* quaternion) const {
+    if (quaternion == nullptr) {
+        return false;
+    }
+
+    try {
+        const auto transform = tf_buffer_->lookupTransform(options_.base_frame, options_.ee_frame, tf2::TimePointZero);
+        quaternion->assign(
+            {transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z,
+             transform.transform.rotation.w});
+        return true;
+    } catch (const tf2::TransformException& error) {
+        RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 2000, "TF %s -> %s lookup failed: %s",
+            options_.base_frame.c_str(), options_.ee_frame.c_str(), error.what());
+        return false;
+    }
+}
+
+bool TaskContext::publish_cart_traj(
+    const std::vector<std::vector<float>>& points, const std::vector<float>& seconds, std::uint8_t mode) const {
     robot_msgs::msg::CartTrajCmd msg;
     if (!fill_trajectory_message(points, seconds, kTaskDof, &msg)) {
         return false;
     }
 
+    msg.mode = mode;
     cart_traj_pub_->publish(msg);
     return true;
 }

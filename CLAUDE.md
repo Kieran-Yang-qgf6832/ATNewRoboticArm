@@ -83,14 +83,23 @@ ArmController (controller_interface, 500 Hz)
 | 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
 | 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
 | 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 10 类步骤驱动控制器 |
+| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 11 类步骤驱动控制器 |
 | 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
 
-任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `joint_limits` / `sequences`。
+任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `positions` /
+`position_move` / `joint_limits` / `sequences`。
 步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_console` /
-`cart_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
+`cart_move` / `pos_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
 `src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
 加新**任务**只改 YAML。
+
+`pos_move` 用 `positions` 段的基座系绝对目标，把末端移到目标位置而**不约束姿态**：
+`CartTrajCmd.mode = MODE_POSITION_ONLY` 按轨迹下发（`Vector` 仍 6 维，默认 0 保持旧行为），
+控制器在 `TaskMapping` 里显式投影掉 3 个旋转误差/雅可比行，`IKSolver` 改用独立的
+纯位置容差与零空间就近偏好，预检在终点之外再查有限等分中间点（受 2 ms 周期约束）。
+`real_mode: true` 时下发前直接拒绝（实机 5 自由度、未验证）。任务层量测姿态漂移并只告警。
+三个 `pos_move_*` 参数必须 `auto_declare`、只在构造期读取，实际生效值看控制器日志
+`position-only:` 行（C6）。实现细节与仿真实测见 `docs/bugs.md` §9。
 
 `joint_console` 是唯一**交互式**步骤：用户**逐项**输入（一次一个数）——6 个关节角（度）→
 1 个执行时间（秒，回车取默认），步骤内部循环；输入途中回车取消本组、`exit` 结束、
@@ -220,8 +229,8 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 8 条序列只用到
-  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `tool` / `wait` 七类步骤。
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 11 条序列只用到
+  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `tool` / `wait` 八类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
   2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。

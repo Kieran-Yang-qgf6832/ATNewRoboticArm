@@ -17,6 +17,10 @@ namespace {
 
 constexpr int kMaxArmTrajectoryPoints = 8;
 
+/// position-only 预检中间点上限：单次 IK 最坏约 386 us、控制周期 2 ms，
+/// 含终点在内最多 4 次（约 1.54 ms），再多就可能被实时周期卡住。
+constexpr int kMaxPrecheckSamples = 3;
+
 const std::string kIdelStateName = "idel";
 
 // load_trajectory_from_message 依赖各 FSM 的 traj 预分配容量不小于最大点数，
@@ -492,16 +496,64 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     precheck_seed_.resize(static_cast<Eigen::Index>(joint_count_));
     precheck_solution_.resize(static_cast<Eigen::Index>(joint_count_));
 
+    // C6：参数必须在 on_init 里 auto_declare 才能读到；构造期读一次并打出实际生效值。
+    position_tolerance_    = factory->node_->get_parameter("pos_move_tolerance").as_double();
+    nullspace_weight_      = factory->node_->get_parameter("pos_move_nullspace_weight").as_double();
+    precheck_sample_count_ = factory->node_->get_parameter("pos_move_precheck_samples").as_int();
+    real_mode_             = factory->node_->get_parameter("real_mode").as_bool();
+    if (!(position_tolerance_ > 0.0)) {
+        position_tolerance_ = 1e-3;
+    }
+    if (!(nullspace_weight_ > 0.0)) {
+        nullspace_weight_ = 0.0;
+    }
+    precheck_sample_count_ = std::clamp(precheck_sample_count_, 0, kMaxPrecheckSamples);
+    precheck_samples_.resize(static_cast<std::size_t>(kMaxPrecheckSamples));
+    for (auto& sample : precheck_samples_) {
+        sample.setZero(static_cast<Eigen::Index>(task_dof_));
+    }
+    posture_reference_.setZero(static_cast<Eigen::Index>(joint_count_));
+    RCLCPP_INFO(
+        factory->node_->get_logger(),
+        "position-only: tolerance=%.3g m, nullspace_weight=%.3g, precheck_samples=%d (max %d), real_mode=%s",
+        position_tolerance_, nullspace_weight_, precheck_sample_count_, kMaxPrecheckSamples,
+        real_mode_ ? "true (position-only disabled)" : "false");
+
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
             if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, task_dof_, &traj)) {
                 return;
             }
-            // 记下终点供 run() 做可达性预检。这里只做拷贝，不开新轨迹：预检失败时
-            // 必须保证一个运动指令都没下发过。
+            const bool position_only = msg.mode == robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY;
+
+            // 实机从未上电验证、且只有 5 自由度：position-only 的零空间行为与仿真不同，
+            // 明确拒绝而不是悄悄执行。交给 run() 返回 false，由 update() 统一裁决回 idel。
+            reject_position_only_on_real_ = position_only && real_mode_;
+
+            pose_mode_ = position_only ? PoseMode::kPositionOnly : PoseMode::kFullPose;
+            factory->task_map_->set_pose_mode(pose_mode_);
+            factory->arm_solve_->set_solve_options(
+                position_only ? position_tolerance_ : 0.0, position_only ? nullspace_weight_ : 0.0);
+
+            // 终点沿用 6 维消息契约；position-only 下姿态分量会被映射层投影掉。
             const auto& final_waypoint = msg.position.back().pos;
             for (Eigen::Index row = 0; row < precheck_target_.size(); ++row) {
                 precheck_target_(row) = final_waypoint[static_cast<std::size_t>(row)];
+            }
+
+            // position-only 的绝对目标可能离起点很远，额外等分采样中间位置。
+            precheck_count_ = 0;
+            if (position_only && precheck_sample_count_ > 0) {
+                const auto& first_waypoint = msg.position.front().pos;
+                for (int i = 0; i < precheck_sample_count_; ++i) {
+                    const double s = static_cast<double>(i + 1) / (precheck_sample_count_ + 1);
+                    for (Eigen::Index row = 0; row < precheck_target_.size(); ++row) {
+                        const auto index = static_cast<std::size_t>(row);
+                        precheck_samples_[static_cast<std::size_t>(i)](row) =
+                            first_waypoint[index] + s * (final_waypoint[index] - first_waypoint[index]);
+                    }
+                }
+                precheck_count_ = precheck_sample_count_;
             }
             precheck_pending_ = true;
 
@@ -512,7 +564,7 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
         });
 }
 
-bool CartTrajState::check_target_reachable(double* residual) {
+bool CartTrajState::check_target_reachable(const Eigen::VectorXd& target, double* residual) {
     if (factory == nullptr || factory->arm_solve_ == nullptr || residual == nullptr) {
         return false;
     }
@@ -523,7 +575,7 @@ bool CartTrajState::check_target_reachable(double* residual) {
     }
 
     precheck_solution_ = precheck_seed_;
-    if (!factory->arm_solve_->inverse_kinamic(precheck_target_, &precheck_solution_)
+    if (!factory->arm_solve_->inverse_kinamic(target, &precheck_solution_)
         || !precheck_solution_.allFinite()) {
         *residual = factory->arm_solve_->last_ik_error_norm();
         return false;
@@ -544,6 +596,12 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
 
     state = TrajPhase::STOP;
     traj.stop();
+    // 从任何状态切入都恢复 6 维默认模式，避免上一条 position-only 轨迹的映射设置
+    // 泄露到别的也用 IK 的状态。新轨迹的 mode 会由订阅回调重新设置。
+    pose_mode_ = PoseMode::kFullPose;
+    factory->task_map_->set_pose_mode(pose_mode_);
+    factory->arm_solve_->set_solve_options(0.0, 0.0);
+    factory->arm_solve_->clear_posture_reference();
     // 进入时锁存一次当前位置。保持命令必须基于固定目标：若每个周期重新读取实测值，
     // 位置误差恒为 0，kp 再大也不产生恢复力，机械臂会在重力下缓慢坠落。
     latch_joint_position(factory, joint_count_, &hold_position_);
@@ -556,7 +614,13 @@ bool CartTrajState::exit(const std::string& next_state) {
     traj.stop();
     state = TrajPhase::STOP;
     // 清掉未消费的预检请求：否则下一次进入本状态时会拿旧轨迹的途经点做预检。
-    precheck_pending_ = false;
+    precheck_pending_             = false;
+    precheck_count_               = 0;
+    reject_position_only_on_real_ = false;
+    pose_mode_                    = PoseMode::kFullPose;
+    factory->task_map_->set_pose_mode(pose_mode_);
+    factory->arm_solve_->set_solve_options(0.0, 0.0);
+    factory->arm_solve_->clear_posture_reference();
     return true;
 }
 
@@ -584,33 +648,69 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         return true;
     }
 
+    // 实机模式下的 position-only 轨迹：在下发任何运动指令之前拒绝。
+    // 返回 false 交给 ArmController::update() 统一裁决（写保持命令 + 切回 idel），
+    // 与逆解失败走同一条失效安全路径。
+    if (reject_position_only_on_real_) {
+        reject_position_only_on_real_ = false;
+        state = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("position-only trajectory rejected on real hardware");
+        RCLCPP_ERROR(
+            factory->node_->get_logger(),
+            "position-only trajectory REJECTED before any motion: real_mode=true (5-DOF hardware, not validated)");
+        return false;
+    }
+
     // 下发前可达性预检（docs/bugs.md O2）：在**下发任何运动指令之前**确认整条轨迹可达。
     // 不做这一步时，手臂会先沿轨迹一路走到工作空间边界（实测末端走约 0.40 m），
     // 再因逆解失败中止——那时运动已经发生，安全语义上已经晚了。
     if (precheck_pending_) {
         precheck_pending_ = false;
 
+        // 每条轨迹只设一次：参考位形取轨迹开始时的实测关节角，跨所有控制周期复用。
+        // 若跟着每周期重置，偏好就退化成「偏好当前位形」，抑制不了累积姿态漂移。
+        if (pose_mode_ == PoseMode::kPositionOnly) {
+            for (std::size_t i = 0; i < joint_count_; ++i) {
+                posture_reference_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+            }
+            factory->arm_solve_->set_posture_reference(posture_reference_);
+        } else {
+            factory->arm_solve_->clear_posture_reference();
+        }
+
+        // 6 维轨迹只查终点；position-only 再查若干等分中间点。预检沿用与执行相同的
+        // 映射模式与容差，否则「终点可达」的结论会是另一种任务空间的结论。
         double residual = 0.0;
-        if (!check_target_reachable(&residual)) {
+        bool reachable  = check_target_reachable(precheck_target_, &residual);
+        for (int i = 0; reachable && i < precheck_count_; ++i) {
+            reachable = check_target_reachable(precheck_samples_[static_cast<std::size_t>(i)], &residual);
+        }
+        if (!reachable) {
             state = TrajPhase::STOP;
             traj.stop();
             set_fault_stage("Cartesian target reachability pre-check");
 
+            // 残余与判据的单位随模式变化：6 维是「米+弧度」混合范数，
+            // position-only 是纯位置米数。日志里必须写清楚（docs/bugs.md 的教训）。
+            const bool position_only = pose_mode_ == PoseMode::kPositionOnly;
+            const char* unit = position_only ? "m (position only)" : "mixed m+rad (6-D pose)";
+            const double tolerance = position_only ? position_tolerance_ : IKSolver::tuning().tolerance;
             if (factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable) {
                 // 这是「目标不可达」，不是「求解器坏了」：报出最近可达位姿离终点还有多远，
                 // 让操作者知道该改目标，而不是去查逆解器。
                 RCLCPP_ERROR(
                     factory->node_->get_logger(),
                     "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
-                    "pose is still %.6f away from it (IK tolerance is %.1e). Without this pre-check the arm would have "
-                    "walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
-                    residual, IKSolver::tuning().tolerance);
+                    "pose is still %.6f %s away from it (IK tolerance is %.1e %s). Without this pre-check the arm would "
+                    "have walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
+                    residual, unit, tolerance, unit);
             } else {
                 RCLCPP_ERROR(
                     factory->node_->get_logger(),
                     "Cartesian trajectory REJECTED before any motion: inverse kinematics failed numerically "
-                    "(residual %.6f); reachability is unknown.",
-                    residual);
+                    "(residual %.6f %s); reachability is unknown.",
+                    residual, unit);
             }
             return false;
         }

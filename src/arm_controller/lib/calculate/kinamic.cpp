@@ -17,6 +17,22 @@ IKSolver::Tuning& IKSolver::tuning() {
     return instance;
 }
 
+void IKSolver::set_solve_options(double tolerance, double nullspace_weight) {
+    tolerance_override_ = tolerance;
+    nullspace_weight_   = nullspace_weight;
+}
+
+void IKSolver::set_posture_reference(const Eigen::VectorXd& reference) {
+    if (reference.size() == posture_reference_.size() && reference.allFinite()) {
+        posture_reference_      = reference;
+        has_posture_reference_ = true;
+    }
+}
+
+void IKSolver::clear_posture_reference() {
+    has_posture_reference_ = false;
+}
+
 IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping> task_mapping)
     : robot_(std::move(robot)), task_mapping_(std::move(task_mapping)) {
     if (robot_ == nullptr) {
@@ -35,7 +51,13 @@ IKSolver::IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping
     workspace_.trial_error.resize(6);
     workspace_.rhs.resize(joint_count);
     workspace_.joint_step.resize(joint_count);
+    workspace_.seed.resize(joint_count);
+    workspace_.posture_step.resize(joint_count);
+    workspace_.task_posture_step.resize(6);
+    workspace_.rhs_posture.resize(joint_count);
+    workspace_.joint_step_posture.resize(joint_count);
     workspace_.geometric_jacobian.resize(6, joint_count);
+    posture_reference_.resize(joint_count);
     workspace_.task_jacobian.resize(6, joint_count);
     workspace_.hessian.resize(joint_count, joint_count);
     workspace_.hessian.setZero();
@@ -92,6 +114,8 @@ bool IKSolver::evaluate_error(
 
 IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::VectorXd& joint_pos) {
     const Tuning& config = tuning();
+    // position-only 模式下误差范数是纯位置（米），与 6 维「米+弧度混合」范数不能共用一个判据。
+    const double tolerance = tolerance_override_ > 0.0 ? tolerance_override_ : tuning().tolerance;
 
     // 默认按「数值失败」处理：只有确实停滞在局部极小时才升级为「不可达」，
     // 避免在输入非法等情况下给出关于可达性的错误结论。
@@ -126,12 +150,18 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
         effective_upper = upper.array() + slack;
         workspace_.solution = workspace_.solution.cwiseMax(effective_lower).cwiseMin(effective_upper);
     }
+    // 偏好参考位形：position-only 用轨迹起点关节角（跨周期固定），其它情况退化为
+    // 本次 solve 的初值。限幅到有效关节限位内，避免把解往限位外拉。
+    workspace_.seed = has_posture_reference_ ? posture_reference_ : workspace_.solution;
+    if (use_joint_limits) {
+        workspace_.seed = workspace_.seed.cwiseMax(effective_lower).cwiseMin(effective_upper);
+    }
 
     if (!evaluate_error(target, workspace_.solution, &workspace_.error)) {
         return SolveResult::Failed;
     }
     double current_norm = workspace_.error.norm();
-    if (current_norm < config.tolerance) {
+    if (current_norm < tolerance) {
         joint_pos        = workspace_.solution;
         last_error_norm_ = current_norm;
         last_result_     = SolveResult::Converged;
@@ -161,6 +191,22 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
             return SolveResult::Failed;
         }
 
+        // 零空间「就近」偏好：position-only 下 6 轴解 3 维位置任务，有 3 维零空间，
+        // 解不唯一。把解往本次 solve 的初值拉，再投影到 J 的零空间：
+        //   Nw = w - J⁺(Jw)，J⁺ 复用本次迭代已分解好的 (JᵀJ + λI)⁻¹Jᵀ。
+        // 一阶上 J·Nw ≈ 0，不改变收敛方向；权重为 0 时整段跳过，6 维模式零开销。
+        if (nullspace_weight_ > 0.0) {
+            workspace_.posture_step = nullspace_weight_ * (workspace_.seed - workspace_.solution);
+            workspace_.task_posture_step.noalias() = workspace_.task_jacobian * workspace_.posture_step;
+            workspace_.rhs_posture.noalias() = workspace_.task_jacobian.transpose() * workspace_.task_posture_step;
+            workspace_.joint_step_posture = workspace_.ldlt.solve(workspace_.rhs_posture);
+            if (!workspace_.joint_step_posture.allFinite()) {
+                last_error_norm_ = current_norm;
+                return SolveResult::Failed;
+            }
+            workspace_.joint_step += workspace_.posture_step - workspace_.joint_step_posture;
+        }
+
         // 信赖域：限制步长范数。接近奇异时 LM 步会非常大，硬截断到某个固定上限会让
         // 迭代来回震荡；按半径等比缩回则保持方向、只缩短步长。
         const double step_norm = workspace_.joint_step.norm();
@@ -186,7 +232,7 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
             workspace_.solution = workspace_.trial;
             workspace_.error    = workspace_.trial_error;
             current_norm        = trial_norm;
-            if (current_norm < config.tolerance) {
+            if (current_norm < tolerance) {
                 joint_pos        = workspace_.solution;
                 last_error_norm_ = current_norm;
                 last_result_     = SolveResult::Converged;
@@ -206,14 +252,14 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
                 last_error_norm_ = current_norm;
                 // 连续多次找不到下降方向 = 已经停在局部极小。误差降不到判据以内，
                 // 说明目标不在可达集内（可达集边界到目标的距离就是 current_norm）。
-                last_result_ = current_norm < config.tolerance ? SolveResult::Converged : SolveResult::Unreachable;
+                last_result_ = current_norm < tolerance ? SolveResult::Converged : SolveResult::Unreachable;
                 return last_result_;
             }
         }
     }
 
     last_error_norm_ = current_norm;
-    if (current_norm < config.tolerance) {
+    if (current_norm < tolerance) {
         joint_pos    = workspace_.solution;
         last_result_ = SolveResult::Converged;
         return SolveResult::Converged;

@@ -177,7 +177,15 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
     // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
     auto_declare<int>("task_dim", 6);
-    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态。
+    // pos_move（只约束末端位置）的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
+    //   tolerance：position-only 的纯位置收敛判据（米），与 6 维「米+弧度」混合范数分开；
+    //   nullspace_weight：零空间「就近」偏好权重，0 = 关闭；
+    //   precheck_samples：终点之外再等分采样的中间点数，受实时预算限制（见 arm_fsm.cpp）。
+    auto_declare<double>("pos_move_tolerance", 1e-3);
+    auto_declare<double>("pos_move_nullspace_weight", 0.005);
+    auto_declare<int>("pos_move_precheck_samples", 2);
+    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态，
+    // 以及尚未在真机验证过的 position-only 轨迹。
     auto_declare<bool>("real_mode", false);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");

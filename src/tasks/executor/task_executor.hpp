@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -41,14 +42,16 @@ public:
      * @brief 构造函数
      * @param node runner 节点，用于日志与参数
      * @param ctx  任务上下文，持有与 arm_controller 的全部 ROS 接口
+     * @param status_sink 任务状态出口；pos_move 的姿态漂移告警经它上报
      * @note 不持有 @p ctx 的所有权，其生命周期必须覆盖本对象
      */
-    TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx);
+    TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx,
+                 std::function<void(const std::string&)> status_sink = {});
 
     /**
      * @brief 加载并校验任务配置
      *
-     * 解析 @c tool / @c points / @c sequences 三段，随后对每个序列的每个步骤做
+     * 解析 @c tool / @c points / @c positions / @c position_move / @c sequences 段，随后对每个序列的每个步骤做
      * 语义校验（目标点存在、关节数匹配、字段与类型匹配等）。任一步骤不合法即整体失败，
      * 保证不会出现「执行到一半才发现配置错误」。
      *
@@ -111,6 +114,15 @@ private:
     bool run_task_space_move(const Step& step, const std::string& state_name, std::string* error);
 
     /**
+     * @brief 执行 pos_move：只约束位置的绝对目标轨迹
+     *
+     * 目标是基座系 [x, y, z]；下发的 6 维消息里姿态分量照抄起点（控制器会投影掉），
+     * 模式标志置为 MODE_POSITION_ONLY。结束后除位置残差外，还量测相对起点姿态的
+     * 夹角，超过阈值只告警、不判失败。
+     */
+    bool run_position_move(const Step& step, std::string* error);
+
+    /**
      * @brief 执行「切入某状态 -> 保持 duration -> 切回 idel」型步骤
      *
      * 适用于 teach（示教）与 measure（参数辨识）：控制器在该状态下自行完成全部工作，
@@ -146,8 +158,11 @@ private:
     /// 末端执行器开关量发布器（std_msgs/Bool，见 tool 步骤）
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr tool_pub_;
 
-    std::map<std::string, std::vector<double>> points_;      ///< 命名目标点
+    std::map<std::string, std::vector<double>> points_;      ///< 命名关节目标点（6 维关节角）
+    std::map<std::string, std::vector<double>> positions_;   ///< 命名基座系绝对目标（3 维）
     std::map<std::string, std::vector<Step>> sequences_;     ///< 序列名 → 步骤列表
+    std::function<void(const std::string&)> status_sink_;    ///< 任务状态出口（可为空）
+    double default_max_drift_deg_{10.0};                     ///< pos_move 默认姿态漂移告警阈值（度）
     std::string tool_name_{"tool"};                          ///< 当前末端执行器名（仅日志）
     std::string tool_on_{"on"};                              ///< 「开」的语义名
     std::string tool_off_{"off"};                            ///< 「关」的语义名

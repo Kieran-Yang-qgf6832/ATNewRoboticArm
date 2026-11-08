@@ -20,6 +20,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -135,13 +136,24 @@ public:
     bool end_effector_pose(std::vector<double>* pose) const;
 
     /**
+     * @brief 查询末端执行器当前姿态四元数
+     * @param quaternion 输出：[x, y, z, w]，与 @ref end_effector_pose 同一坐标系
+     * @return true 查询成功；false TF 不可用
+     * @note pos_move 步骤用它计算运动前后的姿态夹角（漂移量测）。
+     */
+    bool end_effector_quaternion(std::vector<double>* quaternion) const;
+
+    /**
      * @brief 发布笛卡尔轨迹指令
      * @param points  轨迹点，每个点为 6 维任务空间向量
      * @param seconds 与 @p points 一一对应的时刻（相对轨迹起点，秒）
+     * @param mode    任务空间模式：0 = 完整 6 维位姿（默认），1 = 只约束位置
+     *                （见 CartTrajCmd.msg 的 MODE_* 常量）
      * @return true 发布成功；false 参数非法
      * @note 速度/加速度前馈留空，控制器按 0 处理。
      */
-    bool publish_cart_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const;
+    bool publish_cart_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds,
+                           std::uint8_t mode = 0) const;
 
     /**
      * @brief 发布关节空间轨迹指令

@@ -2,6 +2,20 @@
 
 #include <Eigen/Dense>
 
+/**
+ * @brief 任务空间约束模式
+ *
+ * - @c kFullPose：位置 3 维 + 姿态 3 维全部参与收敛（默认，6 维任务）；
+ * - @c kPositionOnly：只约束 3 维位置，姿态误差与姿态雅可比行整体置零。
+ *
+ * 6 维向量与 IKSolver 的尺寸断言始终不变，降维只在映射层显式完成
+ * （与 @c set_roll_free 同一思路，但投影掉的是全部 3 个旋转分量）。
+ */
+enum class PoseMode {
+    kFullPose = 0,
+    kPositionOnly = 1,
+};
+
 class TaskMapping {
 public:
     virtual ~TaskMapping() = default;
@@ -68,4 +82,13 @@ public:
 
     /// 当前是否工作在降维（5 维）模式
     virtual bool roll_free() const { return false; }
+
+    /**
+     * @brief 切换任务空间约束模式（按轨迹下发，仅标量赋值，可在实时路径调用）
+     * @note 默认实现保持 6 维任务；只有支持投影的映射需要重写。
+     */
+    virtual void set_pose_mode(PoseMode mode) { (void)mode; }
+
+    /// 当前任务空间约束模式
+    virtual PoseMode pose_mode() const { return PoseMode::kFullPose; }
 };

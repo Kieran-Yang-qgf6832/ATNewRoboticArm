@@ -47,8 +47,13 @@ public:
 
     bool roll_free() const override { return roll_free_; }
 
+    void set_pose_mode(PoseMode mode) override;
+
+    PoseMode pose_mode() const override { return pose_mode_; }
+
 private:
     bool roll_free_{false};
+    PoseMode pose_mode_{PoseMode::kFullPose};
     /// 当前迭代点处、表达在基座系里的工具 z 轴（单位向量）
     Eigen::Vector3d tool_axis_{Eigen::Vector3d::UnitZ()};
 };
