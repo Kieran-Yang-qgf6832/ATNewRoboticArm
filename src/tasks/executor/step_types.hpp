@@ -30,11 +30,13 @@ struct Step {
     std::string type;           ///< 步骤类型名，必须属于 @ref known_step_types
     double duration{0.0};       ///< 运动/等待时长（秒）
     double tolerance{0.0};      ///< 到位容差；0 表示由执行器取默认值
-    std::vector<double> target; ///< joint_move：绝对关节角（由 to 解析或直接给出）
-    std::vector<double> offset; ///< cart_move / admittance_move：相对末端位移（3 维）
-    std::string action;         ///< tool：语义名（如 suck / release）
-    std::string to;             ///< joint_move：引用的命名目标点
-    int yaml_line{0};           ///< 在 YAML 中的行号（1 起），用于报错定位
+    std::vector<double> target;   ///< joint_move：绝对关节角（由 to 解析或直接给出）
+    std::vector<double> offset;   ///< cart_move / admittance_move：相对末端位移（3 维）
+    std::vector<double> position; ///< pos_move：基座系绝对目标 [x, y, z]（由 to 解析或直接给出）
+    std::string action;           ///< tool：语义名（如 suck / release）
+    std::string to;               ///< joint_move 引用 points；pos_move 引用 positions
+    double max_drift_deg{0.0};    ///< pos_move：姿态漂移告警阈值（度）；0 = 用配置默认值
+    int yaml_line{0};             ///< 在 YAML 中的行号（1 起），用于报错定位
 };
 
 /**

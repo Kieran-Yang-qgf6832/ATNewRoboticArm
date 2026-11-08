@@ -70,6 +70,10 @@ void Default6DofTaskSpaceMapping::set_roll_free(bool roll_free) {
     roll_free_ = roll_free;
 }
 
+void Default6DofTaskSpaceMapping::set_pose_mode(PoseMode mode) {
+    pose_mode_ = mode;
+}
+
 bool Default6DofTaskSpaceMapping::position_map(const Eigen::VectorXd& joint_pos,
                                                const Eigen::Isometry3d& pose,
                                                Eigen::VectorXd* task_position) {
@@ -117,6 +121,13 @@ bool Default6DofTaskSpaceMapping::jacobian_map(const Eigen::VectorXd& joint_pos,
     // 位置部分：e_p = p_t - p_c，∂e_p/∂q = -J_v，故 GN 雅可比 = +J_v，直接照搬。
     task_jacobian->topRows<3>() = jacobian.topRows<3>();
 
+    // 3 维 position-only：整体置零姿态行，姿态完全不参与收敛判据与 LM 步长。
+    // 这是显式降维，不是「给姿态一个很小的权重」——后者仍把旋转误差留在判据里。
+    if (pose_mode_ == PoseMode::kPositionOnly) {
+        task_jacobian->bottomRows<3>().setZero();
+        return task_jacobian->allFinite();
+    }
+
     // 姿态部分：e_r = log(R_t R_cᵀ)，de_r/dt = -J_r(ρ_e)·ω_c，故 GN 雅可比
     // = +J_r(ρ_e)·J_geom_rot。少了这一步等于默认 J_r = I，只在小误差下成立；
     // 误差接近 π 时线性化失准，逆解会停滞在判据之上（见 docs/bugs.md O5）。
@@ -147,6 +158,13 @@ bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target,
 
     // 位置部分：直接相减。
     error->head<3>() = target.head<3>() - current.head<3>();
+
+    // position-only：旋转误差整体置零，误差范数退化为纯位置（单位：米）。
+    // roll_free 的 5 维投影在这里不再叠加，position-only 优先（实机模式另有门禁）。
+    if (pose_mode_ == PoseMode::kPositionOnly) {
+        error->tail<3>().setZero();
+        return error->allFinite();
+    }
 
     // 姿态部分：旋转向量逐分量相减在 |rv| ≈ π 处失效——rv 与 -rv 表示同一姿态，
     // 目标与当前一旦落在奇异点两侧，误差会被算成 ≈2π 而不是 ≈0，逆解迭代随即发散。
