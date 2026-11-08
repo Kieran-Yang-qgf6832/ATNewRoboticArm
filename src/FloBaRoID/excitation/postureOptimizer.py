@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from identification.model import Model
+    from identifier import Identification
+
+import matplotlib.pyplot as plt
+import numpy as np
+from idyntree import bindings as iDynTree
+
+from excitation.optimizer import Optimizer, plotter
+from excitation.trajectoryGenerator import FixedPositionTrajectory
+from identification.helpers import URDFHelpers
+
+
+class PostureOptimizer(Optimizer):
+    """find angles of n static positions for identification of gravity parameters"""
+
+    def __init__(
+        self,
+        config: dict[str, Any],
+        idf: Identification,
+        model: Model,
+        simulation_func: Callable,
+        world: str | None = None,
+    ) -> None:
+        super().__init__(config, idf, model, simulation_func, world=world)
+        self.sim_func: Callable = simulation_func  # narrow: always non-None in this subclass
+
+        self.idf = idf
+
+        # get joint ranges
+        self.limits = URDFHelpers.getJointLimits(config["urdf"], use_deg=False)  # will always be compared to rad
+        self.trajectory = FixedPositionTrajectory(self.config)
+
+        self.num_postures = self.config["numStaticPostures"]
+        self.posture_time = self.config["staticPostureTime"]
+
+        self.idyn_model = iDynTree.Model()
+        iDynTree.modelFromURDF(self.config["urdf"], self.idyn_model)
+
+        self.neighbors = URDFHelpers.getNeighbors(self.idyn_model)
+
+        # amount of collision checks to be done (exclude links without visual geometry)
+        self.no_geometry_links = set(self.model.linkNames) - set(self.link_cuboid_hulls.keys())
+        eff_links = (
+            self.model.num_links
+            - len(self.no_geometry_links)
+            - len(self.config["ignoreLinksForCollision"])
+            + len(self.world_links)
+        )
+        self.num_constraints = self.num_postures * (eff_links * (eff_links - 1) // 2)
+
+        # get neighbors
+        nb_pairs: list[tuple] = []
+        for link in self.neighbors:
+            if link in self.config["ignoreLinksForCollision"]:
+                continue
+            if link not in self.model.linkNames:
+                continue
+            if link not in self.link_cuboid_hulls:
+                continue
+            nb_real = (
+                set(self.neighbors[link]["links"])
+                .difference(self.config["ignoreLinksForCollision"])
+                .difference(self.no_geometry_links)
+                .intersection(self.model.linkNames)
+            )
+            for l in nb_real:
+                if (link, l) not in nb_pairs and (l, link) not in nb_pairs:
+                    nb_pairs.append((link, l))
+        # only count ignore pairs where both links are in the effective set
+        ignored = set(self.config["ignoreLinksForCollision"]) | self.no_geometry_links
+        all_links = set(self.model.linkNames + self.world_links)
+        effective_ignore_pairs = [
+            p
+            for p in self.config["ignoreLinkPairsForCollision"]
+            if p[0] in all_links and p[1] in all_links and p[0] not in ignored and p[1] not in ignored
+        ]
+        self.num_constraints -= self.num_postures * (
+            len(nb_pairs)  # neighbors
+            + len(effective_ignore_pairs)
+        )  # custom combinations
+
+        self.initVisualizer()
+
+    def testConstraints(self, g):
+        return np.all(g > 0.0)
+
+    def objectiveFunc(self, x, test=False):
+        self.iter_cnt += 1
+        print(f"call #{self.iter_cnt}/{self.iter_max}")
+
+        # init vars
+        fail = False
+        f = 0.0
+        # g = np.zeros((self.num_postures, self.model.num_links, self.model.num_links))
+        # assert(g.size == self.num_constraints)  # needs to stay in sync
+        g = np.zeros(self.num_constraints)
+
+        # test constraints
+        # check for each link that it does not collide with any other link (parent/child shouldn't be possible)
+
+        g_cnt = 0
+        if self.config["verbose"] > 1:
+            print("checking collisions")
+        for p in range(self.num_postures):
+            if self.config["verbose"] > 1:
+                print(f"Posture {p}")
+            q = x[p * self.num_dofs : (p + 1) * self.num_dofs]
+
+            for l0 in range(self.model.num_links + len(self.world_links)):
+                for l1 in range(self.model.num_links + len(self.world_links)):
+                    l0_name = (self.model.linkNames + self.world_links)[l0]
+                    l1_name = (self.model.linkNames + self.world_links)[l1]
+
+                    if l0 >= l1:  # don't need, distance is the same in both directions; same link never collides
+                        continue
+                    if (
+                        l0_name in self.config["ignoreLinksForCollision"]
+                        or l1_name in self.config["ignoreLinksForCollision"]
+                        or l0_name in self.no_geometry_links
+                        or l1_name in self.no_geometry_links
+                    ):
+                        continue
+                    if [l0_name, l1_name] in self.config["ignoreLinkPairsForCollision"] or [
+                        l1_name,
+                        l0_name,
+                    ] in self.config["ignoreLinkPairsForCollision"]:
+                        continue
+
+                    # neighbors can't collide with a proper joint range, so ignore
+                    if l0 < self.model.num_links and l1 < self.model.num_links:
+                        if l0_name in self.neighbors[l1_name]["links"] or l1_name in self.neighbors[l0_name]["links"]:
+                            continue
+
+                    if l0 < l1:
+                        g[g_cnt] = self.getLinkDistance(l0_name, l1_name, q)
+                        g_cnt += 1
+
+        # check those links that are very close or collide again with mesh (simplified versions or full)
+        # TODO: possibly limit distance of overall COM from hip (simple balance?)
+
+        # simulate with current angles
+        angles = self.vecToParam(x)
+        self.trajectory.initWithAngles(angles)
+        old_verbose = self.config["verbose"]
+        self.config["verbose"] = 0
+        trajectory_data, data = self.sim_func(self.config, self.trajectory, model=self.model)
+
+        # identify parameters with this trajectory
+        self.idf.data.init_from_data(trajectory_data)
+        self.idf.estimateParameters()
+        self.config["verbose"] = old_verbose
+
+        if self.config["showOptimizationTrajs"]:
+            plotter(self.config, data=trajectory_data)
+
+        """
+        # get objective function value: identified parameter distance (from 'real')
+        id_grav = self.model.identified_params
+        id_grav_id = list(range(0, len(self.idf.model.xStd)))
+        if self.config['identifyGravityParamsOnly']:
+            id_grav = []
+            id_grav_id = []
+            # only compare COM params
+            for i in range(self.model.num_links):
+                id_grav.append(i*10+1)
+                id_grav.append(i*10+2)
+                id_grav.append(i*10+3)
+                id_grav_id.append(i*4+1)
+                id_grav_id.append(i*4+6)
+                id_grav_id.append(i*4+7)
+        param_error = self.idf.xStdReal[id_grav] - self.idf.model.xStd[id_grav_id]
+        """
+        param_error = self.idf.xBaseReal - self.idf.model.xBase
+        f = float(np.linalg.norm(param_error) ** 2)  # + np.std(param_error)
+
+        c = self.testConstraints(g)
+        if self.config["showOptimizationGraph"] and not self.is_gradient_eval:
+            self.xar.append(self.iter_cnt)
+            self.yar.append(f)
+            self.x_constr.append(c)
+            self.updateGraph()
+
+        self.showVisualizerAngles(x)
+
+        print(f"Objective function value: {f} (last best: {self.last_best_f})")
+
+        if self.config["verbose"]:
+            if self.is_gradient_eval:
+                print("(Gradient evaluation)")
+            print(f"Parameter error: {param_error}")
+            if self.config["verbose"] > 1:
+                print(f"Angles: {angles}")
+                print(f"Constraints ({len(g)} link distances): {list(g)}")
+
+        # keep last best solution (some solvers don't properly keep it or don't consider gradient values)
+        if c and f < self.last_best_f:
+            self.last_best_f = f
+            self.last_best_sol = x
+        elif not c:
+            print("Constraints not met.")
+
+        return f, g, fail
+
+    def buildVariableBounds(
+        self, initial_values: np.ndarray | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Build initial values and bounds for the posture angle variables.
+
+        Variable order is num_postures blocks of num_dofs joint angles.
+
+        Args:
+            initial_values: optional flat array of initial variable values (e.g. from a
+                previous global optimization). If None, uses configured initial postures.
+
+        Returns:
+            (x0, lower, upper) arrays.
+        """
+        x0: list[float] = []
+        lower: list[float] = []
+        upper: list[float] = []
+
+        # variables: angles for each posture
+        for p in range(self.num_postures):
+            for d in range(self.num_dofs):
+                d_n = self.model.jointNames[d]
+                osc_centers = self.config.get("trajectoryOscillationCenters", {})
+                freedom = self.config.get("trajectoryCenterFreedom", 15.0)
+                center_deg = float(osc_centers.get(d_n, 0.0)) if isinstance(osc_centers, dict) else 0.0
+                low = np.deg2rad(center_deg - freedom)
+                high = np.deg2rad(center_deg + freedom)
+                # clamp to URDF limits
+                low = max(low, self.limits[d_n]["lower"])
+                high = min(high, self.limits[d_n]["upper"])
+
+                # initial = (high - low) / 2
+                # initial = 0.0
+                if len(self.config["initialPostures"]) > p:
+                    initial = self.config["initialPostures"][p][d]
+                    if self.config["useDeg"]:
+                        initial = np.deg2rad(initial)
+                else:
+                    initial = 0.0
+
+                x0.append(initial)
+                lower.append(low)
+                upper.append(high)
+
+        x0_arr = np.array(initial_values, dtype=float) if initial_values is not None else np.array(x0)
+        return x0_arr, np.array(lower), np.array(upper)
+
+    def buildConstraintBounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """Build bounds for the constraint values (computed in objectiveFunc()).
+
+        For each link mesh distance to each other link, should be > 0.
+        """
+        return np.zeros(self.num_constraints), np.inf * np.ones(self.num_constraints)
+
+    def vecToParam(self, x: np.ndarray) -> list[dict[str, Any]]:
+        # put solution vector into form for trajectory class
+        angles: list[dict[str, Any]] = []  # matrix angles for each posture
+        for n in range(self.num_postures):
+            angles.append(
+                {
+                    "start_time": n * self.posture_time,
+                    "angles": x[n * self.num_dofs : (n + 1) * self.num_dofs],
+                }
+            )
+        return angles
+
+    def optimizeTrajectory(self) -> FixedPositionTrajectory:
+        # use non-linear optimization to find parameters
+
+        # ipopt, not really correct
+        num_vars = self.num_postures * self.num_dofs
+        self.local_iter_max = (num_vars + self.num_constraints) * self.config["localOptIterations"]
+
+        sol_vec = self.runOptimizer()
+
+        angles = self.vecToParam(sol_vec)
+        self.trajectory.initWithAngles(angles)
+
+        # keep plot windows open (if any)
+        plt.ioff()
+        plt.show(block=True)
+
+        return self.trajectory

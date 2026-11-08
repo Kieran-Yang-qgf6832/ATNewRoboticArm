@@ -1,0 +1,224 @@
+
+#### trajectory generation and excitation
+# Config for walkman left arm (7 DOF, floating base).
+# The arm is assumed to be suspended from a crane at the torso (Waist link).
+
+optimizeTrajectory: 1
+
+# trajectory optimization
+useGlobalOptimization: 0
+globalOptIterations: 20    # n_trials = globalOptSize * globalOptIterations
+globalOptSize: 20
+optunaSampler: 'TPE'       # 'TPE' or 'NSGA2'
+# globalOptJobs: 4         # parallel worker processes (default: CPU cores - 2)
+useLocalOptimization: 1
+localOptIterations: 50
+localOptSensStep: 0.02
+useAnalyticalGradients: 1        #analytical gradients via regularized D-optimality
+analyticalGradientEpsilon: 1.0e-7
+analyticalGradientJobs: 1        #parallel workers for regressor FD in gradient (0 = auto, 1 = serial)
+minTolConstr: 0.01
+showOptimizationGraph: 1
+showOptimizationTrajs: 0
+showModelVisualization: 0
+transparentLinks: []
+
+# the Waist link is the base (propped up), won't collide
+# collision geometry: 'box', 'convex', 'full', or 'capsule'
+collisionMode: 'convex'
+# required clearance (m) between robot and world geometry; box hulls
+# under-approximate protruding parts, so a margin avoids near-contact
+worldCollisionMargin: 0.0
+scaleCapsuleRadius: 0.8          # tighter capsules for compact humanoid (1.0 = full AABB)
+ignoreLinksForCollision: ['Waist']
+ignoreLinkPairsForCollision: []
+
+# trajectory parameters
+trajectoryPulseInit: 0.3
+trajectoryPulseMin:  0.1         # 0.1 → ~63s period, 0.3 → ~21s
+trajectoryPulseMax:  0.8
+trajectoryCoeffInit: 0.01
+trajectoryCoeffMin: -0.5
+trajectoryCoeffMax:  0.5
+# per-joint peak-velocity target (rad/s) as a soft cost; friction is hard to
+# identify for joints that barely move (0 = disabled)
+trajectoryTargetVelocity: 0.0
+# repair infeasible global-search candidates by scaling their Fourier amplitudes
+# down until feasible, so they still contribute a feasible solution
+globalOptAmplitudeRepair: 1
+# previously optimized trajectory files to enqueue as initial global-search trials
+trajectorySeedSolutions: []
+# measurement files of earlier trajectories whose information is added to the
+# objective so a new trajectory maximizes the information it adds (sequential design)
+trajectoryPriorMeasurements: []
+trajectoryTargetTorqueUtil: 0.5
+
+# preferred oscillation center offsets (degrees, from URDF joint midpoint)
+# positions are always clamped to URDF limits regardless of offset
+trajectoryCenterFreedom: 20.0
+trajectoryOscillationCenters:
+    LShLat:   75    # arm away from body (URDF midpoint is 113°)
+    LElbj:   -70    # elbow bent (URDF midpoint is -68°)
+    # unlisted joints default to 0 (URDF midpoint)
+
+# per-joint Fourier harmonics (all joints must be listed)
+trajectoryBounded: 1
+trajectoryNf:
+    LShSag: 3
+    LShLat: 3
+    LShYaw: 3
+    LElbj: 3
+    LForearmPlate: 3
+    LWrj1: 3
+    LWrj2: 3
+
+# override position limits: {joint_name: [lower_deg, upper_deg]}, unlisted use URDF
+ovrPosLimit: {}
+
+# torque utilization constraint
+minTorqueUtilization: 0.0
+minVelocityConstraint: 0
+minVelocityPercentage: 0.1
+
+# static posture optimization
+useStaticTrajectories: 0
+numStaticPostures: 5
+scaleCollisionHull: 0.8          # only used for box fallback when no collision mesh is available
+staticPostureTime: 0.02
+initialPostures: []
+
+# excitation
+exciteMethod: null
+ros_move_group: ''
+excitationFrequency: 200.0
+useDeg: 0
+
+#### measurement simulation
+simulateStaticSamplesPerPosture: 100
+staticPostures:
+    - [0, 90, 0, -90, 0, 0, 0]       # arm out to side, elbow bent
+    - [60, 45, 0, -45, 0, 0, 0]      # arm forward and out
+    - [-30, 90, 0, -120, 0, 30, 0]   # arm out, elbow fully bent, wrist turned
+    - [0, 60, 45, -60, 45, -30, 20]  # combined pose
+    - [30, 120, -30, -30, -45, 0, -20] # arm raised
+
+simulateNumStops: 3
+
+simulateFriction: 1
+simulateThermalDrift: 1
+simulateCableForces: 1
+simulateGravityCompResidual: 0
+simulateTorqueQuantization: 1
+simulateStructuralDeflection: 1
+simulateBacklash: 1
+simulateEncoderQuantization: 1
+simulateTimingJitter: 1
+simulateRandomSeed: 42
+
+# walkman uses EtherCAT at 1 kHz (typical for IIT robots)
+simulateControlRate: 1000.0
+simulateTorqueSensorError: 0.001
+simulateTorqueSensorFilter: 400
+simulatePositionFilter: 80
+simulateThermalWarmupTime: 300
+simulateThermalReduction: 0.12
+simulateGravCompError: 0.0
+simulateCableStiffnessScale: 1.0
+
+#### data preprocessing and selection
+
+filterMedianSize: 11
+filterLowPass1: [8.0, 5]
+filterLowPass2: [6.0, 5]
+filterLowPass3: [3.0, 4]
+
+startOffset: 0
+skipSamples: 0    # use every (skipSamples+1)-th sample
+
+selectBlocksFromMeasurements: 0
+blockSize: 250
+selectBestPerenctage: 50
+
+removeNearZero: 0
+minVel: 0.01
+
+waitForZeroAcc: 1
+zeroAccThresh: 0.4
+
+#### identification
+
+useStructuralRegressor: 1
+randomSamples: 5000
+
+minTol: 0.0001
+
+floatingBase: 1    # 1 = floating/free base (e.g. humanoid), 0 = fixed base
+
+identifyFrictionSimultaneously: 1    # identify friction together with inertial params in the SDP (0 = two-step)
+identifySymmetricVelFriction: 1
+identifyGravityParamsOnly: 0
+simulateTorques: 0
+
+constrainToConsistent: 1    # constrain identified params to be physically consistent (SDP)
+checkAPrioriFeasibility: 0
+identifyClosestToCAD: 1    # pick the feasible standard params closest to the CAD/a-priori model
+
+noChange: 0
+noChangeThresh: 400
+
+restrictCOMtoHull: 1
+hullScaling: 0.8
+meshBaseDir: 'meshes'
+cubeSize: 0.1   # fallback cube for collision when mesh files are not found
+
+limitCOMToApriori: 0
+limitCOMAprioriBoundary: 0.005
+
+limitOverallMass: 1
+limitMassVal: null  # use a priori mass sum
+limitMassRange: 0.3
+
+limitMassToApriori: 1
+limitMassAprioriBoundary: 0.5
+
+dontChangeParams: []
+dontConstrain: []
+useSymmetryConstraints: 0
+symmetryTolerance: 0.05
+
+useAPriori: 0    # identify the parameter error relative to the a-priori model
+useEssentialParams: 0
+useDependents: 0
+useWLS: 0
+# when identifying from several measurement files (repeated --measurements),
+# weight each file's equations by the inverse of its residual noise instead of
+# stacking all samples equally, so a noisier session does not dominate (0 = off)
+useTrajectoryWeighting: 0
+filterRegressor: 0
+filterRegCutoff: 5
+
+## output and debugging
+
+createPlots: 1
+outputModule: 'matplotlib'
+outputAs: 'html'
+outputFilename: 'output_walkman_left_arm.html'
+plotBaseDynamics: 1
+plotPerJoint: 1
+plotPrioriTorques: 1
+plotErrors: 0
+
+showRandomRegressor: 0
+showErrorHistogram: 0
+showMemUsage: 0
+showTiming: 0
+showEssentialSteps: 0
+outputBarycentric: 0
+showStandardParams: 1
+showBaseParams: 0
+showBaseEqns: 0
+outputLatex: 0
+showTriangleConsistency: 0
+verbose: 1
+
+estimateWith: 'std'

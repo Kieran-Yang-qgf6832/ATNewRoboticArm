@@ -1,0 +1,411 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robotic_arm">
+
+  <!-- headless：是否关掉 MuJoCo 自带的 UI 窗口，纯命令行跑仿真（测量/批处理用）。
+       默认 false = 保留 UI。launch 用 xacro 传 headless:=true 打开。
+       注意：本文件同时被 pinocchio 当**纯 URDF** 解析（identify_arm / 激励轨迹生成），
+       pinocchio 会忽略 <ros2_control> 整块和 xacro 元素，所以这里加 xacro 是安全的；
+       但不要在这里写会影响运动学的 $(arg ...)。 -->
+  <xacro:arg name="headless" default="false" />
+  <!-- hardware：选择 ros2_control 硬件插件。mujoco（默认）= MuJoCo 仿真，
+       real = 实机 USB CDC 接口。只切换 <ros2_control> 块，运动学完全共用；
+       pinocchio 解析时整块被忽略，因此不影响控制器内部的模型。 -->
+  <xacro:arg name="hardware" default="mujoco" />
+  <!-- loopback：实机接口的本地回环，不打开 USB 设备，只用于无硬件冒烟。
+       默认 false；接真机时必须保持 false。 -->
+  <xacro:arg name="loopback" default="false" />
+
+  <xacro:if value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <param name="mujoco_model">$(find arm_model)/model/scene.xml</param>
+      <!-- mujoco_ros2_control 的硬件参数：headless=true 时用 HeadlessAdapter 代替 GLFW，
+           不开窗口、不跑渲染线程，物理线程照常推进。 -->
+      <param name="headless">$(arg headless)</param>
+    </hardware>
+
+    <joint name="joint1">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint2">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint3">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint4">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint5">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint6">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- 真实关节加速度：mujoco_ros2_control 从 qacc 导出，参数辨识用它替代
+           "对记录速度二次求导"（docs/bugs.md O8）。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+  </ros2_control>
+  </xacro:if>
+
+  <xacro:unless value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>arm_controller/ArmRealInterfaces</plugin>
+      <!-- loopback=true 时跳过 USB 打开、把指令读回状态，只用于无硬件冒烟。 -->
+      <param name="loopback">$(arg loopback)</param>
+      <!-- 超过该时长没收到 MCU 状态包就返回 ERROR，让 controller_manager 停控制器。 -->
+      <param name="state_timeout_ms">100</param>
+      <!-- 关节标定表：q_urdf = dir * (q_raw - zero)。固件零位与 URDF 的 SolidWorks
+           零位没有共同基准，必须现场标定；未标定时文件里是 dir=1/zero=0 的占位值。 -->
+      <param name="joint_calibration_file">$(find arm_controller)/config/joint_calibration.yaml</param>
+    </hardware>
+
+    <joint name="joint1">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint2">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint3">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint4">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint5">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint6">
+      <!-- 下位机固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线
+           （固件跑自己的位置/速度双环 PID）。保留这三个接口只是为了满足
+           ArmController 的命令接口声明，值在 ArmRealInterfaces::write 里被丢弃。 -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration" />
+    </joint>
+
+  </ros2_control>
+  </xacro:unless>
+  <!-- 虚拟根链接，解决KDL根链接惯量问题 -->
+  <link name="world" />
+  <joint name="world_to_base" type="fixed">
+    <parent link="world" />
+    <child link="base_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-0.0091691 0.00025382 0.018962" rpy="0 0 0" />
+      <mass value="1.0998" />
+      <inertia ixx="0.0018714" ixy="5.0546e-06" ixz="8.4992e-08" iyy="0.0021258" iyz="1.3828e-07" izz="0.0039568" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/base_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.29412 0.29412 0.29412 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <origin xyz="7.43358623475285E-06 0.023889111022454 0.0983534461817423" rpy="0 0 0" />
+      <mass value="2.9369601050704874" />
+      <inertia ixx="0.007173443558456274" ixy="-2.504467472000175e-07" ixz="1.3187417257568625e-06" iyy="0.010182454651134626" iyz="3.006790149725575e-05" izz="0.010512323264758613" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link1.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="link1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.8" upper="1.8" effort="50" velocity="10" />
+  </joint>
+  <link name="link2">
+    <inertial>
+      <origin xyz="0.31324601008515 -0.000831742439412309 0.0364273369229759" rpy="0 0 0" />
+      <mass value="1.0516805546825074" />
+      <inertia ixx="0.0004884937849647077" ixy="5.76826018027708e-07" ixz="5.5490301092830084e-05" iyy="0.011860111933613665" iyz="1.470694983353629e-06" izz="0.012079609775234125" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link2.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0 0.03675 0.153" rpy="1.5708 -1.5708 0" />
+    <parent link="link1" />
+    <child link="link2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.570796327" upper="1.570796327" effort="50" velocity="10" />
+  </joint>
+  <link name="link3">
+    <inertial>
+      <origin xyz="0.271920716707995 -0.000176719212418436 -0.0120138921627069" rpy="0 0 0" />
+      <mass value="0.4443193077300192" />
+      <inertia ixx="0.0001564405597599456" ixy="8.268549600894239e-07" ixz="-2.338799305297056e-06" iyy="0.00321209868723624" iyz="-2.0799386612729398e-07" izz="0.003336393835562064" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link3.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint3" type="revolute">
+    <origin xyz="0.52 0 0.08565" rpy="0 0 0" />
+    <parent link="link2" />
+    <child link="link3" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.9" upper="2.9" effort="50" velocity="10" />
+  </joint>
+  <link name="link4">
+    <inertial>
+      <origin xyz="0.101739291148925 0.0561668504993356 -0.0293841566997596" rpy="0 0 0" />
+      <mass value="1.387594882488141" />
+      <inertia ixx="0.0008001380691227601" ixy="-1.808813710304154e-06" ixz="1.031045849560746e-05" iyy="0.0008124784800895287" iyz="3.826185742395603e-08" izz="0.0002430003339476406" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link4.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint4" type="revolute">
+    <origin xyz="0.436 0 0.0225" rpy="0 0 0" />
+    <parent link="link3" />
+    <child link="link4" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.0" upper="1.8" effort="50" velocity="10" />
+  </joint>
+  <link name="link5">
+    <inertial>
+      <origin xyz="0.0486576553457728 0.00239487174403753 0.00012705522061713" rpy="0 0 0" />
+      <mass value="0.08035298057299356" />
+      <inertia ixx="1.798340112077576e-05" ixy="-2.444956123218344e-07" ixz="-5.2603965609517856e-21" iyy="2.274542841665643e-05" iyz="3.075292139922272e-21" izz="2.5990914974476193e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link5.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0.07761 -0.0058889 -0.03035" rpy="-1.5708 0 0" />
+    <parent link="link4" />
+    <child link="link5" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.610865238" upper="0.610865238" effort="50" velocity="10" />
+  </joint>
+  <link name="link6">
+    <inertial>
+      <origin xyz="1.1369377661552E-14 3.51232931627976E-13 0.0193009014981094" rpy="0 0 0" />
+      <mass value="0.10247948719584239" />
+      <inertia ixx="5.1815738547078235e-05" ixy="7.802204430107368e-22" ixz="-1.860800772744056e-21" iyy="5.1815738547078235e-05" iyz="-1.490777987167568e-20" izz="7.667299655158168e-05" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link6.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint6" type="revolute">
+    <origin xyz="0.073796 0.0036822 8.8922E-05" rpy="0 -1.5708 3.14" />
+    <parent link="link5" />
+    <child link="link6" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="50" velocity="10" />
+  </joint>
+</robot>

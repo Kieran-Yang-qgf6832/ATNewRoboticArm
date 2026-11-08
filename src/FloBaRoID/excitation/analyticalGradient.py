@@ -1,0 +1,959 @@
+"""Analytical gradient computation for trajectory optimization.
+
+Implements the gradient chain:
+
+    d(objective)/d(alpha) = d(obj)/d(Y) : d(Y)/d(x) * d(x)/d(alpha)
+
+where x = (q, dq, ddq) are joint states, alpha are Fourier parameters,
+and ':' is the Frobenius inner product (tensor contraction).
+
+The objective is regularized D-optimality: -log(det(Y^T Y + δI)).
+
+The overall gradient is split into two phases:
+  Phase A (expensive): Loop over samples, compute d(obj)/d(state) via numerical FD
+    of the iDynTree regressor. Result: sensitivity arrays of shape (n_samples, n_dofs).
+  Phase B (cheap): Chain sensitivities with analytical trajectory Jacobians using
+    vectorized numpy operations to get d(objective)/d(alpha).
+"""
+
+from __future__ import annotations
+
+import multiprocessing
+import os
+from typing import TYPE_CHECKING, cast
+
+import numpy as np
+from idyntree import bindings as iDynTree
+
+from excitation.trajectoryGenerator import BoundedOscillationGenerator, PulsedTrajectory
+
+if TYPE_CHECKING:
+    from excitation.trajectoryGenerator import OscillationGenerator
+    from excitation.trajectoryOptimizer import TrajectoryOptimizer
+    from identification.model import Model
+
+# --- Worker pool for parallel gradient computation ---
+# Each worker process has its own iDynTree model instance (stored in module-level dict).
+# The pool persists across gradient calls to avoid re-creating models.
+_worker_state: dict = {}
+_gradient_pool: multiprocessing.pool.Pool | None = None
+_gradient_pool_size: int = 0
+
+
+# --- D-optimality gradient worker ---
+
+
+def _dopt_gradient_worker_func(args: tuple) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
+    """Compute D-optimality regressor sensitivities via FD.
+
+    Instead of contracting with SVD vectors (condition number), uses the Frobenius
+    inner product with D-optimality weights: sens[t,d] = <W_t, dY_t/dq_d>.
+    This is numerically stable at any condition number.
+    """
+    (
+        sample_indices,
+        positions,
+        velocities,
+        accelerations,
+        W_iner,
+        params_iner,
+        n_dofs_out,
+        epsilon,
+        is_floating,
+        row_slice_start,
+        has_visc_friction,
+        W_visc,
+        params_visc,
+        fb,
+        torque_absmax_idx,
+    ) = args
+
+    model = _worker_state["model"]
+    nd = model.num_dofs
+    inv_eps = 1.0 / epsilon
+
+    q_buf = iDynTree.JointPosDoubleArray(nd)
+    dq_buf = iDynTree.JointDOFsDoubleArray(nd)
+    ddq_buf = iDynTree.JointDOFsDoubleArray(nd)
+    base_acc = iDynTree.Vector6()
+    reg_buf = iDynTree.MatrixDynSize()
+    fb_identity = iDynTree.Transform.Identity() if is_floating else None
+    fb_zero_twist = iDynTree.Twist.Zero() if is_floating else None
+    row_slice = slice(None) if is_floating else slice(6, None)
+
+    torque_grad_samples = set(int(idx) for idx in torque_absmax_idx)
+
+    n_chunk = len(sample_indices)
+    sens_q = np.zeros((n_chunk, nd))
+    sens_dq = np.zeros((n_chunk, nd))
+    sens_ddq = np.zeros((n_chunk, nd))
+    torque_sens: dict[str, np.ndarray] = {}
+
+    for ci, t in enumerate(sample_indices):
+        pos_t = positions[t]
+        vel_t = velocities[t]
+        acc_t = accelerations[t]
+
+        for i in range(nd):
+            q_buf.setVal(i, float(pos_t[i]))
+            dq_buf.setVal(i, float(vel_t[i]))
+            ddq_buf.setVal(i, float(acc_t[i]))
+
+        # Per-sample D-opt weight block (n_out × n_inertial)
+        W_t = W_iner[t * n_dofs_out : (t + 1) * n_dofs_out]
+        need_torque = t in torque_grad_samples
+
+        # --- Baseline evaluation ---
+        if is_floating:
+            model.kinDyn.setRobotState(fb_identity, q_buf, fb_zero_twist, dq_buf, model.gravity_vec)
+        else:
+            model.kinDyn.setRobotState(q_buf, dq_buf, model.gravity_vec)
+        model.kinDyn.inverseDynamicsInertialParametersRegressor(base_acc, ddq_buf, reg_buf)
+        Y_base = reg_buf.toNumPy()[row_slice]
+        score_base = np.sum(W_t * Y_base)
+        if need_torque:
+            Yp_base = Y_base @ params_iner
+
+        # --- Position perturbations ---
+        for d in range(nd):
+            orig = float(pos_t[d])
+            q_buf.setVal(d, orig + epsilon)
+            if is_floating:
+                model.kinDyn.setRobotState(fb_identity, q_buf, fb_zero_twist, dq_buf, model.gravity_vec)
+            else:
+                model.kinDyn.setRobotState(q_buf, dq_buf, model.gravity_vec)
+            model.kinDyn.inverseDynamicsInertialParametersRegressor(base_acc, ddq_buf, reg_buf)
+            Y_plus = reg_buf.toNumPy()[row_slice]
+            q_buf.setVal(d, orig)
+
+            sens_q[ci, d] = (np.sum(W_t * Y_plus) - score_base) * inv_eps
+
+            if need_torque:
+                dp = (Y_plus @ params_iner - Yp_base) * inv_eps
+                for n in range(nd):
+                    if torque_absmax_idx[n] == t:
+                        torque_sens[f"dq_{n}_{d}"] = dp[fb + n]
+
+        # --- Velocity perturbations ---
+        if is_floating:
+            model.kinDyn.setRobotState(fb_identity, q_buf, fb_zero_twist, dq_buf, model.gravity_vec)
+        else:
+            model.kinDyn.setRobotState(q_buf, dq_buf, model.gravity_vec)
+
+        for d in range(nd):
+            orig = float(vel_t[d])
+            dq_buf.setVal(d, orig + epsilon)
+            if is_floating:
+                model.kinDyn.setRobotState(fb_identity, q_buf, fb_zero_twist, dq_buf, model.gravity_vec)
+            else:
+                model.kinDyn.setRobotState(q_buf, dq_buf, model.gravity_vec)
+            model.kinDyn.inverseDynamicsInertialParametersRegressor(base_acc, ddq_buf, reg_buf)
+            Y_plus = reg_buf.toNumPy()[row_slice]
+            dq_buf.setVal(d, orig)
+
+            dopt_contrib = (np.sum(W_t * Y_plus) - score_base) * inv_eps
+            # Viscous friction contribution (analytical, not captured by inertial regressor FD)
+            if has_visc_friction:
+                dopt_contrib += W_visc[t * n_dofs_out + fb + d]
+
+            sens_dq[ci, d] = dopt_contrib
+
+            if need_torque:
+                dp = (Y_plus @ params_iner - Yp_base) * inv_eps
+                if has_visc_friction:
+                    dp[fb + d] += params_visc[d]
+                for n in range(nd):
+                    if torque_absmax_idx[n] == t:
+                        torque_sens[f"ddq_{n}_{d}"] = dp[fb + n]
+
+        # --- Acceleration perturbations ---
+        for d in range(nd):
+            orig = float(acc_t[d])
+            ddq_buf.setVal(d, orig + epsilon)
+            model.kinDyn.inverseDynamicsInertialParametersRegressor(base_acc, ddq_buf, reg_buf)
+            Y_plus = reg_buf.toNumPy()[row_slice]
+            ddq_buf.setVal(d, orig)
+
+            sens_ddq[ci, d] = (np.sum(W_t * Y_plus) - score_base) * inv_eps
+
+            if need_torque:
+                dp = (Y_plus @ params_iner - Yp_base) * inv_eps
+                for n in range(nd):
+                    if torque_absmax_idx[n] == t:
+                        torque_sens[f"dddq_{n}_{d}"] = dp[fb + n]
+
+    return sens_q, sens_dq, sens_ddq, torque_sens
+
+
+def _gradient_worker_init(urdf_file: str, config_dict: dict) -> None:
+    """Initialize a worker process with its own iDynTree model.
+
+    Called once when the worker is spawned. The model is cached in
+    the module-level _worker_state dict for reuse across tasks.
+    """
+    import signal
+
+    # let the main process handle Ctrl-C; pool workers are terminated explicitly
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    import matplotlib
+
+    matplotlib.use("Agg")  # prevent display in workers
+
+    from identification.model import Model
+
+    config_dict["jointNames"] = iDynTree.StringVector([])
+    iDynTree.dofsListFromURDF(urdf_file, config_dict["jointNames"])
+    config_dict["num_dofs"] = len(config_dict["jointNames"])
+
+    model = Model(config_dict, urdf_file)
+    _worker_state["model"] = model
+
+
+def kill_gradient_pool() -> None:
+    """Terminate the persistent gradient worker pool (e.g. on Ctrl-C)."""
+    global _gradient_pool
+    if _gradient_pool is not None:
+        _gradient_pool.terminate()
+        _gradient_pool.join()
+        _gradient_pool = None
+
+
+def _get_gradient_pool(n_jobs: int, urdf: str, config: dict) -> multiprocessing.pool.Pool:
+    """Get or create the worker pool for parallel gradient computation."""
+    global _gradient_pool, _gradient_pool_size
+    if _gradient_pool is None or _gradient_pool_size != n_jobs:
+        if _gradient_pool is not None:
+            _gradient_pool.terminate()
+        # Strip non-picklable objects from config
+        config_clean = {k: v for k, v in config.items() if k != "jointNames"}
+        _gradient_pool = multiprocessing.Pool(
+            n_jobs,
+            initializer=_gradient_worker_init,
+            initargs=(urdf, config_clean),
+        )
+        _gradient_pool_size = n_jobs
+    return _gradient_pool
+
+
+def _get_projection_matrix(model: Model) -> np.ndarray:
+    """Get the base projection matrix (Pb or B depending on config)."""
+    if model.opt.get("useBasisProjection", False):
+        return model.B
+    return model.Pb
+
+
+def _compute_wf_derivatives(
+    optimizer: TrajectoryOptimizer,
+    times: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute d(q,dq,ddq)/d(wf) via central differences of the trajectory.
+
+    Returns three arrays of shape (n_samples, n_dofs): dq_dwf, ddq_dwf, dddq_dwf.
+    """
+    nd = optimizer.num_dofs
+    n_samples = len(times)
+    wf = optimizer.trajectory.w_f_global
+    use_deg = optimizer.config["useDeg"]
+    eps_wf = 1e-7
+
+    def _eval_traj(wf_val: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Evaluate trajectory at given wf using vectorized Fourier computation."""
+        traj = PulsedTrajectory(nd, use_deg=use_deg)
+        traj.initWithParams(
+            optimizer.trajectory.a,
+            optimizer.trajectory.b,
+            optimizer.trajectory.q,
+            optimizer.trajectory.nf,
+            wf_val,
+            joint_limits=optimizer._joint_limits,
+        )
+        p = np.empty((n_samples, nd))
+        v = np.empty((n_samples, nd))
+        a = np.empty((n_samples, nd))
+        for di in range(nd):
+            oi = traj.oscillators[di]
+            li = np.arange(1, oi.nf + 1)
+            wlti = wf_val * np.outer(times, li)
+            si, ci = np.sin(wlti), np.cos(wlti)
+            ai, bi = np.array(oi.a), np.array(oi.b)
+            if isinstance(oi, BoundedOscillationGenerator):
+                rw = ci @ bi + si @ ai
+                thi = np.tanh(rw)
+                sc2 = 1.0 - thi**2
+                wli = wf_val * li
+                rd = ci @ (ai * wli) - si @ (bi * wli)
+                rdd = -si @ (ai * wli**2) - ci @ (bi * wli**2)
+                p[:, di] = oi.q_center + oi.q_range * thi
+                v[:, di] = oi.q_range * sc2 * rd
+                a[:, di] = oi.q_range * (sc2 * rdd - 2.0 * thi * sc2 * rd**2)
+            else:
+                ac = ai / (wf_val * li)
+                bc = bi / (wf_val * li)
+                p[:, di] = si @ ac - ci @ bc + oi.nf * oi.q0
+                v[:, di] = ci @ ai + si @ bi
+                wli = wf_val * li
+                a[:, di] = -si @ (ai * wli) + ci @ (bi * wli)
+        if use_deg:
+            p, v, a = np.deg2rad(p), np.deg2rad(v), np.deg2rad(a)
+        return p, v, a
+
+    pp, vp, ap = _eval_traj(wf + eps_wf)
+    pm, vm, am = _eval_traj(wf - eps_wf)
+    inv_2eps = 1.0 / (2.0 * eps_wf)
+    return (pp - pm) * inv_2eps, (vp - vm) * inv_2eps, (ap - am) * inv_2eps
+
+
+def _traj_jac_single(
+    osc: OscillationGenerator | BoundedOscillationGenerator,
+    t_val: float,
+    nf_d: int,
+    wf: float,
+    use_deg: bool,
+    n_vars: int,
+    a_var_start: int,
+    b_var_start: int,
+    q0_var_idx: int,
+    dq_dwf_t: float,
+    ddq_dwf_t: float,
+    dddq_dwf_t: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute trajectory Jacobians for one joint at one time point.
+
+    Returns (dq_row, ddq_row, dddq_row), each shape (n_vars,).
+    Only entries for variables affecting this joint (and wf) are nonzero.
+    """
+    deg_factor = np.pi / 180.0 if use_deg else 1.0
+    dq_row = np.zeros(n_vars)
+    ddq_row = np.zeros(n_vars)
+    dddq_row = np.zeros(n_vars)
+
+    l_arr = np.arange(1, nf_d + 1)
+    wl = wf * l_arr
+    wlt = wf * l_arr * t_val
+    sin_wlt = np.sin(wlt)
+    cos_wlt = np.cos(wlt)
+    a_arr = np.array(osc.a)
+    b_arr = np.array(osc.b)
+
+    is_bounded = isinstance(osc, BoundedOscillationGenerator)
+
+    if is_bounded:
+        bounded_osc = cast("BoundedOscillationGenerator", osc)
+        raw = np.dot(cos_wlt, b_arr) + np.dot(sin_wlt, a_arr)
+        th = np.tanh(raw)
+        sc = 1.0 - th**2
+        qr = bounded_osc.q_range
+        raw_dot = np.dot(cos_wlt, a_arr * wl) - np.dot(sin_wlt, b_arr * wl)
+        raw_ddot = -np.dot(sin_wlt, a_arr * wl**2) - np.dot(cos_wlt, b_arr * wl**2)
+
+        for l_idx in range(nf_d):
+            # a coefficient
+            vi_a = a_var_start + l_idx
+            dr_a = sin_wlt[l_idx]
+            dr_dot_a = wl[l_idx] * cos_wlt[l_idx]
+            dr_ddot_a = -(wl[l_idx] ** 2) * sin_wlt[l_idx]
+            dq_row[vi_a] = qr * sc * dr_a
+            ddq_row[vi_a] = qr * sc * (-2.0 * th * dr_a * raw_dot + dr_dot_a)
+            dsc = -2.0 * th * sc * dr_a
+            d_thsc = sc * (sc - 2.0 * th**2) * dr_a
+            dddq_row[vi_a] = qr * (
+                dsc * raw_ddot + sc * dr_ddot_a - 2.0 * d_thsc * raw_dot**2 - 4.0 * th * sc * raw_dot * dr_dot_a
+            )
+
+            # b coefficient
+            vi_b = b_var_start + l_idx
+            dr_b = cos_wlt[l_idx]
+            dr_dot_b = -wl[l_idx] * sin_wlt[l_idx]
+            dr_ddot_b = -(wl[l_idx] ** 2) * cos_wlt[l_idx]
+            dq_row[vi_b] = qr * sc * dr_b
+            ddq_row[vi_b] = qr * sc * (-2.0 * th * dr_b * raw_dot + dr_dot_b)
+            dsc_b = -2.0 * th * sc * dr_b
+            d_thsc_b = sc * (sc - 2.0 * th**2) * dr_b
+            dddq_row[vi_b] = qr * (
+                dsc_b * raw_ddot + sc * dr_ddot_b - 2.0 * d_thsc_b * raw_dot**2 - 4.0 * th * sc * raw_dot * dr_dot_b
+            )
+
+        # q0: only affects position via q_center
+        dq_row[q0_var_idx] = deg_factor
+    else:
+        inv_wl = 1.0 / wl
+        for l_idx in range(nf_d):
+            vi_a = a_var_start + l_idx
+            dq_row[vi_a] = sin_wlt[l_idx] * inv_wl[l_idx]
+            ddq_row[vi_a] = cos_wlt[l_idx]
+            dddq_row[vi_a] = -wl[l_idx] * sin_wlt[l_idx]
+
+            vi_b = b_var_start + l_idx
+            dq_row[vi_b] = -cos_wlt[l_idx] * inv_wl[l_idx]
+            ddq_row[vi_b] = sin_wlt[l_idx]
+            dddq_row[vi_b] = wl[l_idx] * cos_wlt[l_idx]
+
+        dq_row[q0_var_idx] = nf_d * deg_factor
+
+    # wf contribution (from precomputed numerical FD)
+    dq_row[0] = dq_dwf_t
+    ddq_row[0] = ddq_dwf_t
+    dddq_row[0] = dddq_dwf_t
+
+    return dq_row, ddq_row, dddq_row
+
+
+def _collision_fd_single_pair(
+    optimizer: TrajectoryOptimizer,
+    pair_idx: int,
+    q_star: np.ndarray,
+    nd: int,
+    epsilon: float,
+    inv_2eps: float,
+    base_rpy: np.ndarray | None = None,
+    base_position: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute d(distance)/dq for a single collision pair via central finite differences.
+
+    Used as fallback when capsule geometry is not available for a pair.
+    """
+    ddist = np.zeros(nd)
+    l0, l1 = optimizer._collision_pairs[pair_idx]
+    for j in range(nd):
+        q_p = q_star.copy()
+        q_p[j] += epsilon
+        optimizer.setCollisionRobotState(q_p, base_rpy=base_rpy, base_position=base_position)
+        d_plus = optimizer.getLinkDistance(l0, l1, q_p)
+
+        q_m = q_star.copy()
+        q_m[j] -= epsilon
+        optimizer.setCollisionRobotState(q_m, base_rpy=base_rpy, base_position=base_position)
+        d_minus = optimizer.getLinkDistance(l0, l1, q_m)
+        ddist[j] = (d_plus - d_minus) * inv_2eps
+    return ddist
+
+
+def compute_analytical_gradient(
+    optimizer: TrajectoryOptimizer,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute complete analytical gradient of objective and constraint Jacobian.
+
+    Phase A: Loop over samples, compute regressor sensitivities via numerical FD.
+    Phase B: Chain with analytical trajectory Jacobians (vectorized).
+    Phase C: Penalty and constraint gradients.
+
+    Returns:
+        obj_grad: shape (n_vars,)
+        con_grad: shape (n_constraints, n_vars)
+    """
+    cache = optimizer._ag_cache
+    model = optimizer.model
+    config = optimizer.config
+    nd = optimizer.num_dofs
+    fb = 6 if config["floatingBase"] else 0
+    n_dofs_out = nd + fb
+    n_vars = 1 + nd + 2 * optimizer.total_ab
+
+    YBase = cache["YBase"]
+    positions = cache["positions"]
+    velocities = cache["velocities"]
+    accelerations = cache["accelerations"]
+    times = cache["times"]
+    n_samples = len(times)
+
+    if config.get("verbose", 0):
+        print("Computing analytical gradient...")
+
+    # ---- Phase 1: Regularized D-optimality gradient weights ----
+    # Objective: f = -log(det(Y^T Y + δI)) * scale
+    # Gradient: df/dY = -2 * scale * Y @ (Y^T Y + δI)^{-1}
+    #                 = -2 * scale * U @ diag(s_i / (s_i² + δ)) @ V^T
+    # The regularization δ ensures all terms in the sum are bounded by 1/(2√δ),
+    # preventing numerical catastrophe from near-zero singular values.
+    dopt_scale = cache["dopt_scale"]
+    dopt_reg = config.get("doptRegularization", 1e-4)
+    if optimizer.YtY_prior is not None:
+        # sequential design: f = -log(det(P + Y^T Y + δI)) * scale with the prior
+        # information matrix P from previous trajectories.
+        # Gradient: df/dY = -2 * scale * Y @ (P + Y^T Y + δI)^{-1}
+        M = optimizer.YtY_prior + YBase.T @ YBase
+        eigvals_M = np.linalg.eigvalsh(M)
+        delta = dopt_reg * max(float(eigvals_M[-1]), 1e-30)
+        M_reg = M + delta * np.eye(M.shape[0])
+        R_dopt = -2.0 * dopt_scale * np.linalg.solve(M_reg, YBase.T).T
+    else:
+        U, S, Vt = np.linalg.svd(YBase, full_matrices=False)
+        delta = dopt_reg * S[0] ** 2  # δ relative to largest eigenvalue λ_max = s_max²
+        # Regularized weights: s_i / (s_i² + δ) instead of 1/s_i
+        reg_weights = S / (S**2 + delta)
+        R_dopt = -2.0 * dopt_scale * ((U * reg_weights[np.newaxis, :]) @ Vt)
+
+    proj = _get_projection_matrix(model)
+
+    # D-optimality weight in standard parameter space: W_std = R_dopt @ Pb^T
+    W_std = R_dopt @ proj.T  # shape (n_samples * n_dofs_out, n_identified_params)
+
+    # Parameter vector for torque gradient (matches regressor column order)
+    params = model.xStdModel[model.identified_params]
+
+    # ---- Phase 2: wf derivatives (numerical FD of trajectory) ----
+    dq_dwf, ddq_dwf, dddq_dwf = _compute_wf_derivatives(optimizer, times)
+
+    # ---- Phase A: D-optimality regressor sensitivities via FD ----
+    epsilon = config.get("analyticalGradientEpsilon", 1e-7)
+    inv_2eps = 1.0 / (2.0 * epsilon)  # used by collision gradient FD
+    is_floating = model.opt["floatingBase"]
+
+    n_inertial = model.num_model_params
+    if model.opt.get("identifyGravityParamsOnly", False):
+        n_inertial -= len(model.inertia_params)
+    W_iner = W_std[:, :n_inertial]
+    params_iner = params[:n_inertial]
+
+    has_friction = model.opt.get("identifyFrictionSimultaneously", False)
+    has_visc_friction = has_friction and not model.opt.get("identifyGravityParamsOnly", False)
+    params_visc_arr = np.zeros(nd)
+    # D-opt weight for viscous friction: d(v*Fv_d)/d(dq_d) = Fv_d at row (fb+d),
+    # so the weight is W_std[t*n_out+fb+d, visc_col_d]
+    W_visc = np.zeros(n_samples * n_dofs_out)
+    if has_visc_friction:
+        visc_offset = n_inertial + nd  # skip inertial + coulomb friction columns
+        for d in range(nd):
+            if visc_offset + d < W_std.shape[1]:
+                for t in range(n_samples):
+                    W_visc[t * n_dofs_out + fb + d] = W_std[t * n_dofs_out + fb + d, visc_offset + d]
+        params_visc_arr = params[visc_offset : visc_offset + nd]
+
+    torque_absmax_idx = cache["torque_absmax_idx"]
+    subsample = config.get("analyticalGradientSubsample", 1)
+    # always include each joint's peak-torque sample so the torque-limit and torque-utilization
+    # gradients are computed for every joint, even when subsampling would skip that index
+    sample_indices = sorted(set(range(0, n_samples, subsample)) | {int(i) for i in torque_absmax_idx})
+
+    n_jobs = config.get("analyticalGradientJobs", 1)
+    if n_jobs <= 0:
+        n_jobs = max(1, (os.cpu_count() or 1) - 2)
+
+    # D-optimality FD worker
+    worker_common = (
+        positions,
+        velocities,
+        accelerations,
+        W_iner,
+        params_iner,
+        n_dofs_out,
+        epsilon,
+        is_floating,
+        0 if is_floating else 6,
+        has_visc_friction,
+        W_visc,
+        params_visc_arr,
+        fb,
+        torque_absmax_idx,
+    )
+
+    if n_jobs > 1 and len(sample_indices) > n_jobs:
+        grad_pool = _get_gradient_pool(n_jobs, config["urdf"], config)
+        chunks = np.array_split(sample_indices, n_jobs)
+        fd_work_items = [(list(chunk), *worker_common) for chunk in chunks]
+        results = grad_pool.map(_dopt_gradient_worker_func, fd_work_items)
+    else:
+        if "model" not in _worker_state:
+            _worker_state["model"] = model
+        results = [_dopt_gradient_worker_func((sample_indices, *worker_common))]
+        chunks = [np.array(sample_indices)]
+
+    # Aggregate results
+    sens_q = np.zeros((n_samples, nd))
+    sens_dq = np.zeros((n_samples, nd))
+    sens_ddq = np.zeros((n_samples, nd))
+    dtau_dq = np.zeros((nd, nd))
+    dtau_ddq_state = np.zeros((nd, nd))
+    dtau_dddq = np.zeros((nd, nd))
+
+    for chunk_idx, (sq, sdq, sddq, torque_dict) in enumerate(results):
+        chunk = list(chunks[chunk_idx])
+        for ci, t in enumerate(chunk):
+            sens_q[t] = sq[ci]
+            sens_dq[t] = sdq[ci]
+            sens_ddq[t] = sddq[ci]
+        for key, val in torque_dict.items():
+            parts = key.split("_")
+            state_type, n_i, d_i = parts[0], int(parts[1]), int(parts[2])
+            if state_type == "dq":
+                dtau_dq[n_i, d_i] = val
+            elif state_type == "ddq":
+                dtau_ddq_state[n_i, d_i] = val
+            elif state_type == "dddq":
+                dtau_dddq[n_i, d_i] = val
+
+    if subsample > 1:
+        sens_q *= subsample
+        sens_dq *= subsample
+        sens_ddq *= subsample
+
+    # ---- Phase B: Chain rule with trajectory Jacobians (vectorized) ----
+    obj_grad = np.zeros(n_vars)
+    wf = optimizer.trajectory.w_f_global
+    use_deg = config["useDeg"]
+    deg_factor = np.pi / 180.0 if use_deg else 1.0
+    # cond_scale and log10 scaling are already folded into c1/c2, so no extra multiplier needed
+
+    # wf contribution: sum over all samples and joints
+    obj_grad[0] += np.sum(sens_q * dq_dwf) + np.sum(sens_dq * ddq_dwf) + np.sum(sens_ddq * dddq_dwf)
+
+    # Per-joint Fourier coefficient contributions
+    q0_start = 1
+    a_start = 1 + nd
+    b_start = a_start + optimizer.total_ab
+    a_offset = a_start
+    b_offset = b_start
+
+    for d in range(nd):
+        osc = optimizer.trajectory.oscillators[d]
+        nf_d = optimizer.nf[d]
+        l_arr = np.arange(1, nf_d + 1)
+        wl = wf * l_arr
+        wlt = wf * np.outer(times, l_arr)  # (n_samples, nf_d)
+        sin_wlt = np.sin(wlt)
+        cos_wlt = np.cos(wlt)
+        a_arr = np.array(osc.a)
+        b_arr = np.array(osc.b)
+
+        s_q = sens_q[:, d]  # (n_samples,)
+        s_dq = sens_dq[:, d]
+        s_ddq = sens_ddq[:, d]
+
+        is_bounded = isinstance(osc, BoundedOscillationGenerator)
+
+        if is_bounded:
+            # Precompute bounded-mode intermediates for all samples
+            raw = cos_wlt @ b_arr + sin_wlt @ a_arr  # (n_samples,)
+            th = np.tanh(raw)
+            sc = 1.0 - th**2
+            qr = osc.q_range
+            raw_dot = cos_wlt @ (a_arr * wl) - sin_wlt @ (b_arr * wl)
+            raw_ddot = -sin_wlt @ (a_arr * wl**2) - cos_wlt @ (b_arr * wl**2)
+
+            for l_idx in range(nf_d):
+                # --- a coefficient ---
+                vi_a = a_offset + l_idx
+                dr = sin_wlt[:, l_idx]
+                dr_dot = wl[l_idx] * cos_wlt[:, l_idx]
+                dr_ddot = -(wl[l_idx] ** 2) * sin_wlt[:, l_idx]
+
+                dq_val = qr * sc * dr
+                ddq_val = qr * sc * (-2.0 * th * dr * raw_dot + dr_dot)
+                dsc = -2.0 * th * sc * dr
+                d_thsc = sc * (sc - 2.0 * th**2) * dr
+                dddq_val = qr * (
+                    dsc * raw_ddot + sc * dr_ddot - 2.0 * d_thsc * raw_dot**2 - 4.0 * th * sc * raw_dot * dr_dot
+                )
+                obj_grad[vi_a] += np.dot(s_q, dq_val) + np.dot(s_dq, ddq_val) + np.dot(s_ddq, dddq_val)
+
+                # --- b coefficient ---
+                vi_b = b_offset + l_idx
+                dr = cos_wlt[:, l_idx]
+                dr_dot = -wl[l_idx] * sin_wlt[:, l_idx]
+                dr_ddot = -(wl[l_idx] ** 2) * cos_wlt[:, l_idx]
+
+                dq_val = qr * sc * dr
+                ddq_val = qr * sc * (-2.0 * th * dr * raw_dot + dr_dot)
+                dsc = -2.0 * th * sc * dr
+                d_thsc = sc * (sc - 2.0 * th**2) * dr
+                dddq_val = qr * (
+                    dsc * raw_ddot + sc * dr_ddot - 2.0 * d_thsc * raw_dot**2 - 4.0 * th * sc * raw_dot * dr_dot
+                )
+                obj_grad[vi_b] += np.dot(s_q, dq_val) + np.dot(s_dq, ddq_val) + np.dot(s_ddq, dddq_val)
+
+            # q0: only position, through q_center
+            q0_vi = q0_start + d
+            obj_grad[q0_vi] += np.sum(s_q) * deg_factor
+
+        else:
+            # Unbounded (classic Swevers) mode
+            inv_wl = 1.0 / wl
+            for l_idx in range(nf_d):
+                vi_a = a_offset + l_idx
+                dq_val = sin_wlt[:, l_idx] * inv_wl[l_idx]
+                ddq_val = cos_wlt[:, l_idx]
+                dddq_val = -wl[l_idx] * sin_wlt[:, l_idx]
+                obj_grad[vi_a] += np.dot(s_q, dq_val) + np.dot(s_dq, ddq_val) + np.dot(s_ddq, dddq_val)
+
+                vi_b = b_offset + l_idx
+                dq_val = -cos_wlt[:, l_idx] * inv_wl[l_idx]
+                ddq_val = sin_wlt[:, l_idx]
+                dddq_val = wl[l_idx] * cos_wlt[:, l_idx]
+                obj_grad[vi_b] += np.dot(s_q, dq_val) + np.dot(s_dq, ddq_val) + np.dot(s_ddq, dddq_val)
+
+            q0_vi = q0_start + d
+            obj_grad[q0_vi] += np.sum(s_q) * nf_d * deg_factor
+
+        a_offset += nf_d
+        b_offset += nf_d
+
+    # ---- Phase C: Penalty gradients ----
+    jn = model.jointNames
+    torque_limits = np.array([optimizer.limits[jn[n]]["torque"] for n in range(nd)])
+    utilization = cache["utilization"]
+    util_mean = cache["util_mean"]
+    util_std = cache["util_std"]
+    f1 = cache["f1"]
+    f3 = cache["f3"]
+    target_util = config.get("trajectoryTargetTorqueUtil", 0.25)
+
+    # Build per-variable index maps for _traj_jac_single calls
+    a_offsets = []
+    b_offsets = []
+    a_off = a_start
+    b_off = b_start
+    for d in range(nd):
+        a_offsets.append(a_off)
+        b_offsets.append(b_off)
+        a_off += optimizer.nf[d]
+        b_off += optimizer.nf[d]
+
+    # Compute d(torque_absmax[n])/d(alpha) for each joint n
+    dtorque_absmax_dalpha = np.zeros((nd, n_vars))
+    for n in range(nd):
+        t_star = int(torque_absmax_idx[n])
+        sign_n = np.sign(cache["torques"][t_star, fb + n])
+        t_val = times[t_star]
+
+        for d_joint in range(nd):
+            osc_d = optimizer.trajectory.oscillators[d_joint]
+            dq_row, ddq_row, dddq_row = _traj_jac_single(
+                osc_d,
+                t_val,
+                optimizer.nf[d_joint],
+                wf,
+                use_deg,
+                n_vars,
+                a_offsets[d_joint],
+                b_offsets[d_joint],
+                q0_start + d_joint,
+                dq_dwf[t_star, d_joint],
+                ddq_dwf[t_star, d_joint],
+                dddq_dwf[t_star, d_joint],
+            )
+            dtorque_absmax_dalpha[n, :] += sign_n * (
+                dtau_dq[n, d_joint] * dq_row + dtau_ddq_state[n, d_joint] * ddq_row + dtau_dddq[n, d_joint] * dddq_row
+            )
+
+    # f1 = CoV(utilization) * 10
+    dutil_dalpha = dtorque_absmax_dalpha / torque_limits[:, np.newaxis]
+    if util_mean > 0 and util_std > 0:
+        N = nd
+        df1_dutil = np.zeros(nd)
+        for n in range(nd):
+            df1_dutil[n] = (1.0 / (N * util_mean)) * ((utilization[n] - util_mean) / util_std - f1)
+        obj_grad += 10.0 * df1_dutil @ dutil_dalpha
+
+    # f3 = max(0, 1 - util_mean/target) * 10
+    if f3 > 0:
+        dutil_mean_dalpha = np.mean(dutil_dalpha, axis=0)
+        obj_grad += 10.0 * (-1.0 / target_util) * dutil_mean_dalpha
+
+    # f2 = (1 - mean(pos_utilization)) * 10
+    pos_min_idx = cache["pos_min_idx"]
+    pos_max_idx = cache["pos_max_idx"]
+    pos_range_available = cache["pos_range_available"]
+
+    dpos_range_dalpha = np.zeros((nd, n_vars))
+    for n in range(nd):
+        t_max = int(pos_max_idx[n])
+        t_min = int(pos_min_idx[n])
+        # trajectory Jacobians at these specific samples for joint n
+        for d_joint in range(nd):
+            osc_d = optimizer.trajectory.oscillators[d_joint]
+            # At t_max
+            dq_max, _, _ = _traj_jac_single(
+                osc_d,
+                times[t_max],
+                optimizer.nf[d_joint],
+                wf,
+                use_deg,
+                n_vars,
+                a_offsets[d_joint],
+                b_offsets[d_joint],
+                q0_start + d_joint,
+                dq_dwf[t_max, d_joint],
+                ddq_dwf[t_max, d_joint],
+                dddq_dwf[t_max, d_joint],
+            )
+            # At t_min
+            dq_min, _, _ = _traj_jac_single(
+                osc_d,
+                times[t_min],
+                optimizer.nf[d_joint],
+                wf,
+                use_deg,
+                n_vars,
+                a_offsets[d_joint],
+                b_offsets[d_joint],
+                q0_start + d_joint,
+                dq_dwf[t_min, d_joint],
+                ddq_dwf[t_min, d_joint],
+                dddq_dwf[t_min, d_joint],
+            )
+            # Only joint n's position matters (positions are per-joint)
+            if d_joint == n:
+                dpos_range_dalpha[n, :] = (dq_max - dq_min) / pos_range_available[n]
+
+    obj_grad += -10.0 * np.mean(dpos_range_dalpha, axis=0)
+
+    # f4 = mean(max(0, 1 - vel_absmax/target)) * 10
+    # (velocity of joint n only depends on joint n's trajectory params)
+    vel_target = float(config.get("trajectoryTargetVelocity", 0.0))
+    if vel_target > 0:
+        vel_absmax = cache["vel_absmax"]
+        vel_absmax_idx = cache["vel_absmax_idx"]
+        for n in range(nd):
+            if vel_absmax[n] >= vel_target:
+                continue
+            t_vel = int(vel_absmax_idx[n])
+            sign_v = np.sign(velocities[t_vel, n])
+            osc_n = optimizer.trajectory.oscillators[n]
+            _, ddq_vel, _ = _traj_jac_single(
+                osc_n,
+                times[t_vel],
+                optimizer.nf[n],
+                wf,
+                use_deg,
+                n_vars,
+                a_offsets[n],
+                b_offsets[n],
+                q0_start + n,
+                dq_dwf[t_vel, n],
+                ddq_dwf[t_vel, n],
+                dddq_dwf[t_vel, n],
+            )
+            obj_grad += (-10.0 / (nd * vel_target)) * sign_v * ddq_vel
+
+    # ---- Constraint gradients ----
+    con_grad = np.zeros((optimizer.num_constraints, n_vars))
+
+    # Helper to get trajectory Jacobian for joint n at sample t
+    def _get_traj_jac(n: int, t: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        osc_n = optimizer.trajectory.oscillators[n]
+        return _traj_jac_single(
+            osc_n,
+            times[t],
+            optimizer.nf[n],
+            wf,
+            use_deg,
+            n_vars,
+            a_offsets[n],
+            b_offsets[n],
+            q0_start + n,
+            dq_dwf[t, n],
+            ddq_dwf[t, n],
+            dddq_dwf[t, n],
+        )
+
+    for n in range(nd):
+        # Position lower: g[n] = limit_lower - pos_min[n] → dg = -dq at argmin
+        dq_min, _, _ = _get_traj_jac(n, int(pos_min_idx[n]))
+        con_grad[n, :] = -dq_min
+
+        # Position upper: g[nd+n] = pos_max[n] - limit_upper → dg = dq at argmax
+        dq_max, _, _ = _get_traj_jac(n, int(pos_max_idx[n]))
+        con_grad[nd + n, :] = dq_max
+
+        # Velocity: g[2*nd+n] = vel_absmax[n] - vel_limit
+        t_vel = int(cache["vel_absmax_idx"][n])
+        sign_v = np.sign(velocities[t_vel, n])
+        _, ddq_vel, _ = _get_traj_jac(n, t_vel)
+        con_grad[2 * nd + n, :] = sign_v * ddq_vel
+
+        # Torque: g[3*nd+n] = torque_absmax[n] - torque_limit
+        con_grad[3 * nd + n, :] = dtorque_absmax_dalpha[n, :]
+
+    offset = 4 * nd
+    if config["minVelocityConstraint"]:
+        for n in range(nd):
+            t_vel = int(cache["vel_absmax_idx"][n])
+            sign_v = np.sign(velocities[t_vel, n])
+            _, ddq_vel, _ = _get_traj_jac(n, t_vel)
+            con_grad[offset + n, :] = -sign_v * ddq_vel
+        offset += nd
+
+    # Min torque utilization: g = limit*min_util - torque_absmax
+    for n in range(nd):
+        con_grad[offset + n, :] = -dtorque_absmax_dalpha[n, :]
+    offset += nd
+
+    # ---- Collision constraint gradients ----
+    if optimizer.num_coll_constraints > 0 and hasattr(optimizer, "_ag_collision_cache"):
+        coll_cache = optimizer._ag_collision_cache
+        use_capsule = config.get("collisionMode", "convex") == "capsule" and optimizer._capsules
+
+        # base pose per sample (suspended base motion); the gradient treats the base
+        # pose as constant wrt the trajectory params (the indirect coupling through
+        # the base dynamics is neglected). Transition samples (negative index) use
+        # the rest pose of the first sample.
+        base_rpy_arr = cache.get("base_rpy")
+        base_pos_arr = cache.get("base_position")
+
+        def _coll_base(t: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+            i = t if t >= 0 else 0
+            rpy = base_rpy_arr[i] if base_rpy_arr is not None else None
+            bp = base_pos_arr[i] if base_pos_arr is not None else None
+            return rpy, bp
+
+        # Group pairs by their argmin sample for efficiency
+        sample_pairs: dict[int, list[int]] = {}
+        for g_cnt in coll_cache:
+            t_star = coll_cache[g_cnt][0]
+            sample_pairs.setdefault(t_star, []).append(g_cnt)
+
+        for t_star, pair_indices in sample_pairs.items():
+            # use the cached configuration (transition samples are not part of positions)
+            q_star = coll_cache[pair_indices[0]][1].copy()
+            rpy_star, bpos_star = _coll_base(t_star)
+            optimizer.setCollisionRobotState(q_star, base_rpy=rpy_star, base_position=bpos_star)
+
+            if use_capsule:
+                # Analytical capsule gradients — no FD needed
+                for gi in pair_indices:
+                    l0, l1 = optimizer._collision_pairs[gi]
+                    if l0 in optimizer._capsules and l1 in optimizer._capsules:
+                        _, ddist_dq_vec = optimizer.getCapsuleDistanceAndGradient(l0, l1)
+                    else:
+                        # fallback to FD for pairs without capsules
+                        ddist_dq_vec = _collision_fd_single_pair(
+                            optimizer, gi, q_star, nd, epsilon, inv_2eps, base_rpy=rpy_star, base_position=bpos_star
+                        )
+                    c_idx = offset + gi
+                    for d_joint in range(nd):
+                        dq_row, _, _ = _get_traj_jac(d_joint, t_star)
+                        con_grad[c_idx, :] += ddist_dq_vec[d_joint] * dq_row
+            else:
+                # Compute d(distance)/dq for all pairs at this sample via FD
+                ddist_dq: dict[int, np.ndarray] = {gi: np.zeros(nd) for gi in pair_indices}
+
+                for j in range(nd):
+                    q_p = q_star.copy()
+                    q_p[j] += epsilon
+                    optimizer.setCollisionRobotState(q_p, base_rpy=rpy_star, base_position=bpos_star)
+                    d_plus: dict[int, float] = {}
+                    for gi in pair_indices:
+                        l0, l1 = optimizer._collision_pairs[gi]
+                        d_plus[gi] = optimizer.getLinkDistance(l0, l1, q_p)
+
+                    q_m = q_star.copy()
+                    q_m[j] -= epsilon
+                    optimizer.setCollisionRobotState(q_m, base_rpy=rpy_star, base_position=bpos_star)
+                    for gi in pair_indices:
+                        l0, l1 = optimizer._collision_pairs[gi]
+                        d_minus = optimizer.getLinkDistance(l0, l1, q_m)
+                        ddist_dq[gi][j] = (d_plus[gi] - d_minus) * inv_2eps
+
+                # Chain with trajectory Jacobians: d(distance)/dalpha = ddist_dq @ dq/dalpha at t_star
+                for gi in pair_indices:
+                    c_idx = offset + gi
+                    # Sum over joints: ddist_dq[j] * dq_j/dalpha
+                    for d_joint in range(nd):
+                        dq_row, _, _ = _get_traj_jac(d_joint, t_star)
+                        con_grad[c_idx, :] += ddist_dq[gi][d_joint] * dq_row
+
+    if config.get("verbose", 0):
+        print(f"Analytical gradient computed (|grad|={np.linalg.norm(obj_grad):.3e})")
+
+    return obj_grad, con_grad

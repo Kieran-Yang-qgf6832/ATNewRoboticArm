@@ -1,0 +1,43 @@
+<?xml version="1.0" ?>
+<robot name="ground" xmlns:xacro="http://ros.org/wiki/xacro">
+    <!--
+      Static world for the 5-axis robotic arm.
+
+      The arm URDF puts base_link at z = 0 and base_link.STL reaches down to
+      z = -0.0095 m. The ground box is placed so its top face is at z = -0.01 m,
+      i.e. 0.5 mm below the lowest point of the base, so the mounting plane acts
+      as the constraint surface without the base intersecting it.
+
+      Box: 3.0 x 3.0 x 0.05 m, top at -0.01, bottom at -0.06.
+      origin z = -0.035 (box centre).
+
+      Use as: trajectory.py ... (world argument) model/world_robotic_arm.urdf
+      The ground link has geometry (inertial + visual) so that
+      URDFHelpers.getLinkNames() does not skip it as a fake empty link.
+    -->
+    <link name="world" />
+    <link name="ground_link">
+        <inertial>
+            <mass value="1.0" />
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <inertia ixx="1.0" ixy="0" ixz="0" iyy="1.0" iyz="0" izz="1.0" />
+        </inertial>
+        <visual>
+            <origin xyz="0 0 -0.035" rpy="0 0 0" />
+            <geometry>
+                <box size="3.0 3.0 0.05" />
+            </geometry>
+        </visual>
+        <collision>
+            <origin xyz="0 0 -0.035" rpy="0 0 0" />
+            <geometry>
+                <box size="3.0 3.0 0.05" />
+            </geometry>
+        </collision>
+    </link>
+    <joint name="ground_joint" type="fixed">
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <parent link="world" />
+        <child link="ground_link" />
+    </joint>
+</robot>

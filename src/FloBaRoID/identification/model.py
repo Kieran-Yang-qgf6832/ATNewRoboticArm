@@ -1,0 +1,1114 @@
+from __future__ import annotations
+
+import sys
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from identification.data import Data
+
+import numpy as np
+import numpy.linalg as la
+import scipy.linalg as sla
+import sympy
+from idyntree import bindings as iDynTree
+from scipy import signal
+from sympy import Matrix, symbols
+
+import identification.helpers as helpers
+
+np.set_printoptions(linewidth=160)
+
+
+class Model:
+    def __init__(
+        self,
+        opt: dict[str, Any],
+        urdf_file: str,
+        regressor_file: str | None = None,
+        regressor_init: bool = True,
+    ) -> None:
+        self.urdf_file = urdf_file
+        self.opt = opt
+
+        # attributes set by Identification after construction
+        self.xBase: np.ndarray = np.array([])
+        self.xBaseModel: np.ndarray = np.array([])
+        self.YBaseInv: np.ndarray = np.array([])
+        self.xStd: np.ndarray = np.array([])
+        self.contactForcesSum: np.ndarray = np.array([])
+
+        # attributes set by computeRegressorLinDepsQR (called from __init__ when regressor_init=True)
+        self.base_deps: np.ndarray | Matrix = np.array([])
+        self.non_id: list[int] = []
+        self.identifiable: list[int] = []
+
+        progress_inst = helpers.Progress(opt)
+        self.progress = progress_inst.progress
+
+        # set these options in case model was not instanciated from Identification
+        if "orthogonalizeBasis" not in self.opt:
+            self.opt["orthogonalizeBasis"] = 1
+
+        if "useBasisProjection" not in self.opt:
+            self.opt["useBasisProjection"] = 0
+
+        # debug options
+        # NOTE: iDynTree's inverseDynamics returns uninitialized memory for some models in
+        # this environment, so the regressor-based simulation path can be enabled from the
+        # config as a deterministic substitute (Y @ x is equivalent for rigid-body models).
+        self.opt.setdefault("useRegressorForSimulation", 0)
+        self.opt["addContacts"] = 1
+
+        # load model via ModelLoader and setup KinDynComputations
+        self.loader = iDynTree.ModelLoader()
+        ret = self.loader.loadModelFromFile(urdf_file)
+        if not ret:
+            sys.exit()
+        self.idyn_model = self.loader.model()
+
+        self.kinDyn = iDynTree.KinDynComputations()
+        if not self.kinDyn.loadRobotModel(self.idyn_model):
+            sys.exit()
+
+        if self.opt["verbose"]:
+            print(f"loaded model {urdf_file}")
+
+        # get joint names (from regressor XML if provided, otherwise from model)
+        if regressor_file:
+            with open(regressor_file) as filename:
+                regrXml = filename.read()
+
+            self.jointNames: list[str] = []
+            import xml.etree.ElementTree as ET
+
+            tree = ET.fromstring(regrXml)
+            for l in tree.iter():
+                if l.tag == "joint":
+                    self.jointNames.append(l.text or "")
+            self.num_dofs = len(self.jointNames)
+        else:
+            import re
+
+            self.jointNames = re.sub(
+                r"DOF Index: \d+ Name: ",
+                "",
+                self.kinDyn.getDescriptionOfDegreesOfFreedom(),
+            ).split()
+            self.num_dofs = self.kinDyn.getNrOfDegreesOfFreedom()
+
+        if self.opt["verbose"]:
+            print(f"# DOFs: {self.num_dofs}")
+            print(f"Joints: {self.jointNames}")
+
+        # Get the number of outputs of the regressor
+        # (= #dofs + 6 base wrench rows for floating base)
+        if self.opt["floatingBase"]:
+            self.N_OUT = self.num_dofs + 6
+        else:
+            self.N_OUT = self.num_dofs
+        if self.opt["verbose"]:
+            if self.opt["floatingBase"]:
+                print(f"# regressor outputs: {self.N_OUT} (DOFs + 6 base)")
+            else:
+                print(f"# regressor outputs: {self.N_OUT}")
+
+        self.num_links = self.idyn_model.getNrOfLinks()
+        if self.opt["verbose"]:
+            print(f"# links: {self.num_links}")
+
+        self.inertia_params: list[int] = list()
+        self.mass_params: list[int] = list()
+        for i in range(self.num_links):
+            self.mass_params.append(i * 10)
+            self.inertia_params.extend([i * 10 + 4, i * 10 + 5, i * 10 + 6, i * 10 + 7, i * 10 + 8, i * 10 + 9])
+
+        self.linkNames: list[str] = []
+        for i in range(self.num_links):
+            self.linkNames.append(self.idyn_model.getLinkName(i))
+        if self.opt["verbose"]:
+            print(f"{ ({i: self.linkNames[i] for i in range(self.num_links)}) }")
+
+        self.limits = helpers.URDFHelpers.getJointLimits(self.urdf_file, use_deg=False)
+
+        # get amount of initial inertia params (from urdf) (full params, no friction, no removed columns)
+        self.num_model_params = self.num_links * 10
+        self.num_all_params = self.num_model_params
+
+        # add friction params per joint: Fc (Coulomb), Fv (viscous), tau_off (offset),
+        # and optionally Stribeck stiction Fs
+        if self.opt["identifyFrictionSimultaneously"]:
+            # Fc (Coulomb friction): 1 per joint
+            self.num_identified_params = self.num_model_params + self.num_dofs
+            self.num_all_params += self.num_dofs
+
+            if not self.opt["identifyGravityParamsOnly"]:
+                if self.opt["identifySymmetricVelFriction"]:
+                    # Fv (viscous friction): 1 per joint
+                    self.num_identified_params += self.num_dofs
+                    self.num_all_params += self.num_dofs
+                else:
+                    # Fv+, Fv- (asymmetric viscous): 2 per joint
+                    self.num_identified_params += 2 * self.num_dofs
+                    self.num_all_params += 2 * self.num_dofs
+
+                # tau_off (torque offset): 1 per joint — absorbs amplifier bias,
+                # sensor offsets, and asymmetric Coulomb effects (Gautier et al.)
+                self.num_identified_params += self.num_dofs
+                self.num_all_params += self.num_dofs
+
+                # Stribeck stiction: Fs * exp(-|vel|/vs) * sign(vel)
+                # with vs (Stribeck velocity) as a known constant from config
+                if self.opt.get("stribeckVelocity", 0) > 0:
+                    self.num_identified_params += self.num_dofs
+                    self.num_all_params += self.num_dofs
+        else:
+            self.num_identified_params = self.num_model_params
+
+        self.friction_params_start = self.num_model_params
+
+        if self.opt["identifyGravityParamsOnly"]:
+            self.num_identified_params = self.num_identified_params - len(self.inertia_params)
+            self.friction_params_start = self.num_model_params - len(self.inertia_params)
+
+        if self.opt["verbose"]:
+            print(f"# params: {self.num_model_params} ({self.num_identified_params} will be identified)")
+
+        self.baseNames = [
+            "base f_x",
+            "base f_y",
+            "base f_z",
+            "base m_x",
+            "base m_y",
+            "base m_z",
+        ]
+
+        self.gravity = [0, 0, -9.81, 0, 0, 0]
+        self.gravity_twist = iDynTree.Twist.FromPython(self.gravity)
+        self.gravity_vec = iDynTree.Vector3()
+        self.gravity_vec.setVal(0, 0.0)
+        self.gravity_vec.setVal(1, 0.0)
+        self.gravity_vec.setVal(2, -9.81)
+
+        # get model parameters (10 inertial params per link)
+        xStdModel = iDynTree.VectorDynSize(self.num_model_params)
+        self.idyn_model.getInertialParameters(xStdModel)
+        self.xStdModel = xStdModel.toNumPy()
+        if self.opt["identifyFrictionSimultaneously"]:
+            # Fc (Coulomb)
+            self.xStdModel = np.concatenate((self.xStdModel, np.zeros(self.num_dofs)))
+            if not self.opt["identifyGravityParamsOnly"]:
+                if self.opt["identifySymmetricVelFriction"]:
+                    # Fv (viscous)
+                    self.xStdModel = np.concatenate((self.xStdModel, np.zeros(self.num_dofs)))
+                else:
+                    # Fv+, Fv- (asymmetric viscous)
+                    self.xStdModel = np.concatenate((self.xStdModel, np.zeros(2 * self.num_dofs)))
+                # tau_off (torque offset) — initialized to 0, no URDF source
+                self.xStdModel = np.concatenate((self.xStdModel, np.zeros(self.num_dofs)))
+                # Stribeck stiction Fs params
+                if self.opt.get("stribeckVelocity", 0) > 0:
+                    self.xStdModel = np.concatenate((self.xStdModel, np.zeros(self.num_dofs)))
+            helpers.ParamHelpers.addFrictionFromURDF(self, self.urdf_file, self.xStdModel)
+
+        if opt["estimateWith"] == "urdf":
+            self.xStd = self.xStdModel
+
+        if regressor_init:
+            # get model dependent projection matrix and linear column dependencies (i.e. base
+            # groupings)
+            self.computeRegressorLinDepsQR()
+
+    def getDescriptionOfParameters(self) -> str:
+        """Generate parameter descriptions (replaces old DynamicsRegressorGenerator method)"""
+        param_names = [
+            "mass",
+            "first moment of mass (x)",
+            "first moment of mass (y)",
+            "first moment of mass (z)",
+            "moment of inertia (xx)",
+            "moment of inertia (xy)",
+            "moment of inertia (xz)",
+            "moment of inertia (yy)",
+            "moment of inertia (yz)",
+            "moment of inertia (zz)",
+        ]
+        desc = ""
+        for i in range(self.num_links):
+            link_name = self.linkNames[i]
+            for j, pname in enumerate(param_names):
+                desc += f"Parameter {i * 10 + j}: {pname} of link {link_name}\n"
+        return desc
+
+    def simulateDynamicsIDynTree(
+        self, samples: dict[str, np.ndarray], sample_idx: int, kinDyn: Any = None, xStdModel: np.ndarray | None = None
+    ) -> np.ndarray:
+        """compute torques for one time step of measurements"""
+
+        if kinDyn is None:
+            kinDyn = self.kinDyn
+        if xStdModel is None:
+            xStdModel = self.xStdModel
+
+        # read sample data
+        pos = samples["positions"][sample_idx]
+        vel = samples["velocities"][sample_idx]
+        acc = samples["accelerations"][sample_idx]
+
+        # system state for iDynTree (reuse pre-allocated arrays)
+        if not hasattr(self, "_sim_s"):
+            self._sim_s = iDynTree.JointPosDoubleArray(self.num_dofs)
+            self._sim_ds = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+            self._sim_ddq = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+        s = self._sim_s
+        ds = self._sim_ds
+        ddq = self._sim_ddq
+        for i in range(self.num_dofs):
+            s.setVal(i, pos[i])
+            ds.setVal(i, vel[i])
+            ddq.setVal(i, acc[i])
+
+        # calc torques and forces with iDynTree KinDynComputations class
+        if self.opt["floatingBase"]:
+            base_vel = samples["base_velocity"][sample_idx]
+            base_acc_data = samples["base_acceleration"][sample_idx]
+            rpy = samples["base_rpy"][sample_idx]
+
+            rot = iDynTree.Rotation.RPY(rpy[0], rpy[1], rpy[2])
+            pos_idt = iDynTree.Position.Zero()
+            world_T_base = iDynTree.Transform(rot, pos_idt).inverse()
+
+            base_velocity = iDynTree.Twist.FromPython(base_vel)
+            kinDyn.setRobotState(world_T_base, s, base_velocity, ds, self.gravity_vec)
+            base_acceleration = iDynTree.Vector6()
+            for i in range(6):
+                base_acceleration.setVal(i, base_acc_data[i])
+        else:
+            kinDyn.setRobotState(s, ds, self.gravity_vec)
+            base_acceleration = iDynTree.Vector6()
+
+        # compute inverse dynamics (reuse pre-allocated objects when using default kinDyn)
+        if kinDyn is self.kinDyn:
+            if not hasattr(self, "_sim_ext_wrenches"):
+                self._sim_ext_wrenches = iDynTree.LinkWrenches(self.idyn_model)
+                self._sim_gen_torques = iDynTree.FreeFloatingGeneralizedTorques(self.idyn_model)
+            ext_wrenches = self._sim_ext_wrenches
+            gen_torques = self._sim_gen_torques
+        else:
+            ext_wrenches = iDynTree.LinkWrenches(self.idyn_model)
+            gen_torques = iDynTree.FreeFloatingGeneralizedTorques(self.idyn_model)
+        kinDyn.inverseDynamics(base_acceleration, ddq, ext_wrenches, gen_torques)
+        # copy: jointTorques().toNumPy() is a view into gen_torques' buffer, which is
+        # released in the non-cached branch (custom kinDyn, e.g. simulator/validation)
+        # when this function returns, so the caller would read reused memory
+        torques = gen_torques.jointTorques().toNumPy().copy()
+
+        if self.opt["identifyFrictionSimultaneously"]:
+            # add friction torques
+            # Coulomb friction (sign-dependent: opposes direction of motion)
+            # smoothed sign from less-filtered velocity with hysteresis against
+            # noise chatter near zero velocity (see helpers.getFrictionSignSeries)
+            sign = helpers.getFrictionSignSeries(samples, self.opt)[sample_idx]
+            p_constant = range(self.friction_params_start, self.friction_params_start + self.num_dofs)
+            torques += sign * xStdModel[p_constant]
+
+            # vel dependents
+            if not self.opt["identifyGravityParamsOnly"]:
+                # (take only first half of params as they are not direction dependent in urdf anyway)
+                p_vel = range(
+                    self.friction_params_start + self.num_dofs,
+                    self.friction_params_start + self.num_dofs * 2,
+                )
+                torques += xStdModel[p_vel] * vel
+
+                # torque offset (constant bias per joint). The offset block follows the full
+                # viscous block, which is 2*num_dofs for asymmetric (Fv+, Fv-) friction.
+                n_vel_params = self.num_dofs if self.opt["identifySymmetricVelFriction"] else 2 * self.num_dofs
+                off_start = self.friction_params_start + self.num_dofs + n_vel_params
+                p_off = range(off_start, off_start + self.num_dofs)
+                torques += xStdModel[p_off]
+
+                # Stribeck stiction: Fs * exp(-|vel|/vs) * sign(vel)
+                if self.opt.get("stribeckVelocity", 0) > 0:
+                    vs = float(self.opt["stribeckVelocity"])
+                    vel_sign = helpers.getFrictionSignVelocities(samples, self.opt)[sample_idx]
+                    p_stribeck = range(p_off.stop, p_off.stop + self.num_dofs)
+                    torques += xStdModel[p_stribeck] * np.exp(-np.abs(vel_sign) / vs) * np.sign(sign)
+
+        if self.opt["floatingBase"]:
+            return np.concatenate((gen_torques.baseWrench().toNumPy(), torques))
+        else:
+            return torques
+
+    def computeRegressors(self, data: Data, only_simulate: bool = False) -> None:
+        """compute regressors from measurements for each time step of the measurement data
+        and stack them vertically. Also stack measured torques and get simulation data.
+        for floating base, get estimated base forces (6D wrench) and add to torque measure stack
+        """
+
+        self.data = data
+
+        # the friction-sign series is cached in data.samples; drop it so it recomputes for the
+        # current block (block selection reassigns only measurement keys, leaving it stale)
+        for cache_key in ("friction_sign_series", "velocities_for_sign"):
+            data.samples.pop(cache_key, None)
+
+        num_time = 0
+        simulate_time = 0
+
+        # extra regressor rows for floating base
+        if self.opt["floatingBase"]:
+            fb = 6
+        else:
+            fb = 0
+        self.regressor_stack = np.zeros(
+            shape=(
+                (self.num_dofs + fb) * data.num_used_samples,
+                self.num_identified_params,
+            )
+        )
+        self.torques_stack = np.zeros(shape=((self.num_dofs + fb) * data.num_used_samples))
+        self.sim_torq_stack = np.zeros(shape=((self.num_dofs + fb) * data.num_used_samples))
+        self.torquesAP_stack = np.zeros(shape=((self.num_dofs + fb) * data.num_used_samples))
+
+        num_contacts = len(data.samples["contacts"].item(0).keys()) if "contacts" in data.samples else 0
+        self.contacts_stack = np.zeros(shape=(num_contacts, (self.num_dofs + fb) * data.num_used_samples))
+        self.contactForcesSum = np.zeros(shape=((self.num_dofs + fb) * data.num_used_samples))
+
+        """loop over measurement data, optionally skip some values
+            - get the regressor for each time step
+            - if necessary, calculate inverse dynamics to get simulated torques
+            - if necessary, get torques from contact wrenches and add them to the torques
+            - stack the torques, regressors and contacts into matrices
+        """
+        contacts = {}
+        for sample_index in self.progress(range(data.num_used_samples)):
+            m_idx = sample_index * (self.opt["skipSamples"]) + sample_index
+            with helpers.Timer() as t:
+                # read samples
+                pos = data.samples["positions"][m_idx]
+                vel = data.samples["velocities"][m_idx]
+                acc = data.samples["accelerations"][m_idx]
+                torq = data.samples["torques"][m_idx]
+                if "contacts" in data.samples:
+                    for frame in data.samples["contacts"].item(0).keys():
+                        contacts[frame] = data.samples["contacts"].item(0)[frame][m_idx]
+
+                if self.opt["identifyGravityParamsOnly"]:
+                    # set vel and acc to zero (should be almost zero already) to remove noise
+                    vel[:] = 0.0
+                    acc[:] = 0.0
+
+                # system state for iDynTree
+                q = iDynTree.JointPosDoubleArray(self.num_dofs)
+                dq = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+                ddq = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+                for _di in range(self.num_dofs):
+                    q.setVal(_di, pos[_di])
+                    dq.setVal(_di, vel[_di])
+                    ddq.setVal(_di, acc[_di])
+
+                # in case that we simulate the torque measurements, we need torque estimation for a priori
+                # parameters or that we need to simulate the base reaction forces for floating base.
+                # When the regressor path is enabled, skip inverseDynamics entirely: it is not used
+                # for the torques below and, in this environment, it can corrupt the shared
+                # KinDynComputations memory that the regressor call right after it relies on.
+                use_regressor_sim = (
+                    self.opt["useRegressorForSimulation"]
+                    and not self.opt["useAPriori"]
+                    and not self.opt["floatingBase"]
+                )
+                if (
+                    self.opt["simulateTorques"] or self.opt["useAPriori"] or self.opt["floatingBase"]
+                ) and not use_regressor_sim:
+                    sim_torques = self.simulateDynamicsIDynTree(data.samples, m_idx)
+
+                    if self.opt["useAPriori"]:
+                        # torques sometimes contain nans, just a very small C number that gets converted to nan?
+                        torqAP = np.nan_to_num(sim_torques)
+
+                    if not self.opt["useRegressorForSimulation"]:
+                        if self.opt["simulateTorques"]:
+                            torq = np.nan_to_num(sim_torques)
+                        else:
+                            # for floating base, prepend simulated base wrench only if the
+                            # measurements don't already contain it (e.g. from an F/T sensor
+                            # or from the simulator). Don't overwrite existing base wrench data.
+                            if self.opt["floatingBase"] and len(torq) < (self.num_dofs + fb):
+                                torq = np.concatenate((np.nan_to_num(sim_torques[0:6]), torq))
+
+            simulate_time += t.interval
+
+            # ...still looping over measurement samples
+
+            row_index = (self.num_dofs + fb) * sample_index  # index for current row in stacked matrices
+
+            if not only_simulate:
+                # get numerical regressor (std)
+                with helpers.Timer() as t:
+                    if self.opt["floatingBase"]:
+                        base_vel = data.samples["base_velocity"][m_idx]
+                        base_acc_data = data.samples["base_acceleration"][m_idx]
+
+                        # get transform from base to world
+                        rpy = data.samples["base_rpy"][m_idx]
+                        rot = iDynTree.Rotation.RPY(rpy[0], rpy[1], rpy[2])
+                        pos_idt = iDynTree.Position.Zero()
+                        world_T_base = iDynTree.Transform(rot, pos_idt).inverse()
+
+                        base_velocity = iDynTree.Twist.FromPython(base_vel)
+                        self.kinDyn.setRobotState(world_T_base, q, base_velocity, dq, self.gravity_vec)
+
+                        base_acceleration = iDynTree.Vector6()
+                        for _bi in range(6):
+                            base_acceleration.setVal(_bi, base_acc_data[_bi])
+                    else:
+                        self.kinDyn.setRobotState(q, dq, self.gravity_vec)
+                        base_acceleration = iDynTree.Vector6()
+
+                    # get (standard) regressor
+                    regressor = iDynTree.MatrixDynSize()
+                    if not self.kinDyn.inverseDynamicsInertialParametersRegressor(base_acceleration, ddq, regressor):
+                        print("Error during numeric computation of regressor")
+
+                    # copy: toNumPy() returns a view into the temporary MatrixDynSize that
+                    # is released when the name is rebound, which would leave the regressor
+                    # rows pointing at reused memory (garbage torques/regressors)
+                    regressor = regressor.toNumPy().copy()
+                    if not self.opt["floatingBase"]:
+                        # for fixed base, regressor includes base wrench rows (first 6),
+                        # keep only joint torque rows
+                        regressor = regressor[6:, :]
+
+                    if self.opt["identifyGravityParamsOnly"]:
+                        # delete inertia param columns
+                        regressor = np.delete(regressor, self.inertia_params, 1)
+
+                    if self.opt["identifyFrictionSimultaneously"]:
+                        # append smoothed sign(velocity) for Coulomb friction
+                        # (zero-crossing timing + hysteresis, see helpers.getFrictionSignSeries)
+                        sign = helpers.getFrictionSignSeries(data.samples, self.opt)[m_idx]
+                        static_diag = np.identity(self.num_dofs) * sign
+                        offset_regressor = np.vstack((np.zeros((fb, self.num_dofs)), static_diag))
+                        regressor = np.concatenate((regressor, offset_regressor), axis=1)
+
+                        if not self.opt["identifyGravityParamsOnly"]:
+                            if self.opt["identifySymmetricVelFriction"]:
+                                # just use velocity directly
+                                vel_diag = np.identity(self.num_dofs) * dq.toNumPy()
+                                friction_regressor = np.vstack(
+                                    (np.zeros((fb, self.num_dofs)), vel_diag)
+                                )  # add base dynamics rows
+                            else:
+                                # append positive/negative velocity matrix for velocity dependent asymmetrical friction
+                                dq_p = dq.toNumPy().copy()
+                                dq_p[dq_p < 0] = 0  # set to zero where v < 0
+                                dq_m = dq.toNumPy().copy()
+                                dq_m[dq_m > 0] = 0  # set to zero where v > 0
+                                vel_diag = np.hstack(
+                                    (
+                                        np.identity(self.num_dofs) * dq_p,
+                                        np.identity(self.num_dofs) * dq_m,
+                                    )
+                                )
+                                friction_regressor = np.vstack(
+                                    (np.zeros((fb, self.num_dofs * 2)), vel_diag)
+                                )  # add base dynamics rows
+                            regressor = np.concatenate((regressor, friction_regressor), axis=1)
+
+                            # torque offset: constant 1.0 per joint (absorbs amplifier bias etc.)
+                            offset_ones = np.identity(self.num_dofs)
+                            offset_regressor = np.vstack((np.zeros((fb, self.num_dofs)), offset_ones))
+                            regressor = np.concatenate((regressor, offset_regressor), axis=1)
+
+                            # Stribeck stiction: Fs * exp(-|vel|/vs) * sign(vel)
+                            if self.opt.get("stribeckVelocity", 0) > 0:
+                                vs = float(self.opt["stribeckVelocity"])
+                                vel = dq.toNumPy()
+                                stribeck_col = np.exp(-np.abs(vel) / vs) * np.sign(vel)
+                                stribeck_diag = np.identity(self.num_dofs) * stribeck_col
+                                stribeck_regressor = np.vstack((np.zeros((fb, self.num_dofs)), stribeck_diag))
+                                regressor = np.concatenate((regressor, stribeck_regressor), axis=1)
+
+                    # simulate with regressor
+                    if self.opt["useRegressorForSimulation"] and (
+                        self.opt["simulateTorques"] or self.opt["useAPriori"] or self.opt["floatingBase"]
+                    ):
+                        torques = regressor.dot(self.xStdModel[self.identified_params])
+                        if self.opt["simulateTorques"]:
+                            torq = torques
+                        else:
+                            # for floating base, prepend simulated base wrench only if the
+                            # measurements don't already contain it
+                            if self.opt["floatingBase"] and len(torq) < (self.num_dofs + fb):
+                                torq = np.concatenate((np.nan_to_num(torques[0:6]), torq))
+                        np.nan_to_num(torques)
+
+                    # stack on previous regressors
+                    np.copyto(
+                        self.regressor_stack[row_index : row_index + self.num_dofs + fb],
+                        regressor,
+                    )
+                num_time += t.interval
+
+            # stack results onto matrices of previous time steps
+            np.copyto(self.torques_stack[row_index : row_index + self.num_dofs + fb], torq)
+
+            if self.opt["useAPriori"]:
+                np.copyto(
+                    self.torquesAP_stack[row_index : row_index + self.num_dofs + fb],
+                    torqAP,
+                )
+
+            if len(contacts.keys()):
+                # convert contact wrenches into torque contribution
+                for c in range(num_contacts):
+                    frame = list(contacts.keys())[c]
+
+                    dim = self.num_dofs + fb
+                    # get jacobian and contact wrench for each contact frame and measurement sample
+                    jacobian = iDynTree.MatrixDynSize(6, 6 + self.num_dofs)
+                    if not self.kinDyn.getFrameFreeFloatingJacobian(str(frame), jacobian):
+                        continue
+                    jacobian = jacobian.toNumPy().copy()
+
+                    # mul each sample of measured contact wrenches with frame jacobian
+                    contacts_torq = np.empty(dim)
+                    contacts_torq = jacobian.T.dot(contacts[frame])
+
+                    contact_idx = sample_index * dim
+                    np.copyto(
+                        self.contacts_stack[c][contact_idx : contact_idx + dim],
+                        contacts_torq[-dim:],
+                    )
+
+        # finished looping over samples
+
+        # sum over (contact torques) for each contact frame
+        self.contactForcesSum = np.sum(self.contacts_stack, axis=0)
+
+        if self.opt["floatingBase"]:
+            if self.opt["simulateTorques"]:
+                # add measured contact wrench to torque estimation from iDynTree
+                if self.opt["addContacts"]:
+                    self.torques_stack = self.torques_stack + self.contactForcesSum
+            else:
+                # if not simulating, measurements of joint torques already contain contact contribution,
+                # so only add it to the (always simulated) base force estimation
+                torques_stack_2dim = np.reshape(self.torques_stack, (data.num_used_samples, self.num_dofs + fb))
+                self.contactForcesSum_2dim = np.reshape(
+                    self.contactForcesSum, (data.num_used_samples, self.num_dofs + fb)
+                )
+                if self.opt["addContacts"]:
+                    torques_stack_2dim[:, :6] += self.contactForcesSum_2dim[:, :6]
+                self.torques_stack = torques_stack_2dim.flatten()
+
+        if self.opt["addContacts"]:
+            self.sim_torq_stack = self.sim_torq_stack + self.contactForcesSum
+
+        if len(contacts.keys()) or self.opt["simulateTorques"]:
+            # write back torques to data object when simulating or contacts were added
+            self.data.samples["torques"] = np.reshape(self.torques_stack, (data.num_used_samples, self.num_dofs + fb))
+
+        with helpers.Timer() as t:
+            if self.opt["useAPriori"]:
+                # get torque delta to identify with
+                self.tau = self.torques_stack - self.torquesAP_stack
+            else:
+                self.tau = self.torques_stack
+        simulate_time += t.interval
+
+        self.YStd = self.regressor_stack
+
+        # if difference between random regressor (that was used for base projection) and regressor
+        # from the data is too big, the base regressor can still have linear dependencies.
+        # for these cases, it seems to be better to get the base columns directly from the data regressor matrix
+        if not self.opt["useStructuralRegressor"] and not only_simulate:
+            if self.opt["verbose"]:
+                print("Getting independent base columns again from data regressor")
+            self.computeRegressorLinDepsQR(self.YStd)
+
+        if self.opt["useBasisProjection"]:
+            self.YBase = np.dot(self.YStd, self.B)  # project regressor to base regressor
+        else:
+            self.YBase = np.dot(self.YStd, self.Pb)  # regressor following Sousa, 2014
+
+        if self.opt["filterRegressor"]:
+            order = 5  # Filter order
+            fs = self.data.samples["frequency"]  # Sampling freq
+            fc = self.opt["filterRegCutoff"]  # Cut-off frequency (Hz)
+            b, a = signal.butter(order, fc / (fs / 2), btype="low", analog=False)
+            for j in range(0, self.num_base_inertial_params):
+                for i in range(0, self.num_dofs):
+                    self.YBase[i :: self.num_dofs, j] = signal.filtfilt(b, a, self.YBase[i :: self.num_dofs, j])
+
+        self.sample_end = data.samples["positions"].shape[0]
+        if self.opt["skipSamples"] > 0:
+            self.sample_end -= self.opt["skipSamples"]
+
+        # keep absolute torques (self.tau can be relative)
+        self.tauMeasured = np.reshape(self.torques_stack, (data.num_used_samples, self.num_dofs + fb))
+
+        self.T = data.samples["times"][0 : self.sample_end : self.opt["skipSamples"] + 1]
+
+        if self.opt["showTiming"]:
+            print(f"(simulation for regressors took {simulate_time:.3f} sec.)")
+            print(f"(getting regressors took {num_time:.3f} sec.)")
+
+        if self.opt["verbose"] == 2:
+            print(f"YStd: {self.YStd.shape}", end=" ")
+            print(f"YBase: {self.YBase.shape}, cond: {la.cond(self.YBase)}")
+
+    def getRandomRegressor(self, n_samples=None):
+        """
+        Utility function for generating a random regressor for numerical base parameter calculation
+        Given n_samples, the Y (n_samples*getNrOfOutputs() X getNrOfParameters() ) regressor is
+        obtained by stacking the n_samples generated regressors
+        This function returns Y^T Y (getNrOfParameters() X getNrOfParameters() ) (that share the row space with Y)
+        (partly ported from iDynTree)
+        """
+
+        if self.opt["identifyGravityParamsOnly"]:
+            regr_filename = self.urdf_file + ".gravity_regressor.npz"
+        else:
+            regr_filename = self.urdf_file + ".regressor.npz"
+        generate_new = False
+        fb = self.opt["floatingBase"]
+
+        try:
+            regr_file = np.load(regr_filename)
+            R = regr_file["R"]  # regressor matrix
+            Q = regr_file["Q"]  # QR decomposition
+            RQ = regr_file["RQ"]
+            PQ = regr_file["PQ"]
+            n = regr_file["n"]  # number of samples that were used
+            fbase = regr_file["fb"]  # floating base flag
+            grav = regr_file["grav_only"]
+            fric = regr_file["fric"]
+            fric_sym = regr_file["fric_sym"]
+            if self.opt["verbose"]:
+                print(f"loaded random structural regressor from {regr_filename}")
+            if (
+                n != n_samples
+                or fbase != fb
+                or R.shape[0] != self.num_identified_params
+                or self.opt["identifyGravityParamsOnly"] != grav
+                or fric != self.opt["identifyFrictionSimultaneously"]
+                or fric_sym != self.opt["identifySymmetricVelFriction"]
+            ):
+                generate_new = True
+            # TODO: save and check timestamp of urdf file, if newer regenerate
+        except (OSError, KeyError):
+            generate_new = True
+
+        if generate_new:
+            if not n_samples:
+                n_samples = self.num_dofs * 1000
+
+            if self.opt["verbose"]:
+                print(f"(re-)generating structural regressor ({n_samples} random positions)")
+
+            R = np.array((self.N_OUT, self.num_model_params))
+            if len(self.limits) > 0:
+                jn = self.jointNames
+                q_lim_pos = [self.limits[jn[n]]["upper"] for n in range(self.num_dofs)]
+                q_lim_neg = [self.limits[jn[n]]["lower"] for n in range(self.num_dofs)]
+                dq_lim = [self.limits[jn[n]]["velocity"] for n in range(self.num_dofs)]
+                q_range = (np.array(q_lim_pos) - np.array(q_lim_neg)).tolist()
+            for i in self.progress(range(0, n_samples)):
+                # set random system state
+                q = iDynTree.JointPosDoubleArray(self.num_dofs)
+                dq = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+                ddq = iDynTree.JointDOFsDoubleArray(self.num_dofs)
+                if len(self.limits) > 0:
+                    rnd = np.random.rand(self.num_dofs)  # 0..1
+                    q_vals = np.array(q_lim_neg) + np.array(q_range) * rnd
+                    if self.opt["identifyGravityParamsOnly"]:
+                        vel = np.zeros(self.num_dofs)
+                        acc = np.zeros(self.num_dofs)
+                    else:
+                        vel = (np.random.rand(self.num_dofs) - 0.5) * 2 * np.array(dq_lim)
+                        acc = (np.random.rand(self.num_dofs) - 0.5) * 2 * np.pi
+                    for _di in range(self.num_dofs):
+                        q.setVal(_di, float(q_vals[_di]))
+                        dq.setVal(_di, float(vel[_di]))
+                        ddq.setVal(_di, float(acc[_di]))
+                else:
+                    q_vals = (np.random.ranf(self.num_dofs) * 2 - 1) * np.pi
+                    dq_vals = (np.random.ranf(self.num_dofs) * 2 - 1) * np.pi
+                    ddq_vals = (np.random.ranf(self.num_dofs) * 2 - 1) * np.pi
+                    for _di in range(self.num_dofs):
+                        q.setVal(_di, float(q_vals[_di]))
+                        dq.setVal(_di, float(dq_vals[_di]))
+                        ddq.setVal(_di, float(ddq_vals[_di]))
+
+                # TODO: make work with fixed dofs (set vel and acc to zero, look at iDynTree method)
+
+                if self.opt["floatingBase"]:
+                    base_vel = np.pi * np.random.rand(6)
+                    base_acc_data = np.pi * np.random.rand(6)
+                    if self.opt["identifyGravityParamsOnly"]:
+                        base_vel[:] = 0.0
+                        base_acc_data[:] = 0.0
+                    rpy = np.random.ranf(3) * 0.1
+                    rot = iDynTree.Rotation.RPY(rpy[0], rpy[1], rpy[2])
+                    pos_idt = iDynTree.Position.Zero()
+                    world_T_base = iDynTree.Transform(rot, pos_idt).inverse()
+
+                    base_velocity = iDynTree.Twist.FromPython(base_vel)
+                    self.kinDyn.setRobotState(world_T_base, q, base_velocity, dq, self.gravity_vec)
+
+                    base_acceleration = iDynTree.Vector6()
+                    for _bi in range(6):
+                        base_acceleration.setVal(_bi, float(base_acc_data[_bi]))
+                else:
+                    self.kinDyn.setRobotState(q, dq, self.gravity_vec)
+                    base_acceleration = iDynTree.Vector6()
+
+                # get regressor
+                regressor = iDynTree.MatrixDynSize()
+                if not self.kinDyn.inverseDynamicsInertialParametersRegressor(base_acceleration, ddq, regressor):
+                    print("Error during numeric computation of regressor")
+
+                # copy: see the note in computeRegressors (dangling SWIG buffer view)
+                A = regressor.toNumPy().copy()
+
+                if not self.opt["floatingBase"]:
+                    # for fixed base, keep only joint torque rows (skip first 6 base wrench rows)
+                    A = A[6:, :]
+
+                if self.opt["identifyGravityParamsOnly"]:
+                    # delete inertia param columns
+                    A = np.delete(A, self.inertia_params, 1)
+
+                if self.opt["identifyFrictionSimultaneously"]:
+                    # append tanh-smoothed sign(velocity) for Coulomb friction
+                    sign_threshold = float(self.opt.get("frictionSignThreshold", 0.02))
+                    sign = np.tanh(dq.toNumPy() / sign_threshold)
+                    static_diag = np.identity(self.num_dofs) * sign
+                    offset_regressor = np.vstack((np.zeros((fb * 6, self.num_dofs)), static_diag))
+                    A = np.concatenate((A, offset_regressor), axis=1)
+
+                    if not self.opt["identifyGravityParamsOnly"]:
+                        if self.opt["identifySymmetricVelFriction"]:
+                            # just use velocity directly
+                            vel_diag = np.identity(self.num_dofs) * dq.toNumPy()
+                            friction_regressor = np.vstack(
+                                (np.zeros((fb * 6, self.num_dofs)), vel_diag)
+                            )  # add base dynamics rows
+                        else:
+                            # append positive/negative velocity matrix for velocity dependent asymmetrical friction
+                            dq_p = dq.toNumPy().copy()
+                            dq_p[dq_p < 0] = 0  # set to zero where v < 0
+                            dq_m = dq.toNumPy().copy()
+                            dq_m[dq_m > 0] = 0  # set to zero where v > 0
+                            vel_diag = np.hstack(
+                                (
+                                    np.identity(self.num_dofs) * dq_p,
+                                    np.identity(self.num_dofs) * dq_m,
+                                )
+                            )
+                            friction_regressor = np.vstack(
+                                (np.zeros((fb * 6, self.num_dofs * 2)), vel_diag)
+                            )  # add base dynamics rows
+                        A = np.concatenate((A, friction_regressor), axis=1)
+
+                        # torque offset: constant 1.0 per joint (absorbs amplifier bias etc.)
+                        offset_ones = np.identity(self.num_dofs)
+                        offset_regressor = np.vstack((np.zeros((fb * 6, self.num_dofs)), offset_ones))
+                        A = np.concatenate((A, offset_regressor), axis=1)
+
+                        # Stribeck stiction columns
+                        if self.opt.get("stribeckVelocity", 0) > 0:
+                            vs = float(self.opt["stribeckVelocity"])
+                            vel = dq.toNumPy()
+                            stribeck_col = np.exp(-np.abs(vel) / vs) * np.sign(vel)
+                            stribeck_diag = np.identity(self.num_dofs) * stribeck_col
+                            stribeck_regressor = np.vstack((np.zeros((fb * 6, self.num_dofs)), stribeck_diag))
+                            A = np.concatenate((A, stribeck_regressor), axis=1)
+
+                # add to previous regressors, linear dependencies don't change
+                # (if too many, saturation or accuracy problems?)
+                if i == 0:
+                    R = A.T.dot(A)
+                else:
+                    R += A.T.dot(A)
+
+            # get column space dependencies
+            Q, RQ, PQ = sla.qr(R, pivoting=True, mode="economic")
+
+            np.savez(
+                regr_filename,
+                R=R,
+                Q=Q,
+                RQ=RQ,
+                PQ=PQ,
+                n=n_samples,
+                fb=self.opt["floatingBase"],
+                grav_only=self.opt["identifyGravityParamsOnly"],
+                fric=self.opt["identifyFrictionSimultaneously"],
+                fric_sym=self.opt["identifySymmetricVelFriction"],
+            )
+
+        if "showRandomRegressor" in self.opt and self.opt["showRandomRegressor"]:
+            import matplotlib.pyplot as plt
+
+            plt.imshow(R, interpolation="nearest")
+            plt.show()
+
+        return R, Q, RQ, PQ
+
+    def computeRegressorLinDepsQR(self, regressor=None):
+        """get base regressor and identifiable basis matrix with QR decomposition
+
+        gets independent columns (non-unique choice) each with its dependent ones, i.e.
+        those std parameter indices that form each of the base parameters (including the linear factors)
+        """
+        if regressor is not None:
+            # if supplied, get dependencies from specific regressor
+            Y = regressor
+            self.Q, self.R, self.P = sla.qr(Y, pivoting=True, mode="economic")
+        else:
+            # using random regressor gives us structural base params, not dependent on excitation
+            # QR of transposed gives us basis of column space of original matrix (Gautier, 1990)
+            Y, self.Q, self.R, self.P = self.getRandomRegressor(n_samples=self.opt["randomSamples"])
+
+        """
+        # get basis directly from regressor matrix using QR
+        Qt,Rt,Pt = sla.qr(Y.T, pivoting=True, mode='economic')
+
+        #get rank
+        r = np.where(np.abs(Rt.diagonal()) > self.opt['minTol'])[0].size
+        self.num_base_params = r
+
+        Qt[np.abs(Qt) < self.opt['minTol']] = 0
+
+        #get basis projection matrix
+        S = np.zeros_like(Rt)
+        for i in range(Rt.shape[0]):
+            if np.abs(Rt[i,i]) < self.opt['minTol']:
+                continue
+            if Rt[i,i] < 0:
+                S[i,i] = -1
+            if Rt[i,i] > 0:
+                S[i,i] = 1
+        self.B = Qt.dot(S)[:, :r]
+        #self.B = Qt[:, 0:r]
+
+        """
+        # get rank
+        r = np.where(np.abs(self.R.diagonal()) > self.opt["minTol"])[0].size
+        self.num_base_params = r
+        self.num_base_inertial_params = r - self.num_dofs
+
+        # create proper permutation matrix from vector
+        self.Pp = np.zeros((self.P.size, self.P.size))
+        for i in self.P:
+            self.Pp[i, self.P[i]] = 1
+        self.Pb = self.Pp.T[:, 0 : self.num_base_params]
+        self.Pd = self.Pp.T[:, self.num_base_params :]
+
+        # get the choice of indices of "independent" columns of the regressor matrix
+        # (representants chosen from each separate interdependent group of columns)
+        self.independent_cols = self.P[0:r]
+
+        # get column dependency matrix (with what factor are columns of "dependent" columns grouped)
+        # i (independent column) = (value at i,j) * j (dependent column index among the others)
+        R1 = self.R[0:r, 0:r]
+        R2 = self.R[0:r, r:]
+        self.linear_deps = sla.inv(R1).dot(R2)
+        self.linear_deps[np.abs(self.linear_deps) < self.opt["minTol"]] = 0
+
+        self.Kd = self.linear_deps
+        self.K = self.Pb.T + self.Kd.dot(self.Pd.T)
+
+        # collect grouped columns for each independent column
+        # and build base matrix
+        # (slow too, save to file)
+        if self.opt["useBasisProjection"]:
+            self.B = np.zeros((self.num_identified_params, self.num_base_params))
+            for j in range(0, self.linear_deps.shape[0]):
+                indep_idx = self.independent_cols[j]
+                for i in range(0, self.linear_deps.shape[1]):
+                    for k in range(r, self.P.size):
+                        factor = self.linear_deps[j, k - r]
+                        if np.abs(factor) > self.opt["minTol"]:
+                            self.B[self.P[k], j] = factor
+                self.B[indep_idx, j] = 1
+
+            if self.opt["orthogonalizeBasis"]:
+                # orthogonalize, so linear relationships can be inverted (if B is square, will orthonormalize)
+                Q_B_qr, R_B_qr = la.qr(self.B)
+                Q_B_qr[np.abs(Q_B_qr) < self.opt["minTol"]] = 0
+                S = np.zeros_like(R_B_qr)
+                for i in range(R_B_qr.shape[0]):
+                    if np.abs(R_B_qr[i, i]) < self.opt["minTol"]:
+                        continue
+                    if R_B_qr[i, i] < 0:
+                        S[i, i] = -1
+                    if R_B_qr[i, i] > 0:
+                        S[i, i] = 1
+                self.B = Q_B_qr.dot(S)
+                # self.B = Q_B_qr
+                self.Binv = self.B.T
+            else:
+                # in case B is not an orthogonal base (B.T != B^-1), we have to use pinv instead of T
+                # (using QR on B yields orthonormal base if necessary)
+                # in general, pinv is always working (but is numerically a bit different)
+                self.Binv = la.pinv(self.B)
+
+        # define sympy symbols for each std column
+        self.base_syms = sympy.Matrix([sympy.Symbol("beta" + str(i), real=True) for i in range(self.num_base_params)])
+        param_syms_list: list[sympy.Symbol] = list()
+        self.mass_syms: list[sympy.Symbol] = list()
+        self.friction_syms: list[sympy.Symbol] = list()
+        # indices of params within full param vector that are going to be identified
+        self.identified_params: list[int] = list()
+        for i in range(0, self.num_links):
+            # mass
+            m = symbols(f"m_{i}")
+            param_syms_list.append(m)
+            self.identified_params.append(i * 10)
+            self.mass_syms.append(m)
+
+            # first moment of mass
+            p = f"c_{i}"  # symbol prefix
+            syms = [symbols(p + "x"), symbols(p + "y"), symbols(p + "z")]
+            param_syms_list.extend(syms)
+            self.identified_params.extend([i * 10 + 1, i * 10 + 2, i * 10 + 3])
+
+            # 3x3 inertia tensor about link-frame (for link i)
+            p = f"I_{i}"
+            syms = [
+                symbols(p + "xx"),
+                symbols(p + "xy"),
+                symbols(p + "xz"),
+                symbols(p + "xy"),
+                symbols(p + "yy"),
+                symbols(p + "yz"),
+                symbols(p + "xz"),
+                symbols(p + "yz"),
+                symbols(p + "zz"),
+            ]
+            param_syms_list.extend([syms[0], syms[1], syms[2], syms[4], syms[5], syms[8]])
+
+            if not self.opt["identifyGravityParamsOnly"]:
+                self.identified_params.extend(
+                    [
+                        i * 10 + 4,
+                        i * 10 + 5,
+                        i * 10 + 6,
+                        i * 10 + 7,
+                        i * 10 + 8,
+                        i * 10 + 9,
+                    ]
+                )
+
+        if self.opt["identifyFrictionSimultaneously"]:
+            mp = self.num_model_params
+            for i in range(0, self.num_dofs):
+                s = [symbols(f"Fc_{i}")]
+                param_syms_list.extend(s)
+                self.friction_syms.extend(s)
+                self.identified_params.append(mp + i)
+            if not self.opt["identifyGravityParamsOnly"]:
+                if self.opt["identifySymmetricVelFriction"]:
+                    fv_offset = self.num_dofs  # Fv starts after Fc
+                    for i in range(0, self.num_dofs):
+                        s = [symbols(f"Fv_{i}")]
+                        param_syms_list.extend(s)
+                        self.friction_syms.extend(s)
+                        self.identified_params.append(mp + fv_offset + i)
+                    off_offset = 2 * self.num_dofs  # tau_off starts after Fc, Fv
+                else:
+                    fv_offset = self.num_dofs  # Fv+ starts after Fc
+                    for i in range(0, self.num_dofs):
+                        s = [symbols(f"Fv+_{i}")]
+                        param_syms_list.extend(s)
+                        self.friction_syms.extend(s)
+                        self.identified_params.append(mp + fv_offset + i)
+                    for i in range(0, self.num_dofs):
+                        s = [symbols(f"Fv-_{i}")]
+                        param_syms_list.extend(s)
+                        self.friction_syms.extend(s)
+                        self.identified_params.append(mp + 2 * self.num_dofs + i)
+                    off_offset = 3 * self.num_dofs  # tau_off starts after Fc, Fv+, Fv-
+
+                # torque offset symbols
+                for i in range(self.num_dofs):
+                    s = [symbols(f"off_{i}")]
+                    param_syms_list.extend(s)
+                    self.friction_syms.extend(s)
+                    self.identified_params.append(mp + off_offset + i)
+
+                # Stribeck stiction symbols (after offset params)
+                if self.opt.get("stribeckVelocity", 0) > 0:
+                    fs_start = self.num_all_params - self.num_dofs  # Fs params are at the end
+                    for i in range(self.num_dofs):
+                        s = [symbols(f"Fs_{i}")]
+                        param_syms_list.extend(s)
+                        self.friction_syms.extend(s)
+                        self.identified_params.append(fs_start + i)
+        self.param_syms: np.ndarray = np.array(param_syms_list)
+
+        ## get symbolic equations for base param dependencies
+        # Each dependent parameter can be ignored (non-identifiable) or it can be
+        # represented by grouping some base and/or dependent parameters.
+        # TODO: put this in regressor cache file (it's slow)
+        if self.opt["useBasisProjection"]:
+            if self.opt["orthogonalizeBasis"]:
+                # this is only correct if basis is orthogonal
+                self.base_deps = np.dot(self.param_syms[self.identified_params], self.B)
+            else:
+                # otherwise, we need to get relationships from the inverse
+                B_qr_inv_z = la.pinv(self.B)
+                B_qr_inv_z[np.abs(B_qr_inv_z) < self.opt["minTol"]] = 0
+                self.base_deps = np.dot(self.param_syms[self.identified_params], B_qr_inv_z.T)
+        else:
+            # using projection matrix from Gautier/Sousa method for base eqns
+            # (K is orthogonal)
+            self.base_deps = Matrix(self.K) * Matrix(self.param_syms[self.identified_params])
+
+        # find std parameters that have no effect on estimation (not single or contributing to base
+        # equations)
+        # TODO: also put this in regressor cache file
+        base_deps_syms: list[Any] = []
+        for i in range(self.base_deps.shape[0]):
+            for s in self.base_deps[i].free_symbols:
+                if s not in base_deps_syms:
+                    base_deps_syms.append(s)
+        self.non_id = [p for p in range(self.num_all_params) if self.param_syms[p] not in base_deps_syms]
+        self.identifiable = [p for p in range(self.num_all_params) if p not in self.non_id]
+
+    def getSubregressorsConditionNumbers(self):
+        # get condition number for each of the links
+        linkConds = list()
+        for i in range(0, self.num_links):
+            # get columns of base regressor that are dependent on std parameters of link i
+            # TODO: try going further down to e.g. condition number of link mass, com, inertial
+            # and ignore those groups of params
+
+            ## get parts of base regressor with only independent columns (identifiable space)
+
+            # get all independent std columns for link i
+            # base_columns = [j for j in range(0, self.num_base_params) \
+            #                      if self.independent_cols[j] in range(i*10, i*10+9+1)]
+
+            # use base column dependencies to get combined params of base regressor with
+            # coontribution on each each link (a bit inexact I guess)
+            base_columns: list[int] = list()
+            for k in range(i * 10, i * 10 + 9 + 1):
+                for j in range(0, self.num_base_params):
+                    if self.param_syms[k] in self.base_deps[j].free_symbols:
+                        if j not in base_columns:
+                            base_columns.append(j)
+                        continue
+
+            if not len(base_columns):
+                linkConds.append(1e16)
+            else:
+                linkConds.append(la.cond(self.YBase[:, base_columns]))
+
+        if self.opt["verbose"]:
+            print(f"Condition numbers of link sub-regressors: [{dict(enumerate(linkConds))}]")
+
+        return linkConds

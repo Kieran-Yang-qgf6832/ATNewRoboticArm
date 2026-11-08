@@ -1,0 +1,165 @@
+# FloBaRoID
+
+(FLOating BAse RObot dynamical IDentification)
+
+FloBaRoID is a python toolkit for parameter identification of floating-base rigid body tree-structures such as
+humanoid robots. It aims to provide a complete solution for obtaining physical consistent identified dynamics parameters.
+The full floating-base dynamics are identifiable both in simulation and from real robot measurements. All steps
+of the pipeline can be run from the command line or through a graphical interface (`uv run gui.py`).
+
+FloBaRoID was originally developed at the [Advanced Robotics department](https://advr.iit.it/) of the
+Istituto Italiano di Tecnologia (IIT) for the WALK-MAN humanoid robot, and has since been generalized to
+arbitrary floating-base tree-structured robots.
+
+<div>
+<img alt="Overview diagram" src="documentation/identification_overview.svg" width="62%" align="left" hspace="5px">
+<img alt="WALKMAN suspended from a crane in the visualizer" src="documentation/walkman_suspended.jpg" width="33%">
+</div>
+
+Features:
+
+* find optimized excitation trajectories with non-linear global optimization (Optuna + IPOPT, as parameters of Fourier-series for periodic soft trajectories)
+  * D-optimality objective with analytical gradients \[Ayusawa2017\], optional per-joint velocity target
+  * collision-aware (convex hull, capsule, or full mesh), checked against the world and under the suspended base swing
+  * supports floating-base robots with suspended dynamics (ball-joint at configurable attachment frame)
+  * robust feasibility: infeasible candidates are repaired by amplitude back-off and known trajectories can seed the search
+* realistic measurement simulation from trajectories (friction, backlash, sensor noise, cable forces, thermal drift, etc.)
+* data preprocessing
+    * derive velocity and acceleration values from position readings
+    * data is zero-phase low-pass filtered from supplied measurements
+    * optionally select best data blocks from measurements by sub-regressor quality \[Venture2009\]
+      (useful for real robot data with variable excitation quality)
+* validation with other measurement files
+* excitation of real robots, using ROS/MoveIt! or Yarp
+* implemented estimation methods:
+  * ordinary least squares, OLS
+  * weighted least squares \[Zak1994\]
+  * estimation of parameter error using previously known CAD values \[Gautier2013\]
+  * essential standard parameters \[Pham1991\]\[Gautier2013\], estimating only those that are most certain for the measurement data and leaving the others unchanged
+  * SDP-constrained identification for physically consistent parameters \[Sousa2014\], using cvxpy (using e.g. CLARABEL or MOSEK solvers)
+  * closest-to-CAD recovery of standard parameters from feasible base solution, optionally observability-weighted (pull weakly-determined parameters toward CAD, leave well-determined ones free)
+  * geometric (log-det divergence) CAD prior \[Lee2020\]: pull each link's pseudo-inertia toward CAD on the SPD manifold instead of by Euclidean distance, repelling degenerate (zero-mass) solutions (`cadRegularizationMode: geometric`)
+  * identification from several measurement files at once, with optional per-trajectory inverse-noise weighting
+  * two-step friction identification: friction-free base parameter estimation from base wrench equations \[Ayusawa2014\], followed by per-joint friction fitting from the residual
+* 3D visualization of robot model, trajectories, and world environment (OpenGL)
+* plotting of measured and estimated joint state and torques (interactive, HTML, PDF or Tikz)
+* output of the identified parameters directly into URDF
+
+### Before installation
+
+You'll need some or all of these depenencies installed in your system:
+
+* **eigen3, swig** (required for building iDynTree): `brew install eigen@3 swig` (macOS) or `apt install libeigen3-dev swig` (Ubuntu/Debian)
+* **ipopt** (required for building cyipopt, used for trajectory and posture optimization): `brew install ipopt` (macOS) or `apt install coinor-libipopt-dev` (Ubuntu/Debian). Uses the `mumps` linear solver by default. For slightly better performance, you can also install the [HSL library](https://licences.stfc.ac.uk/product/coin-hsl) (academic license) and configure via `linear_solver` option (e.g. `ma57`, `ma97`).
+
+## Installation
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then
+run e.g. `uv run identifier.py` to run the tools in uv virtual env. It will install necessary dependencies
+automatically.
+
+Optional dependency groups can be installed with:
+* `uv sync --group visualization` — matplotlib2tikz for TikZ export
+* `uv sync --all-groups` — everything (recommended)
+
+
+## Commands
+
+All commands can also be launched and configured from a graphical interface that streams their
+live output:
+
+```bash
+uv run gui.py
+```
+
+* **trajectory.py**: generate optimized trajectories
+
+```bash
+uv run trajectory.py --config configs/kuka_lwr4.yaml --model model/kuka_lwr4.urdf
+```
+
+Saves to `<model>.trajectory.npz` by default (e.g. `model/kuka_lwr4.urdf.trajectory.npz`). Override with `--filename`.
+
+* **excite.py**: send trajectory to control the robot movement and record the resulting measurements
+
+```bash
+uv run excite.py --config configs/kuka_lwr4.yaml --model model/kuka_lwr4.urdf --filename measurements.npz
+```
+
+* **simulator.py**: simulate realistic measurement data from a trajectory file (without a physical robot).
+  Computes inverse dynamics and adds configurable real-world effects (friction,
+  sensor noise, backlash, joint elasticity, cable forces, thermal drift, etc.).
+  Settings are controlled via the config file (`simulate*` options).
+
+```bash
+uv run simulator.py --config configs/kuka_lwr4.yaml --model model/kuka_lwr4.urdf
+```
+
+Saves to `<model>.measurements.npz` by default. Override with `--filename`.
+
+* **identifier.py**: identify dynamical parameters (mass, COM and rotational inertia) starting from an URDF description and from torque and force measurements
+
+```bash
+uv run identifier.py --config configs/kuka_lwr4.yaml --model model/kuka_lwr4.urdf --measurements measurements.npz
+```
+
+* **visualizer.py**: show 3D robot model of URDF, trajectory motion
+
+```bash
+uv run visualizer.py --config configs/kuka_lwr4.yaml --model model/kuka_lwr4.urdf --trajectory model/kuka_lwr4.urdf.trajectory.npz
+```
+
+### Additional non-PyPI dependencies
+
+Requirements for excitation module:
+
+* for ros, python modules: ros, moveit\_msg, moveit\_commander
+* for yarp: c compiler, installed [robotology-superbuild](https://github.com/robotology-playground/robotology-superbuild), python modules: yarp
+* for other robots, new modules will have to be written
+
+Also see the [Tutorial](documentation/TUTORIAL.md).
+
+Known limitations:
+
+* trajectory optimization for floating-base robots with suspended dynamics uses a ball-joint
+  model. True chain/cable dynamics and walking contact dynamics are not yet implemented.
+* YARP excitation module is not very generic (ROS should be)
+* using position control over YARP is not realtime safe and can expose timing issues (especially with python to C bridge)
+
+The SDP-constrained identification follows the LMI formulation of \[Sousa2014\] (and the reference
+implementation [cdsousa/wam7\_dyn\_ident](https://github.com/cdsousa/wam7_dyn_ident)), but is a from-scratch
+reimplementation that differs in how the problem is built and solved:
+
+* **Construction.** The original builds the linear matrix inequalities *symbolically* (sympy with `lmi_sdp`).
+  This toolkit instead assembles the constraint matrices *numerically* and hands them to [cvxpy](https://www.cvxpy.org/).
+  Avoiding symbolic expansion makes constraint construction far faster and keeps it tractable for high-DOF
+  floating-base models with hundreds of standard parameters, where symbolic generation becomes prohibitively
+  slow and memory-heavy.
+* **Solver.** The problem is solved through cvxpy's conic-solver abstraction, so any of its modern interior-point
+  solvers can be used (CLARABEL by default, MOSEK and others optional). These are numerically more stable on
+  large, ill-conditioned floating-base problems than the earlier solver pipeline; the solver and its tolerances
+  are configurable (`sdpSolver`, `sdpSolverOptions`), and a failed solve degrades gracefully to the a priori
+  parameters instead of aborting.
+
+Usage is licensed under the LGPL 3.0, see License.md. Please quote the following publication if you're using this software for any project:
+`S. Bethge, J. Malzahn, N. Tsagarakis, D. Caldwell: "FloBaRoID — A Software Package for the Identification of Robot Dynamics Parameters", 26th International Conference on Robotics in Alpe-Adria-Danube Region (RAAD), 2017`
+
+### References
+
+\[Venture2009\] G. Venture, K. Ayusawa, Y. Nakamura: "A numerical method for choosing motions with optimal excitation properties for identification of biped dynamics — An application to human," IEEE International Conference on Robotics and Automation (ICRA), pp. 1226–1231, 2009.
+
+\[Gautier1991\] M. Gautier: "Numerical calculation of the base inertial parameters of robots," Journal of Robotic Systems, vol. 8, no. 4, pp. 485–506, 1991.
+
+\[Pham1991\] C. M. Pham, M. Gautier: "Essential parameters of robots," Proceedings of the 30th IEEE Conference on Decision and Control, Brighton, England, pp. 2769–2774, 1991.
+
+\[Zak1994\] G. Zak, B. Benhabib, R. G. Fenton, I. Saban: "Application of the Weighted Least Squares Parameter Estimation Method to the Robot Calibration," Journal of Mechanical Design, vol. 116, no. 3, pp. 890–893, 1994.
+
+\[Gautier2013\] M. Gautier, G. Venture: "Identification of Standard Dynamic Parameters of Robots with Positive Definite Inertia Matrix," IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS), Tokyo, Japan, pp. 5815–5820, 2013.
+
+\[Sousa2014\] C. D. Sousa, R. Cortesão: "Physical feasibility of robot base inertial parameter identification: A linear matrix inequality approach," The International Journal of Robotics Research, vol. 33, no. 6, pp. 931–944, 2014.
+
+\[Ayusawa2014\] K. Ayusawa, G. Venture, Y. Nakamura: "Identifiability and identification of inertial parameters using the underactuated base-link dynamics for legged multibody systems," The International Journal of Robotics Research, vol. 33, no. 3, pp. 446–468, 2014.
+
+\[Ayusawa2017\] K. Ayusawa, A. Rioux, E. Yoshida, G. Venture, M. Gautier: "Generating Persistently Exciting Trajectory Based on Condition Number Optimization," IEEE International Conference on Robotics and Automation (ICRA), Singapore, pp. 6518–6524, 2017.
+
+\[Lee2020\] T. Lee, P. M. Wensing, F. C. Park: "Geometric Robot Dynamic Identification: A Convex Programming Approach," IEEE Transactions on Robotics, vol. 36, no. 2, pp. 348–365, 2020.

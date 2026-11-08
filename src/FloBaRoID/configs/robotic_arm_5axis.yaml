@@ -1,0 +1,363 @@
+
+#### trajectory generation and excitation
+
+optimizeTrajectory: 1            #find new parameters with optimization or load previous params from file (if no file exists, use random)
+
+# trajectory optimization
+useGlobalOptimization: 0         #smoke test: local refinement only
+globalOptIterations: 20    # n_trials = globalOptSize * globalOptIterations
+globalOptSize: 20
+optunaSampler: 'TPE'       # 'TPE' or 'NSGA2'
+useLocalOptimization: 1          #do local optimization after using global solver
+localOptIterations: 20           #how many optimizer iterations to use. this is not equal to function calls if gradients are approximated
+useAnalyticalGradients: 1        #use analytical gradients for local optimization (much faster than FD)
+analyticalGradientEpsilon: 1.0e-7  #FD step for numerical regressor Jacobian in analytical gradient
+minTolConstr: 0.01               #threshold for being within constraints (only used for display)
+showOptimizationGraph: 0         #display updating graph during trajectory optimization
+showOptimizationTrajs: 0         #display the trajectory plot after each optimization step
+showModelVisualization: 0        #display 3D model of robot during optimization (static only atm)
+transparentLinks: []             #visualize with some see-through
+
+# collision geometry: 'box', 'convex', 'full', or 'capsule'
+collisionMode: 'convex'
+# required clearance (m) between robot and world geometry; box hulls
+# under-approximate protruding parts, so a margin avoids near-contact
+# (0.05 with model/world_robotic_arm.urdf: the ground top face is 0.5 mm below
+#  base_link's lowest point, so this is the clearance kept by every moving link)
+worldCollisionMargin: 0.05
+ignoreLinksForCollision: []      #don't include these links for collision testing at all
+ignoreLinkPairsForCollision:     # adjacent links share joint geometry; skip them
+    - ['base_link', 'link1']
+    - ['link1', 'link2']
+    - ['link2', 'link3']
+    - ['link3', 'link4']
+    - ['link4', 'link5']
+    # static base parts: base_link sits 0.5 mm above the ground top face and
+    # link1 only rotates about vertical, so their ground distance is constant
+    # (0.5 mm / 22 mm) and would always violate worldCollisionMargin
+    - ['ground_link', 'base_link']
+    - ['ground_link', 'link1']
+
+# initial values to start trajectory optimization from (useful only when not using global optimization)
+trajectoryPulseInit: 1.0         #pulsation rad/s -> period 2*pi/w = 6.28 s = 628 samples at 100 Hz
+trajectoryPulseMin:  0.8
+trajectoryPulseMax:  1.2
+trajectoryBounded: 1           # tanh mapping keeps q inside URDF limits regardless of amplitudes
+trajectoryCoeffInit: 0.2         #set this as high as possible without violating constraints at start (see output after start)
+trajectoryCoeffMin: -2.0         #determines in which range the chosen params have to be (smaller=lower vel)
+trajectoryCoeffMax:  2.0
+# per-joint peak-velocity target (rad/s) as a soft cost; friction is hard to
+# identify for joints that barely move (0 = disabled)
+trajectoryTargetVelocity: 0.5
+# repair infeasible global-search candidates by scaling their Fourier amplitudes
+# down until feasible, so they still contribute a feasible solution
+globalOptAmplitudeRepair: 1
+# previously optimized trajectory files to enqueue as initial global-search trials
+trajectorySeedSolutions: []
+# measurement files of earlier trajectories whose information is added to the
+# objective so a new trajectory maximizes the information it adds (sequential design)
+trajectoryPriorMeasurements: []
+# per-joint number of Fourier harmonics (more harmonics = higher frequency content = more inertial torque)
+# per-joint Fourier harmonics (all joints must be listed)
+# distal joints benefit from more harmonics since they can't rely on gravity for excitation
+trajectoryNf:
+    joint1: 2
+    joint2: 2
+    joint3: 2
+    joint4: 2
+    joint5: 2
+
+trajectoryCenterFreedom: 25.0    # optimizer can shift centers ±25° from preferred
+# trajectoryOscillationCenters: unlisted joints default to 0 (URDF midpoint)
+
+# override position limits: {joint_name: [lower_deg, upper_deg]}, unlisted use URDF
+ovrPosLimit: {}
+#   lwr_1_joint: [-60.0, 60.0]
+
+# maximize smallest velocity for each joint (better excitation of parameters)
+# (implemented as penalty, so will not necessarily reach the set value)
+minVelocityConstraint: 0
+minVelocityPercentage: 0.1
+
+# minimum torque utilization per joint as fraction of torque limit (hard constraint)
+# (set conservatively — distal joints of serial chains have small achievable torques)
+minTorqueUtilization: 0.0   # 50 Nm limits are placeholders; utilization floor would be infeasible
+
+# static posture optimization (for gravity term identification)
+useStaticTrajectories: 0         #generate simple 'trajectories' of static postures for identification of gravity terms
+numStaticPostures: 5             #how many postures to generate (must be >1)
+scaleCollisionHull: 0.9          #scale urdf hull sizes for collision testing
+staticPostureTime: 0.02          # time in s per posture (nr. of samples => this * number of postures)
+initialPostures:                 #for static optimization, feasible postures to start from (useful only when not using global optimization)
+    - [0,0,0,0,0,0,0]
+    - [0,0.1,0,0.8,0,-0.4,0]
+    - [0,0,0,-0.8,0,0,0]
+    - [0,0.75,0,0,0,0,0]
+    - [0,-0.75,0,0,0.4,0,0]
+
+# excitation
+exciteMethod: null #'ros'        #'yarp' or 'ros' (use simulator.py for simulated data)
+ros_move_group: 'full_lwr'       #if using ros, what move group to use for excitation
+excitationFrequency: 100.0       #data frequency in Hz for generating trajectories (should correspond to actual data transfer frequency)
+useDeg: 0                        #give angles in degrees (internal and data is always in rad)
+
+#### measurement simulation (simulator.py)
+# Simulate realistic measurement data from trajectories by computing inverse
+# dynamics and adding real-world effects (friction, noise, backlash, etc.)
+
+# static postures are disabled for this smoke test: the dynamic trajectory already
+# sweeps the joint ranges, and with simulateStaticSamplesPerPosture: 0 the appender
+# would build an empty hold segment (IndexError at trajectory.py:184)
+simulateStaticSamplesPerPosture: 0
+
+# number of sudden stop/restart segments to insert into trajectory
+simulateNumStops: 0
+
+# sensor and actuator properties
+# (values for KUKA LWR4+ based on DLR LWR III documentation:
+#  Albu-Schäffer et al., "The DLR Lightweight Robot", 2008.
+#  The LWR4+ is the KUKA-commercialized version of the DLR LWR III design.)
+simulateControlRate: 3000.0      # joint-level control loop rate in Hz (DLR: 3 kHz SERCOS bus)
+simulateTorqueSensorError: 0.0005 # torque sensor noise as fraction of torque limit
+                                  # (DLR spec: <0.5% is accuracy/linearity, not noise.
+                                  #  measured noise floor after 8 Hz filtering: ~0.03% of limit)
+simulateTorqueSensorFilter: 600  # torque sensor on-board low-pass cutoff in Hz (DLR: 600 Hz)
+simulatePositionFilter: 150      # position/velocity data low-pass cutoff in Hz (reasonable for 1 kHz SERCOS bus)
+
+# friction model constants
+# (Stribeck velocity: speed at which stiction effect decays. Lower = sharper transition.
+#  0.05 rad/s is typical for precision gearboxes; use higher for spur gears or worn joints.)
+#simulateStribeckVelocity: 0.05
+# (sign smoothing threshold: tanh(vel/threshold) approximates sign(vel).
+#  0.02 rad/s avoids numerical issues near zero without distorting the friction curve.)
+#simulateFrictionSignThreshold: 0.02
+
+# scenario-dependent effects (these depend on the specific use case / test setup)
+simulateStribeckVelocity: 0     # identifier models Fc+Fv only; Stribeck would be an unmodelable residual
+simulateThermalWarmupTime: 0   # seconds robot was running before trajectory (0 = cold start)
+simulateThermalReduction: 0.12   # max friction reduction when fully warm (fraction of viscous friction)
+simulateGravCompError: 0.0       # gravity comp residual (0: LWR4 uses joint torque sensors that measure actual
+                                 # torques directly, so controller model errors don't affect measurements.
+                                 # set >0 for robots where torques are derived from motor current)
+simulateCableStiffnessScale: 1.0 # multiplier for cable routing forces (0 = disabled)
+
+# toggle individual realistic effects
+simulateFriction: 0              # friction already enters via identifyFrictionSimultaneously
+                                 # in the inverse-dynamics path (URDF <dynamics>), enabling
+                                 # this would add it a second time
+simulateThermalDrift: 0          # temperature-dependent friction change (see warmup time above)
+simulateCableForces: 0           # configuration-dependent cable/hose forces
+simulateGravityCompResidual: 0   # imperfect controller gravity compensation (off: LWR4 has joint torque sensors)
+simulateTorqueQuantization: 0    # motor PWM discretization
+simulateStructuralDeflection: 0  # load-dependent link deflection
+simulateBacklash: 0              # gear backlash dead zone
+simulateEncoderQuantization: 1   # finite encoder resolution
+simulateTimingJitter: 0          # non-uniform sampling timestamps
+simulateRandomSeed: 42           # random seed for reproducibility
+
+#### data preprocessing and selection
+
+# median filter that is used to remove outliers before low-pass
+filterMedianSize: 11
+
+# low-pass butter worth filter that is used to filter positions, torques and IMU accelerations
+# 2-tuple of cut-off and order of filter
+filterLowPass1: [8.0, 5]
+filterLowPass2: [6.0, 5]        # low-pass for joint velocities
+filterLowPass3: [3.0, 4]        # low-pass for external contact force data and IMU rpy estimation
+
+# use subset of samples
+startOffset: 0    #how many samples from the beginning of each measurement file are skipped
+skipSamples: 0    #how many values to skip before using the next sample
+
+# whether only "good" data is being selected or simply all is used (selected by condition number)
+selectBlocksFromMeasurements: 0
+blockSize: 250  # needs to be at least as much as parameters so regressor is square or higher
+selectBestPerenctage: 50   #select percentage of blocks sorted by condition number
+
+removeNearZero: 0   #remove samples that have almost zero velocity
+minVel: 0.01        #velocity that one of a sample's joints needs to have for the sample to be used (rad/s)
+
+# IMU processing (floating base)
+waitForZeroAcc: 1   #when integrating IMU linear acceleration, wait for first time with (almost) no acceleration to start at zero velocity
+zeroAccThresh: 0.4  #threshold below which acceleration is considered to be zero (m/s^2)
+
+#### identification
+
+# use a number of random regressors to determine structural parameter dependencies when getting base regressor
+# (generally recommended but may result in remaining linear dependencies in regressor if only limited data is used)
+useStructuralRegressor: 1
+randomSamples: 5000
+
+# almost zero threshold for determining base column dependencies from QR
+# (important: set to a value so that base parameters are estimated reasonably close to CAD, set
+# option showBaseParams below)
+minTol: 0.0001
+
+# fixed or floating-base dynamics
+floatingBase: 0
+
+# identify friction simultaneously with inertial params in the SDP
+# (Coulomb, viscous, and torque offset columns in the regressor)
+identifyFrictionSimultaneously: 1
+
+# identify only one friction value for both directions (necessary for URDF)
+identifySymmetricVelFriction: 1
+
+# Tikhonov regularization weight for friction parameters toward a priori values.
+# Prevents Fc/Fv explosion from their mutual correlation in periodic trajectories.
+# 0 = disabled. Scaled relative to base error magnitude.
+frictionRegularization: 200
+
+# Post-hoc friction refit (two-step second step). With the inertial parameters fixed,
+# refit Fc/Fv/offset per joint from the joint-torque residual with dead-zone
+# and Fv-prior handling (at very low velocities), then overwrite the jointly-fit friction
+# slots. On a fixed base this requires identifyFrictionSimultaneously=1 above
+# (we have no friction-free anchor otherwise).
+postIdentifyFriction: 1
+# drop samples with |v| below this (rad/s) from the friction fit: the Coulomb sign is
+# unreliable there and the tanh is collinear with the viscous column.
+frictionVelocityDeadZone: 0.05
+# self-scaling Fv prior (dimensionless): weight = alpha * median(per-joint velocity energy),
+# so it transfers across robots/trajectories. Raise it if a joint's Fv collapses to 0.
+frictionFvRegularizationRelative: 0.2
+
+# identify only parameters corresponding to gravity terms (mass, mass*COM) for static configurations
+identifyGravityParamsOnly: 0
+
+# simulate torques from target values, don't use both
+simulateTorques: 0 # simulate torque for measured angles etc using idyntree (instead of reading from data)
+
+# compute simulated torques as Y @ x instead of calling iDynTree inverseDynamics.
+# mathematically equivalent for rigid-body models, and deterministic in environments
+# where the inverseDynamics binding returns uninitialized memory.
+useRegressorForSimulation: 1
+
+## constrained SDP to solve OLS
+
+# constrain std params to physical consistent space to only achieve physical consistent parameters
+# (currently this also does the estimation, so previously selecting another method has no effect)
+# if only torque estimation is desired, not using this option might give a better model
+# accuracy with approriate parameters
+constrainToConsistent: 1
+checkAPrioriFeasibility: 0
+
+# identify in two steps: first get feasible solution, then minimize distance to CAD while
+# staying in previous solution nullspace (using SDP)
+identifyClosestToCAD: 1
+
+# how the closest-to-CAD recovery weights the pull toward CAD: 'uniform' minimizes the
+# total distance (which lets a few weakly-determined params absorb the consistency
+# constraints and grow far from CAD), 'observability' weights each param by how poorly the
+# data determines it, so weakly-determined params stay near CAD and well-determined ones
+# stay free. On this real-hardware KUKA data observability keeps the per-link parameters
+# physical and improves held-out validation at the same training fit.
+cadRegularizationMode: 'observability'
+
+sdpSolver: 'clarabel'            # cvxpy solver: clarabel, scs, mosek, copt, cvxopt
+
+# constrain parameters for links more than a certain condition number to the a priori values
+# (to prevent very big changes for parameters that are not expressed well in the data)
+noChange: 0
+noChangeThresh: 400
+
+# restrict COM to smallest enclosing box of STL Mesh (taken from <visual> in URDF)
+restrictCOMtoHull: 1
+# set extra scaling for mesh (e.g. if it is clear that COM will not be at outer border of
+# geometry or that initial CAD data is too large)
+hullScaling: 1.0
+# name of the directory after the package base name (as in package://basename/)
+meshBaseDir: 'model'
+# fallback cube size (in case mesh file is not found, a cube with the old value in the center is used)
+cubeSize: 0.1
+
+# force COM values to stay close to a priori values (disable hull constraints when enabled)
+limitCOMToApriori: 0
+limitCOMAprioriBoundary: 0.005     #allowed change of CAD value in both +- directions (1.0 = 100%)
+
+# constrain overall mass
+limitOverallMass: 1
+# if overall mass is set, constrain mass close to this value. If null, use a priori mass sum
+limitMassVal: 6.8
+#allowed percentual change in both directions (1-range and 1+range)
+limitMassRange: 0.8
+
+# enforce staying around the a priori masses (only set this or a combination of the other
+# two mass limiting options to prevent constraint conflicts which result in problem
+# infeasibility!)
+limitMassToApriori: 1
+limitMassAprioriBoundary: 0.5     #allowed change of CAD value in both +- directions (1.0 = 100%)
+
+# specify single params that will be constrained to the CAD values
+dontChangeParams: []
+
+# don't constrain some parameters that are otherwise included through group constraint options
+dontConstrain: []
+
+# define constraints for link symmetries (e.g. left and right arm)
+useSymmetryConstraints: 0
+# allow some difference between symmetry pairs (1.0 = 100%)
+symmetryTolerance: 0.05
+
+## other forms of OLS
+
+# use previously known CAD parameters to identify parameter error, estimates parameters closer to
+# known ones (taken from URDF file)
+# for some methods, this gives parameters that are more likely to be consistent
+# (not used with constrained SDP solver)
+useAPriori: 0
+
+# identify std parameters directly, but only for essential parameters (Gautier, 2013)
+useEssentialParams: 0
+
+# after getting essential base params, include dependent std columns for std essential params
+useDependents: 0
+
+# use weighted least squares(WLS) instead of ordinary least squares
+# needs small condition number, otherwise might amplify some parameters too much as the
+# covariance estimation can be wrong (also assumes that error is zero mean and normal
+# distributed)
+useWLS: 0
+# when identifying from several measurement files (repeated --measurements),
+# weight each file's equations by the inverse of its residual noise instead of
+# stacking all samples equally, so a noisier session does not dominate (0 = off)
+useTrajectoryWeighting: 0
+
+# whether to filter the regressor columns (cutoff frequency is system dependent)
+# possibly increases accuracy when torque ripples are present. also supposedly decreases
+# correlation between (observation) regressor and measured torques
+filterRegressor: 0
+filterRegCutoff: 5   #frequency in Hz
+
+## output and debugging
+
+# plotting
+createPlots: 1               #create or show plots of measurements and estimated values
+outputModule: 'matplotlib'   #how to output plots (atm only ['matplotlib'])
+outputAs: 'html'              #one of ['html', 'pdf', 'tikz', 'interactive']
+outputFilename: 'output_robotic_arm_5axis.html'    #specify custom filename for output file
+#outputFilename: 'kuka.pdf'   #specify custom filename for output file
+#outputFilename: 'kuka'       #specify custom filename for output file
+plotBaseDynamics: 0          #when using floating base, plot base forces or not
+plotPerJoint: 1              #plot each joint torque in one graph
+plotPrioriTorques: 1         #plot the computed torques from the a priori model parameters
+plotErrors: 0                #plot errors into torque graphs
+
+showRandomRegressor: 0       #show 2d plot of random regressor
+showErrorHistogram: 0        #show estimation error distribution
+
+# options for console output
+showMemUsage: 0              #print used memory for different variables
+showTiming: 0                #show times various steps have taken
+showEssentialSteps: 0        #stop after every reduction step and show values
+outputBarycentric: 0         #output all values in barycentric (e.g. urdf) form
+showStandardParams: 1        #display a list of identified standard params
+showBaseParams: 1            #display a list of identified base params (if applicable)
+showBaseEqns: 0              #show which std params are combined for each base param
+outputLatex: 0               #format parameter output as latex
+showTriangleConsistency: 0   #show per-link consistency including triangle inequality
+verbose: 1                   #show more messages, [0,1,2]
+
+# which parameters to use when estimating torques for validation. Set to one of
+# ['base', 'std', 'urdf']
+estimateWith: 'std'

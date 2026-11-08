@@ -1,0 +1,57 @@
+<!-- the joints in this file need to have the same order as reported when running without supplying a regressor file -->
+<regressor>
+    <baseLinkDynamics/>
+    <jointTorqueDynamics>
+        <joints>
+            <!-- left leg -->
+            <joint>LHipLat</joint>
+            <joint>LHipYaw</joint>
+            <joint>LHipSag</joint>
+            <joint>LKneeSag</joint>
+            <joint>LAnkSag</joint>
+            <joint>LAnkLat</joint>
+
+            <!-- right arm -->
+            <joint>RHipLat</joint>
+            <joint>RHipYaw</joint>
+            <joint>RHipSag</joint>
+            <joint>RKneeSag</joint>
+            <joint>RAnkSag</joint>
+            <joint>RAnkLat</joint>
+
+            <!-- waist -->
+            <joint>WaistLat</joint>
+            <joint>WaistSag</joint>
+            <joint>WaistYaw</joint>
+
+            <!-- left arm -->
+            <joint>LShSag</joint>
+            <joint>LShLat</joint>
+            <joint>LShYaw</joint>
+            <joint>LElbj</joint>
+            <joint>LForearmPlate</joint>
+            <joint>LWrj1</joint>
+            <joint>LWrj2</joint>
+
+            <!-- head -->
+            <!-- <joint>NeckYawj</joint>
+            <joint>NeckPitchj</joint> also locked -->
+
+            <!-- right arm -->
+            <joint>RShSag</joint>
+            <joint>RShLat</joint>
+            <joint>RShYaw</joint>
+            <joint>RElbj</joint>
+            <joint>RForearmPlate</joint>
+            <joint>RWrj1</joint>
+            <joint>RWrj2</joint>
+        </joints>
+    </jointTorqueDynamics>
+    <!--<ignoredLink>NeckYaw</ignoredLink>
+    <ignoredLink>NeckPitch</ignoredLink>
+    <ignoredLink>multisense/head</ignoredLink>
+    <ignoredLink>multisense/hokuyo_link</ignoredLink>
+    <ignoredLink>imu_link</ignoredLink>
+    <ignoredLink>imu_link2</ignoredLink>
+    <ignoredLink>multisense/head_imu_link</ignoredLink>-->
+</regressor>

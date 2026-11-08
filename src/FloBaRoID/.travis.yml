@@ -1,0 +1,87 @@
+dist: trusty
+sudo: required
+env: "TRAVIS_CMAKE_GENERATOR=\"Unix Makefiles\", TRAVIS_BUILD_TYPE=\"Release\""
+language: python
+python:
+    - "3.4"
+#  - "2.7"
+cache:
+    - pip
+    - ccache
+before_cache:
+    - rm -f $HOME/.cache/pip/log/debug.log
+addons:
+    apt:
+        sources:
+            - sourceline: 'deb http://de.archive.ubuntu.com/ubuntu trusty-backports main restricted universe multiverse'
+        packages:
+            - python-dev
+            - python3-dev
+            - gfortran
+
+before_install: 
+    - sudo add-apt-repository ppa:george-edison55/cmake-3.x --yes
+    - sudo apt-get -qq update
+    - sudo apt-get install -y cmake cmake-data
+      #- sudo apt-get remove -y swig
+      #- sudo apt-get install -y -t trusty-backports swig3.0
+      #- sudo ln -s /usr/bin/swig3.0 /usr/bin/swig
+    #cvxopt dependencies
+    - sudo apt-get install -y liblapack3 liblapack-dev
+    - sudo apt-get install -y libblas3 libblas-dev
+    #install dsdp solver
+    - sudo apt-get install -y dsdp
+    #mpi4py dependencies
+    - sudo apt-get install -y libopenmpi-dev
+
+# command to install dependencies
+install:
+    #- pip install --global-option=build_ext --global-option="-I/usr/include/suitesparse" cvxopt
+    - wget http://faculty.cse.tamu.edu/davis/SuiteSparse/SuiteSparse-4.5.3.tar.gz
+    - echo '2403007be38266e3607edfbf3833bee7f6bcb0f1  SuiteSparse-4.5.3.tar.gz' | shasum -c -;
+      if [ $? -eq 0 ]; then
+       tar -xf SuiteSparse-4.5.3.tar.gz;
+       CVXOPT_SUITESPARSE_SRC_DIR=$(pwd)/SuiteSparse pip install cvxopt;
+      fi
+    - pip install -r requirements.txt
+    - pip uninstall -y mpi4py
+      #- pip install git+https://github.com/kjyv/pyOpt.git
+
+before_script:
+    #install iDynTree
+    - git clone https://github.com/robotology/idyntree-superbuild
+    - cd idyntree-superbuild
+    - chmod +x ./.ci/travis-deps.sh
+    - sh .ci/travis-deps.sh
+
+    # Use ccache also for clang and clang++ on linux
+    - if [ "$TRAVIS_OS_NAME" == "linux" ]; then if [ "$CC" == "clang" ]; then sudo ln -s ../../bin/ccache /usr/lib/ccache/clang; fi; fi
+    - if [ "$TRAVIS_OS_NAME" == "linux" ]; then if [ "$CXX" == "clang++" ]; then sudo ln -s ../../bin/ccache /usr/lib/ccache/clang++; fi; fi
+
+    - mkdir build
+    - cd build
+    - export CMAKE_PREFIX_PATH=`pwd`/install
+
+    - if [[$TRAVIS_PYTHON_VERSION == 2.7 ]]; then
+        export PYTHON_INCLUDE_DIR=/usr/include/python2.7;
+        export PYTHON_LIBRARY=/usr/lib/python2.7/config/libpython2.7.so;
+        export PYTHONPATH=$PYTHONPATH:~/virtualenv/python2.7/lib/python2.7/site-packages;
+      fi
+    - if [[$TRAVIS_PYTHON_VERSION == 3.4 ]]; then
+        export PYTHON_INCLUDE_DIR=/usr/include/python3.4;
+        export PYTHON_LIBRARY=/usr/lib/python3.4/config/libpython3.4.so;
+      fi
+      # -DPYTHON_LIBRARY=$(python-config --prefix)/lib/libpython2.7.so -DPYTHON_INCLUDE_DIR=$(python-config --prefix)/include/python2.7
+      # -DPYTHON_LIBRARY=$(python-config --prefix)/lib/libpython3.5.so -DPYTHON_INCLUDE_DIR=$(python-config --prefix)/include/python3.5
+    - cmake -G"${TRAVIS_CMAKE_GENERATOR}" -DCMAKE_BUILD_TYPE=${TRAVIS_BUILD_TYPE} -DIDYNTREE_USES_YARP:BOOL=OFF -DIDYNTREE_USES_ICUB_MAIN:BOOL=OFF -DIDYNTREE_USES_PYTHON:BOOL=ON -DNON_INTERACTIVE_BUILD:BOOL=ON ..
+    - cmake --build . --config ${TRAVIS_BUILD_TYPE} -- -j5
+    - sudo cmake --build . --config ${TRAVIS_BUILD_TYPE} --target install
+
+    #add python module dir variables to env
+    - export PYTHONPATH=$PYTHONPATH:`pwd`/install/lib/python$TRAVIS_PYTHON_VERSION/site-packages
+
+# command to run tests
+script:
+    - cd ../..
+    - export MPLBACKEND="agg"
+    - travis_wait 30 pytest tests
