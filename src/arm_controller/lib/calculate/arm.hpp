@@ -1,8 +1,8 @@
 #pragma once
 
 #include "kinamic.hpp"
-#include <memory>
 #include <Eigen/Dense>
+#include <memory>
 
 class ArmSolve {
 public:
@@ -16,8 +16,9 @@ public:
 
     /// 设置按轨迹生效的收敛容差与零空间偏好权重（仅标量赋值，实时路径安全）
     /// @param tolerance >0 时替代 IKSolver::Tuning::tolerance（米）；<=0 用默认值
+    /// @param axis_tolerance >0 时启用位置/工具轴分离判据（弧度）；<=0 用单一误差范数
     /// @param nullspace_weight 0 = 关闭偏好
-    void set_solve_options(double tolerance, double nullspace_weight);
+    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight);
 
     /// 设置/清除零空间偏好的参考位形（轨迹起点关节角）
     void set_posture_reference(const Eigen::VectorXd& reference);
@@ -27,24 +28,24 @@ public:
     bool forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_pos);
 
     // 使用用户定义任务空间速度、加速度和力计算关节力矩。
-    bool inverse_dynamic(const Eigen::VectorXd& joint_pos,
-                         const Eigen::VectorXd& task_vel,
-                         const Eigen::VectorXd& task_acc,
-                         const Eigen::VectorXd& task_force,
-                         Eigen::VectorXd* joint_torque);
+    bool inverse_dynamic(
+        const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& task_vel, const Eigen::VectorXd& task_acc,
+        const Eigen::VectorXd& task_force, Eigen::VectorXd* joint_torque);
 
     // 将任务空间速度映射到关节空间速度，复用预分配的雅可比求解器。
-    bool inverse_velocity(const Eigen::VectorXd& joint_pos,
-                          const Eigen::VectorXd& task_vel,
-                          Eigen::VectorXd* joint_vel);
+    bool inverse_velocity(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& task_vel, Eigen::VectorXd* joint_vel);
 
     // 根据关节力矩残差计算用户定义任务空间受力。
-    bool static_force(const Eigen::VectorXd& joint_pos,
-                      const Eigen::VectorXd& joint_torque_residual,
-                      Eigen::VectorXd* task_force);
+    bool static_force(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& joint_torque_residual, Eigen::VectorXd* task_force);
 
     /// @return 上一次 inverse_kinamic() 的残余任务空间误差范数，用于诊断
     double last_ik_error_norm() const;
+
+    /// @return 上一次 inverse_kinamic() 的误差位置分量范数（米），用于诊断
+    double last_ik_position_error_norm() const;
+
+    /// @return 上一次 inverse_kinamic() 的误差姿态分量范数（弧度），用于诊断
+    double last_ik_axis_error_norm() const;
 
     /// @return 上一次 inverse_kinamic() 实际使用的迭代次数，用于诊断
     int last_ik_iterations() const;

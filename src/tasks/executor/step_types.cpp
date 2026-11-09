@@ -28,7 +28,8 @@ const Entry kStepTable[] = {
     {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
     {"joint_console", true, false, "joint_traj"}, // 终端交互式关节运动；用户接管，要求 idel 进出
     {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹（严格保持姿态）
-    {"pos_move", false, true, "cart_traj"},    // 只约束位置的绝对目标；姿态由控制器投影掉
+    {"pos_move", false, true, "cart_traj"},    // 位置绝对目标；可选 orientation 约束 link6 z 轴
+    {"box_move", false, true, "cart_traj"},    // 读取视觉目标面 TF，移动到箱体位姿（5D，不可达回退位置）
     {"admittance_move", false, true, "admittance"}, // 导纳控制下的期望轨迹
     {"tool", false, false, nullptr},           // 末端执行器开关量
     {"teach", true, true, "teach_pendant"},    // 示教；TeachPendantState 要求 idel 进出
@@ -49,7 +50,8 @@ const Entry* find_entry(const std::string& type) {
 /// 字段白名单：出现白名单外的键直接拒绝，避免拼错字段被静默忽略。
 bool is_allowed_field(const std::string& key) {
     static const char* kAllowed[] = {
-        "type", "duration", "tolerance", "to", "target", "offset", "position", "max_drift_deg", "action"};
+        "type", "duration", "tolerance", "to", "target", "offset", "position", "orientation",
+        "frame", "tool_offset", "max_drift_deg", "action"};
     for (const char* allowed : kAllowed) {
         if (key == allowed) {
             return true;
@@ -58,7 +60,7 @@ bool is_allowed_field(const std::string& key) {
     return false;
 }
 
-}  // namespace
+} // namespace
 
 StepSpec step_spec(const std::string& type) {
     StepSpec spec;
@@ -173,6 +175,25 @@ bool parse_step(const YAML::Node& node, Step* step, std::string* error) {
                 return fail("'position' must be a list of 3 coordinates");
             }
             step->position = node["position"].as<std::vector<double>>();
+        }
+        if (node["orientation"]) {
+            if (!node["orientation"].IsSequence()) {
+                return fail("'orientation' must be a quaternion [x, y, z, w]");
+            }
+            step->orientation = node["orientation"].as<std::vector<double>>();
+        }
+        if (node["frame"]) {
+            if (!node["frame"].IsScalar()) {
+                return fail("'frame' must be a TF frame name");
+            }
+            step->frame = node["frame"].as<std::string>();
+        }
+        if (node["tool_offset"]) {
+            if (!node["tool_offset"].IsScalar()) {
+                return fail("'tool_offset' must be a number");
+            }
+            step->tool_offset     = node["tool_offset"].as<double>();
+            step->has_tool_offset = true;
         }
         if (node["max_drift_deg"]) {
             if (!node["max_drift_deg"].IsScalar()) {

@@ -100,7 +100,6 @@ ArmController::ArmController() {
 
 
 
- 
 /**
  * @brief 生命周期初始化回调，在 configure 之前由控制器管理器调用一次
  *
@@ -177,15 +176,19 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
     // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
     auto_declare<int>("task_dim", 6);
-    // pos_move（只约束末端位置）的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
-    //   tolerance：position-only 的纯位置收敛判据（米），与 6 维「米+弧度」混合范数分开；
+    // pos_move 的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
+    //   tolerance：position-only / position-and-axis 的位置收敛判据（米），
+    //              与 6 维「米+弧度」混合范数分开；
+    //   axis_tolerance_deg：position-and-axis 模式下工具 z 轴的角容差（度）；
+    //              与位置判据分别检查，避免混合范数把两者绑死；
     //   nullspace_weight：零空间「就近」偏好权重，0 = 关闭；
     //   precheck_samples：终点之外再等分采样的中间点数，受实时预算限制（见 arm_fsm.cpp）。
     auto_declare<double>("pos_move_tolerance", 1e-3);
+    auto_declare<double>("pos_move_axis_tolerance_deg", 1.0);
     auto_declare<double>("pos_move_nullspace_weight", 0.005);
     auto_declare<int>("pos_move_precheck_samples", 2);
     // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态，
-    // 以及尚未在真机验证过的 position-only 轨迹。
+    // 以及尚未在真机验证过的位置约束类轨迹（position-only / position-and-axis）。
     auto_declare<bool>("real_mode", false);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
@@ -231,12 +234,12 @@ controller_interface::CallbackReturn ArmController::on_init() {
 
     node->get_parameter("real_mode", real_mode_);
     RCLCPP_INFO(
-        node->get_logger(), "task_dim=%d（%s），real_mode=%s", task_dim,
-        task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿", real_mode_ ? "true" : "false");
+        node->get_logger(), "task_dim=%d（%s），real_mode=%s", task_dim, task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿",
+        real_mode_ ? "true" : "false");
 
     // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
     // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。
-    state_pub_ = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
+    state_pub_   = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
     state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() { publish_current_state(); });
 
     /**
@@ -274,13 +277,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 if (real_mode_ && state_unavailable_on_real(requested)) {
                     // 物理上不成立的状态：拒绝而不是“进去但行为不对”。
                     result.successful = false;
-                    result.reason     = requested + " is unavailable in real mode (MCU has no impedance gains / "
-                                                 "acceleration feedback, and joint6 has no motor)";
+                    result.reason     = requested
+                                  + " is unavailable in real mode (MCU has no impedance gains / "
+                                    "acceleration feedback, and joint6 has no motor)";
                     return result;
                 }
                 fsm_factory->exp_state_name = requested;
-            } else if (name == "joints" || name == "command_interface_prefix" || name == "task_dim"
-                       || name == "real_mode") {
+            } else if (name == "joints" || name == "command_interface_prefix" || name == "task_dim" || name == "real_mode") {
                 // 接口与任务空间维度在 on_init() 后固定，禁止再修改。
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";
@@ -292,8 +295,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
                     result.reason     = name + " size must be less than or equal to joints size";
                     return result;
                 }
-            } else if (
-                name == "admittance_mass" || name == "admittance_damping" || name == "admittance_stiffness") {
+            } else if (name == "admittance_mass" || name == "admittance_damping" || name == "admittance_stiffness") {
                 // 导纳参数最多 6 维；质量必须为正，阻尼/刚度必须非负，且不能为 NaN/Inf。
                 const auto values = param.as_double_array();
                 if (values.size() > 6) {
@@ -397,12 +399,10 @@ controller_interface::CallbackReturn ArmController::on_init() {
                     result.reason     = name + " must be finite and non-negative (0 disables it)";
                     return result;
                 }
-            } else if (name == "measure_end_effector_x_lower_limit"
-                       || name == "measure_end_effector_x_upper_limit"
-                       || name == "measure_end_effector_y_lower_limit"
-                       || name == "measure_end_effector_y_upper_limit"
-                       || name == "measure_end_effector_z_lower_limit"
-                       || name == "measure_end_effector_z_upper_limit") {
+            } else if (
+                name == "measure_end_effector_x_lower_limit" || name == "measure_end_effector_x_upper_limit"
+                || name == "measure_end_effector_y_lower_limit" || name == "measure_end_effector_y_upper_limit"
+                || name == "measure_end_effector_z_lower_limit" || name == "measure_end_effector_z_upper_limit") {
                 // 末端位置上下限允许 ±inf（表示不约束），但不允许 NaN。
                 if (std::isnan(param.as_double())) {
                     result.successful = false;
@@ -628,8 +628,8 @@ int ArmController::first_joint_limit_violation() const {
 
     const Eigen::VectorXd& lower = fsm_factory->model_->lower_joint_limit();
     const Eigen::VectorXd& upper = fsm_factory->model_->upper_joint_limit();
-    if (lower.size() != static_cast<Eigen::Index>(joints_name.size())
-        || upper.size() != static_cast<Eigen::Index>(joints_name.size()) || !lower.allFinite() || !upper.allFinite()) {
+    if (lower.size() != static_cast<Eigen::Index>(joints_name.size()) || upper.size() != static_cast<Eigen::Index>(joints_name.size())
+        || !lower.allFinite() || !upper.allFinite()) {
         // 模型没有提供可用的限位信息时不做判断，交由状态机自身的检查负责。
         return -1;
     }

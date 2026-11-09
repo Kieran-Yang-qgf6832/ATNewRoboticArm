@@ -108,23 +108,33 @@ scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
 | 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
 | 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
 | 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 11 类步骤驱动控制器 |
+| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 12 类步骤驱动控制器 |
 | 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
 
 任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `positions` /
-`position_move` / `joint_limits` / `sequences`。
+`position_move` / `box_move` / `joint_limits` / `sequences`。
 步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_console` /
-`cart_move` / `pos_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
+`cart_move` / `pos_move` / `box_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
 `src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
 加新**任务**只改 YAML。
 
-`pos_move` 用 `positions` 段的基座系绝对目标，把末端移到目标位置而**不约束姿态**：
-`CartTrajCmd.mode = MODE_POSITION_ONLY` 按轨迹下发（`Vector` 仍 6 维，默认 0 保持旧行为），
-控制器在 `TaskMapping` 里显式投影掉 3 个旋转误差/雅可比行，`IKSolver` 改用独立的
-纯位置容差与零空间就近偏好，预检在终点之外再查有限等分中间点（受 2 ms 周期约束）。
-`real_mode: true` 时下发前直接拒绝（实机 5 自由度、未验证）。任务层量测姿态漂移并只告警。
-三个 `pos_move_*` 参数必须 `auto_declare`、只在构造期读取，实际生效值看控制器日志
-`position-only:` 行（C6）。实现细节与仿真实测见 `docs/bugs.md` §9。
+`pos_move` 用 `positions` 段的基座系绝对目标，把末端移到目标位置；默认**不约束姿态**
+（`CartTrajCmd.mode = MODE_POSITION_ONLY`），也可选 `orientation: [x, y, z, w]` 只约束
+link6 的 z 轴方向（`MODE_POSITION_AND_TOOL_AXIS`，绕 z 的滚转自由）。6 维消息契约不变，
+`TaskMapping` 显式投影掉不约束的旋转分量；`IKSolver` 在 5 维模式下改用**位置/工具轴分离**
+判据（`pos_move_tolerance` + `pos_move_axis_tolerance_deg`）与零空间就近偏好，预检在终点
+之外再查有限等分中间点（受 2 ms 周期约束）。`real_mode: true` 时两类位置约束轨迹都在
+下发前直接拒绝（实机 5 自由度、未验证）。纯位置模式量测姿态漂移只告警；工具轴模式把
+z 轴角误差作为硬失败判据。四个 `pos_move_*` 参数必须 `auto_declare`、只在构造期读取，
+实际生效值看控制器日志 `cart constraint:` 行（C6）。实现细节与仿真实测见 `docs/bugs.md` §9。
+
+`box_move` 读取视觉目标面 TF（默认 `target_face`），同时检查 `/target_face` 的 `valid`、
+`child_frame_id` 以及消息/TF 时间戳新鲜度；拿到一帧后**快照**，整条轨迹用固定目标。
+优先下发 5 维目标：link6 原点 = 面心 − `tool_offset` × 面 z（工具尖端落在面心），
+工具 z 与面 z 同向；若控制器预检在**未运动**时拒绝，自动回退到 position-only
+（同一 link6 位置，姿态不约束），回退成功会打 WARN；运动中途失败不回退。
+全局参数在 `tasks.yaml` 的 `box_move` 段。低处箱体（z≈0.18）5D 会超出关节限位，
+演示用 `scene_vision_raised.xml`（箱体/相机 z=0.6）+ `box_pregrasp` 粗定位。
 
 `joint_console` 是唯一**交互式**步骤：用户**逐项**输入（一次一个数）——6 个关节角（度）→
 1 个执行时间（秒，回车取默认），步骤内部循环；输入途中回车取消本组、`exit` 结束、
@@ -261,8 +271,8 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
   检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
   检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 11 条序列只用到
-  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `tool` / `wait` 八类步骤。
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 14 条序列用到
+  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `box_move` / `tool` / `wait` 九类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
   2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。

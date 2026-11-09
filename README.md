@@ -157,7 +157,7 @@ ros2 param set /arm_controller exp_state reset
 任务定义在 `src/tasks/config/tasks.yaml`（参数辨识另有 `src/tasks/config/measure.yaml`）。
 **新增目标点或新任务只需编辑 YAML**；但新增**步骤类型**要改 C++——下面的词汇表是封闭集合。
 
-### 步骤类型（封闭集合，共 11 类）
+### 步骤类型（封闭集合，共 12 类）
 
 | 类型 | 说明 |
 | --- | --- |
@@ -167,7 +167,8 @@ ros2 param set /arm_controller exp_state reset
 | `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
 | `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止 |
 | `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维），严格保持姿态 |
-| `pos_move` | 只把末端移到基座系绝对位置（`to` / `position`），**姿态不参与收敛** |
+| `pos_move` | 把末端移到基座系绝对位置（`to` / `position`）；可选 `orientation` 约束 link6 z 轴方向 |
+| `box_move` | 读取视觉目标面 TF（默认 `target_face`），工具 z 对齐面 z、工具尖端到面心；5D 预检不可达时自动回退到只到位置 |
 | `admittance_move` | 导纳控制下的期望轨迹；同样用 `offset` |
 | `tool` | 末端执行器开关量；`action` 取 `tool` 段定义的语义名 |
 | `teach` | 示教；需 `duration` |
@@ -178,7 +179,7 @@ ros2 param set /arm_controller exp_state reset
 
 `pos_move` 与 `cart_move` 的区别：`cart_move` 用相对 `offset` 且**严格保持起点姿态**；
 `pos_move` 用 `positions` 段的基座系 `[x, y, z]` 绝对目标（或直接给 `position`），
-**姿态不参与 IK 收敛判据**。`CartTrajCmd` 的 `mode` 字段按轨迹下发
+默认**姿态不参与 IK 收敛判据**。`CartTrajCmd` 的 `mode` 字段按轨迹下发
 `MODE_POSITION_ONLY`（默认 `MODE_FULL_POSE=0`，旧发布者行为不变，`Vector` 仍是 6 维）：
 控制器在 `TaskMapping` 里显式投影掉 3 个旋转误差/雅可比行，IK 只解位置，
 并用零空间「就近」偏好抑制姿态乱动；预检覆盖终点加有限等分中间点。
@@ -186,6 +187,20 @@ ros2 param set /arm_controller exp_state reset
 **只告警、不判失败**。`real_mode: true` 时该模式在下发前被拒绝（实机 5 自由度、
 尚未验证）。控制器参数 `pos_move_tolerance` / `pos_move_nullspace_weight` /
 `pos_move_precheck_samples` 在构造阶段读取并打 INFO（C6），实测整定见 `docs/bugs.md` §9。
+
+`pos_move` 还可选 `orientation: [x, y, z, w]`（基座系四元数）：只取它的 z 轴，
+按轨迹下发 `MODE_POSITION_AND_TOOL_AXIS`，即位置 3 维 + link6 z 方向 2 维、
+绕 z 滚转自由；z 轴角误差超过 `pos_move_axis_tolerance_deg`（默认 1°）判失败，
+不再告警全姿态漂移。目标姿态以起点实测姿态为基准、按「起点 z → 目标 z 的最小旋转」
+重建；两者反平行（180°）时直接用给定四元数消歧。`box_move` 复用这条路径。
+
+`box_move` 读取 `base_link -> target_face` 的 TF，同时检查 `/target_face` 的 `valid`、
+`child_frame_id` 与消息/TF 时间戳新鲜度；拿到一帧后**快照**。5D 目标位置 =
+面心 − `tool_offset` × 面 z（工具尖端到面心），工具 z 与面 z 同向。若控制器预检在
+**未运动**时拒绝，自动回退到 position-only（同一 link6 位置、姿态不约束）并打 WARN；
+运动中途失败不回退。全局默认在 `tasks.yaml` 的 `box_move` 段
+（`frame` / `tool_offset` / `target_timeout` / `max_age`），步骤可覆盖 `frame` /
+`tool_offset` / `tolerance`。
 
 `joint_console` 的输入先过 `tasks.yaml` 的 `joint_limits` 段（每关节限位，度）与
 `max_step_deg`（单步最大变化量，相对当前实测角），超限只提示重输、不下发任何指令。
@@ -202,6 +217,9 @@ ros2 param set /arm_controller exp_state reset
 | `pos_move_demo` | 正常 | 只约束位置的绝对目标：从 `ready` 向下 5 cm；实测位置残差 0.0009 m，姿态漂移被量测并告警 |
 | `pos_move_direct` | 正常 | 同上，但直接给 `position` 坐标并覆盖 `max_drift_deg` |
 | `pos_move_near` | **反例，预期失败** | +Z 5 cm：放松姿态仍受连杆长度/关节限位限制，position-only 残余约 0.031 m，仍被下发前拒绝 |
+| `pos_axis_demo` | 正常 | `pos_move` 的 `orientation`：先保持 ready 方向下移 5 cm，再回到 ready 并把工具 z 抬高 15° |
+| `box_move_demo` | 正常 | **抬高视觉场景**：`joint_move` 到 `box_pregrasp` 粗定位，再由 `box_move` 做最后约 10 cm 的视觉 5D 移动（位置残差 0.0015 m、工具轴误差 0.25°） |
+| `box_move_low` | 正常（回退） | **低处视觉场景**：5D 预检拒绝后自动回退 position-only；实测残差约 1.25 cm（演示容差 2 cm） |
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
@@ -328,6 +346,32 @@ ros2 run view check_sim_vision
 - 实机检测仍用 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离；
   该 launch 的默认参数未改动。
 
+`box_move` 的 5D 演示需要把箱体和相机一起抬高：`scene_vision_raised.xml` 是
+`scene_vision.xml` 的抬高变体（箱体/相机 z=0.6），`view_sim.launch.py` 增加
+`scene_path` 参数。**仿真和相机 TF 必须指向同一个场景文件**，否则 TF 与渲染不一致：
+
+```bash
+# 抬高场景：5D box_move 演示（box_move_demo）
+ros2 launch launch_pack arm_controller_test_sim.launch.py headless:=true \
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision_raised.xml
+ros2 launch view view_sim.launch.py display:=false \
+    scene_path:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision_raised.xml
+ros2 run tasks task_runner --ros-args -p task_sequence:="box_move_demo" \
+    -p exit_when_idle:=true -p use_sim_time:=true
+
+# 低处场景：position-only 回退验证（box_move_low）
+ros2 launch launch_pack arm_controller_test_sim.launch.py headless:=true \
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+ros2 launch view view_sim.launch.py display:=false
+ros2 run tasks task_runner --ros-args -p task_sequence:="box_move_low" \
+    -p exit_when_idle:=true -p use_sim_time:=true
+```
+
+> `box_move` 会检查 `TargetFace.header.stamp` 与 TF 的新鲜度，仿真里 `task_runner`
+> **必须带 `use_sim_time:=true`**；否则任务层用墙钟比较仿真时间戳，会一直超时。
+> 低处箱体已接近该臂实际可达边界：5D 会超关节限位，回退 position-only 后残差约
+> 1.25 cm，`box_move_low` 用 2 cm 演示容差；干净演示请用抬高场景。
+
 ### 关于 `/arm_robot_description`
 
 `controller_manager` 是从**话题**（不是参数）取 URDF 的，而同 ROS domain 内任何其他
@@ -343,7 +387,7 @@ ros2 run view check_sim_vision
 | 工具 | 用途 |
 | --- | --- |
 | `fk_dump <urdf> <q1> <q2> <q3> <q4> <q5> <q6>` | 打印指定关节角下的平移、四元数、旋转矩阵与任务空间 6 维向量 |
-| `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
+| `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解；`--axis` 为位置 + 工具 z 的 5 维模式，`--position` 为只约束位置的 3 维模式；报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
 | `ik_benchmark` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
 | `arm_real_joint_count_test` | 不连硬件校验实机接口的关节数处理（5/6/7 关节） |
 

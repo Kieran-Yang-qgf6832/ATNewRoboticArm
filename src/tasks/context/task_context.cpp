@@ -104,6 +104,10 @@ TaskContext::TaskContext(const rclcpp::Node::SharedPtr& node, Options options)
         "joint_states", rclcpp::SensorDataQoS(),
         [this](const sensor_msgs::msg::JointState::SharedPtr msg) { on_joint_state(msg); });
 
+    target_face_sub_ = node_->create_subscription<robot_msgs::msg::TargetFace>(
+        options_.target_face_topic, rclcpp::QoS(10),
+        [this](const robot_msgs::msg::TargetFace::SharedPtr msg) { on_target_face(msg); });
+
     cart_traj_pub_  = node_->create_publisher<robot_msgs::msg::CartTrajCmd>(options_.cart_traj_topic, 10);
     joint_traj_pub_ = node_->create_publisher<robot_msgs::msg::JointTrajCmd>(options_.joint_traj_topic, 10);
     admittance_pub_ = node_->create_publisher<robot_msgs::msg::AdmittanceCmd>(options_.admittance_topic, 10);
@@ -214,50 +218,61 @@ bool TaskContext::wait_for_joint_states(double timeout_sec) {
 }
 
 bool TaskContext::end_effector_pose(std::vector<double>* pose) const {
-    if (pose == nullptr) {
+    return lookup_frame_pose(options_.ee_frame, pose, nullptr, nullptr);
+}
+
+bool TaskContext::end_effector_quaternion(std::vector<double>* quaternion) const {
+    return lookup_frame_pose(options_.ee_frame, nullptr, quaternion, nullptr);
+}
+
+bool TaskContext::lookup_frame_pose(const std::string& frame, std::vector<double>* pose,
+                                    std::vector<double>* quaternion, rclcpp::Time* stamp) const {
+    if (pose == nullptr && quaternion == nullptr && stamp == nullptr) {
         return false;
     }
 
     try {
-        const auto transform = tf_buffer_->lookupTransform(options_.base_frame, options_.ee_frame, tf2::TimePointZero);
-        pose->assign(6, 0.0);
-        (*pose)[0] = transform.transform.translation.x;
-        (*pose)[1] = transform.transform.translation.y;
-        (*pose)[2] = transform.transform.translation.z;
+        const auto transform = tf_buffer_->lookupTransform(options_.base_frame, frame, tf2::TimePointZero);
 
-        std::vector<double> rotation_vector(3, 0.0);
-        quaternion_to_rotation_vector(
-            transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z,
-            transform.transform.rotation.w, &rotation_vector);
-        (*pose)[3] = rotation_vector[0];
-        (*pose)[4] = rotation_vector[1];
-        (*pose)[5] = rotation_vector[2];
+        if (pose != nullptr) {
+            pose->assign(6, 0.0);
+            (*pose)[0] = transform.transform.translation.x;
+            (*pose)[1] = transform.transform.translation.y;
+            (*pose)[2] = transform.transform.translation.z;
+
+            std::vector<double> rotation_vector(3, 0.0);
+            quaternion_to_rotation_vector(
+                transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z,
+                transform.transform.rotation.w, &rotation_vector);
+            (*pose)[3] = rotation_vector[0];
+            (*pose)[4] = rotation_vector[1];
+            (*pose)[5] = rotation_vector[2];
+        }
+
+        if (quaternion != nullptr) {
+            quaternion->assign(
+                {transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z,
+                 transform.transform.rotation.w});
+        }
+
+        if (stamp != nullptr) {
+            *stamp = rclcpp::Time(transform.header.stamp, node_->get_clock()->get_clock_type());
+        }
         return true;
     } catch (const tf2::TransformException& error) {
         RCLCPP_WARN_THROTTLE(
             node_->get_logger(), *node_->get_clock(), 2000, "TF %s -> %s lookup failed: %s",
-            options_.base_frame.c_str(), options_.ee_frame.c_str(), error.what());
+            options_.base_frame.c_str(), frame.c_str(), error.what());
         return false;
     }
 }
 
-bool TaskContext::end_effector_quaternion(std::vector<double>* quaternion) const {
-    if (quaternion == nullptr) {
+bool TaskContext::latest_target_face(robot_msgs::msg::TargetFace* msg) const {
+    if (msg == nullptr || !have_target_face_) {
         return false;
     }
-
-    try {
-        const auto transform = tf_buffer_->lookupTransform(options_.base_frame, options_.ee_frame, tf2::TimePointZero);
-        quaternion->assign(
-            {transform.transform.rotation.x, transform.transform.rotation.y, transform.transform.rotation.z,
-             transform.transform.rotation.w});
-        return true;
-    } catch (const tf2::TransformException& error) {
-        RCLCPP_WARN_THROTTLE(
-            node_->get_logger(), *node_->get_clock(), 2000, "TF %s -> %s lookup failed: %s",
-            options_.base_frame.c_str(), options_.ee_frame.c_str(), error.what());
-        return false;
-    }
+    *msg = latest_target_face_;
+    return true;
 }
 
 bool TaskContext::publish_cart_traj(
@@ -321,4 +336,12 @@ void TaskContext::on_joint_state(const sensor_msgs::msg::JointState::SharedPtr m
 
     joint_positions_   = std::move(positions);
     have_joint_states_ = true;
+}
+
+void TaskContext::on_target_face(const robot_msgs::msg::TargetFace::SharedPtr msg) {
+    if (msg == nullptr) {
+        return;
+    }
+    latest_target_face_ = *msg;
+    have_target_face_   = true;
 }

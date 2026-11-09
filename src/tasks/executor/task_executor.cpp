@@ -18,8 +18,12 @@
 #include <utility>
 #include <vector>
 
-#include <yaml-cpp/yaml.h>
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
+#include <yaml-cpp/yaml.h>
+
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Vector3.h>
 
 namespace {
 
@@ -44,8 +48,8 @@ std::string join(const std::vector<std::string>& values) {
 
 /// 定位用的前缀：序列名 + 步骤序号 + YAML 行号。
 std::string locate(const std::string& sequence, std::size_t index, const Step& step) {
-    return "sequence '" + sequence + "' step #" + std::to_string(index + 1) + " (line "
-           + std::to_string(step.yaml_line) + ", type '" + step.type + "')";
+    return "sequence '" + sequence + "' step #" + std::to_string(index + 1) + " (line " + std::to_string(step.yaml_line) + ", type '"
+         + step.type + "')";
 }
 
 /// 把关节角/位姿转成轨迹消息需要的 float 向量。
@@ -73,8 +77,7 @@ std::vector<float> to_float(const std::vector<double>& values) {
  * @param off_target 输出：是否为「到位但超容差」
  * @return true 看起来正常执行了
  */
-bool motion_looks_executed(
-    double residual, double commanded, double moved, double tolerance, bool* off_target) {
+bool motion_looks_executed(double residual, double commanded, double moved, double tolerance, bool* off_target) {
     if (residual <= tolerance) {
         *off_target = false;
         return true;
@@ -102,6 +105,9 @@ constexpr double kPi = 3.14159265358979323846;
 
 /// 角度换算系数：度 -> 弧度。
 constexpr double kDegToRad = kPi / 180.0;
+
+/// 工具轴对齐时视为「同一方向」的阈值（弧度）。
+constexpr double kAxisAlignEpsilon = 1e-6;
 
 /**
  * @brief 定长小数格式化成文本（仅用于日志与提示）
@@ -132,6 +138,81 @@ double quaternion_angle_deg(const std::vector<double>& a, const std::vector<doub
     }
     const double dot = std::abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
     return 2.0 * std::acos(std::min(1.0, dot)) / kDegToRad;
+}
+
+/// @return link6 的 z 轴方向（基座系）；调用方保证四元数已归一化。
+tf2::Vector3 tool_axis_from_quaternion(const tf2::Quaternion& orientation) {
+    tf2::Vector3 axis = tf2::Matrix3x3(orientation) * tf2::Vector3(0.0, 0.0, 1.0);
+    axis.normalize();
+    return axis;
+}
+
+/**
+ * @brief 四元数 -> 旋转向量（axis * angle）
+ *
+ * 先把四元数统一到 w >= 0 的等价形式，保证转角落在 [0, pi]，
+ * 与控制器 Default6DofTaskSpaceMapping 的 Eigen::AngleAxisd 语义一致。
+ */
+std::vector<double> quaternion_to_rotation_vector(const tf2::Quaternion& orientation) {
+    double x = orientation.x();
+    double y = orientation.y();
+    double z = orientation.z();
+    double w = orientation.w();
+    if (w < 0.0) {
+        x = -x;
+        y = -y;
+        z = -z;
+        w = -w;
+    }
+    w = std::clamp(w, -1.0, 1.0);
+
+    const double half_angle = std::acos(w);
+    const double sin_half   = std::sin(half_angle);
+    if (std::abs(sin_half) < 1e-12) {
+        return {0.0, 0.0, 0.0};
+    }
+    const double scale = 2.0 * half_angle / sin_half;
+    return {scale * x, scale * y, scale * z};
+}
+
+/**
+ * @brief 只取目标姿态的 z 轴，构造「起点 z -> 目标 z 的最小旋转」目标姿态
+ *
+ * 起点姿态 R_s、用户给定姿态 R_g。取 R_g 的 z 轴作为目标方向，构造
+ * R_t = R_align · R_s，其中 R_align 把 R_s 的 z 轴转到目标方向，滚转沿用起点。
+ * 两者反平行（180°）时最小旋转的轴不唯一，此时直接用 R_g 消歧。
+ *
+ * @param start_quaternion  起点姿态 [x, y, z, w]（实测，已归一化）
+ * @param target_quaternion 用户给定姿态 [x, y, z, w]（已归一化）
+ * @return 目标姿态的旋转向量；输入非法时返回空
+ */
+std::vector<double> build_tool_axis_target(const std::vector<double>& start_quaternion, const std::vector<double>& target_quaternion) {
+    if (start_quaternion.size() != 4 || target_quaternion.size() != 4) {
+        return {};
+    }
+
+    tf2::Quaternion q_start(start_quaternion[0], start_quaternion[1], start_quaternion[2], start_quaternion[3]);
+    tf2::Quaternion q_given(target_quaternion[0], target_quaternion[1], target_quaternion[2], target_quaternion[3]);
+    q_start.normalize();
+    q_given.normalize();
+
+    const tf2::Vector3 z_start  = tool_axis_from_quaternion(q_start);
+    const tf2::Vector3 z_target = tool_axis_from_quaternion(q_given);
+    const double dot            = std::clamp(z_start.dot(z_target), -1.0, 1.0);
+    const double angle          = std::acos(dot);
+
+    tf2::Quaternion q_target;
+    if (angle < kAxisAlignEpsilon) {
+        q_target = q_start;
+    } else if (kPi - angle < kAxisAlignEpsilon) {
+        q_target = q_given;
+    } else {
+        tf2::Vector3 axis = z_start.cross(z_target);
+        axis.normalize();
+        q_target = tf2::Quaternion(axis, angle) * q_start;
+        q_target.normalize();
+    }
+    return quaternion_to_rotation_vector(q_target);
 }
 
 /**
@@ -174,7 +255,9 @@ public:
     }
 
     /// @return 读者线程是否已因 EOF 结束（终端被关闭或输入被重定向到空文件）
-    bool eof() const { return eof_.load(); }
+    bool eof() const {
+        return eof_.load();
+    }
 
 private:
     ConsoleQueue() {
@@ -190,7 +273,7 @@ private:
         }).detach();
     }
 
-    mutable std::mutex mutex_;  ///< 保护 lines_
+    mutable std::mutex mutex_;      ///< 保护 lines_
     std::deque<std::string> lines_; ///< 待消费的整行
     std::atomic<bool> eof_{false};  ///< 读者线程是否已结束
 };
@@ -230,10 +313,9 @@ bool parse_numbers(const std::string& text, std::vector<double>* values) {
     return !values->empty() && stream.eof();
 }
 
-}  // namespace
+} // namespace
 
-TaskExecutor::TaskExecutor(
-    const rclcpp::Node::SharedPtr& node, TaskContext* ctx, std::function<void(const std::string&)> status_sink)
+TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx, std::function<void(const std::string&)> status_sink)
     : node_(node)
     , ctx_(ctx)
     , status_sink_(std::move(status_sink)) {
@@ -253,7 +335,7 @@ TaskExecutor::TaskExecutor(
         // 末端执行器开关量出口。话题名与缺陷文档中约定的 /tool_cmd 一致；
         // 用 transient_local 让晚启动的订阅者（例如实机侧硬件接口）也能拿到最近一次状态。
         const std::string tool_topic = node_->declare_parameter<std::string>("tool_cmd_topic", "tool_cmd");
-        tool_pub_ = node_->create_publisher<std_msgs::msg::Bool>(tool_topic, rclcpp::QoS(10).transient_local());
+        tool_pub_                    = node_->create_publisher<std_msgs::msg::Bool>(tool_topic, rclcpp::QoS(10).transient_local());
     }
 }
 
@@ -289,9 +371,9 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
     positions_.clear();
     sequences_.clear();
     default_max_drift_deg_ = 10.0;
-    tool_name_ = "tool";
-    tool_on_   = "on";
-    tool_off_  = "off";
+    tool_name_             = "tool";
+    tool_on_               = "on";
+    tool_off_              = "off";
 
     try {
         // ---- tool：当前末端执行器的语义名（只影响 tool 步骤的 action 与日志）----
@@ -339,8 +421,7 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
                 }
                 const auto values = entry.second.as<std::vector<double>>();
                 if (values.size() != 3) {
-                    return fail(
-                        "position '" + name + "' needs 3 coordinates, got " + std::to_string(values.size()));
+                    return fail("position '" + name + "' needs 3 coordinates, got " + std::to_string(values.size()));
                 }
                 for (const double value : values) {
                     if (!std::isfinite(value)) {
@@ -351,7 +432,7 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
             }
         }
 
-        // ---- position_move：pos_move 的默认姿态漂移告警阈值（度）----
+        // ---- position_move：pos_move 的默认姿态漂移告警阈值与工具轴角容差 ----
         if (root["position_move"]) {
             const YAML::Node& position_move = root["position_move"];
             if (!position_move.IsMap()) {
@@ -367,6 +448,65 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
                 }
                 default_max_drift_deg_ = value;
             }
+            // 必须与控制器 pos_move_axis_tolerance_deg 保持一致：控制器用它做 IK 收敛，
+            // 任务层用它做最终验收；一侧严一侧宽会出现无法解释的失败。
+            if (position_move["axis_tolerance_deg"]) {
+                if (!position_move["axis_tolerance_deg"].IsScalar()) {
+                    return fail("'position_move.axis_tolerance_deg' must be a number");
+                }
+                const double value = position_move["axis_tolerance_deg"].as<double>();
+                if (!(value > 0.0)) {
+                    return fail("'position_move.axis_tolerance_deg' must be positive");
+                }
+                default_axis_tolerance_deg_ = value;
+            }
+        }
+
+        // ---- box_move：视觉目标面移动的全局默认 ----
+        if (root["box_move"]) {
+            const YAML::Node& box_move = root["box_move"];
+            if (!box_move.IsMap()) {
+                return fail("'box_move' must be a mapping");
+            }
+            if (box_move["frame"]) {
+                if (!box_move["frame"].IsScalar()) {
+                    return fail("'box_move.frame' must be a frame name");
+                }
+                box_frame_ = box_move["frame"].as<std::string>();
+                if (box_frame_.empty()) {
+                    return fail("'box_move.frame' must not be empty");
+                }
+            }
+            if (box_move["tool_offset"]) {
+                if (!box_move["tool_offset"].IsScalar()) {
+                    return fail("'box_move.tool_offset' must be a number");
+                }
+                const double value = box_move["tool_offset"].as<double>();
+                if (!std::isfinite(value) || value < 0.0) {
+                    return fail("'box_move.tool_offset' must be a finite non-negative number");
+                }
+                box_tool_offset_ = value;
+            }
+            if (box_move["target_timeout"]) {
+                if (!box_move["target_timeout"].IsScalar()) {
+                    return fail("'box_move.target_timeout' must be a number");
+                }
+                const double value = box_move["target_timeout"].as<double>();
+                if (!(value > 0.0)) {
+                    return fail("'box_move.target_timeout' must be positive");
+                }
+                box_target_timeout_ = value;
+            }
+            if (box_move["max_age"]) {
+                if (!box_move["max_age"].IsScalar()) {
+                    return fail("'box_move.max_age' must be a number");
+                }
+                const double value = box_move["max_age"].as<double>();
+                if (!(value > 0.0)) {
+                    return fail("'box_move.max_age' must be positive");
+                }
+                box_max_age_ = value;
+            }
         }
 
         // ---- joint_limits：joint_console 的输入门禁（整段可省略 = 不检查）----
@@ -374,7 +514,7 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
         // 控制器 joint_traj 只校验点数与维度，不查关节限位：手滑把 30 输成 300 会真的
         // 整条下发。这里在任务层先挡一道，超限只提示重输，不影响序列状态。
         const std::size_t joint_count = ctx_->options().joints.size();
-        console_max_step_ = 0.0;
+        console_max_step_             = 0.0;
         joint_min_.assign(joint_count, -std::numeric_limits<double>::infinity());
         joint_max_.assign(joint_count, std::numeric_limits<double>::infinity());
 
@@ -404,13 +544,12 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
                 }
                 for (const auto& joint_entry : entry.second) {
                     const std::string joint_name = joint_entry.first.as<std::string>();
-                    const auto it = std::find(ctx_->options().joints.begin(), ctx_->options().joints.end(), joint_name);
+                    const auto it                = std::find(ctx_->options().joints.begin(), ctx_->options().joints.end(), joint_name);
                     if (it == ctx_->options().joints.end()) {
                         return fail(
-                            "'joint_limits' refers to unknown joint '" + joint_name + "'; known joints: "
-                            + join(ctx_->options().joints));
+                            "'joint_limits' refers to unknown joint '" + joint_name + "'; known joints: " + join(ctx_->options().joints));
                     }
-                    const auto index = static_cast<std::size_t>(std::distance(ctx_->options().joints.begin(), it));
+                    const auto index        = static_cast<std::size_t>(std::distance(ctx_->options().joints.begin(), it));
                     const YAML::Node& range = joint_entry.second;
                     if (!range.IsMap() || !range["min"] || !range["max"]) {
                         return fail("joint limit '" + joint_name + "' must be a mapping with 'min' and 'max'");
@@ -464,8 +603,8 @@ bool TaskExecutor::load_config(const std::string& path, std::string* error) {
     }
 
     RCLCPP_INFO(
-        node_->get_logger(), "loaded task config '%s': %zu point(s), %zu position(s), %zu sequence(s): %s",
-        path.c_str(), points_.size(), positions_.size(), sequences_.size(), join(sequence_names()).c_str());
+        node_->get_logger(), "loaded task config '%s': %zu point(s), %zu position(s), %zu sequence(s): %s", path.c_str(), points_.size(),
+        positions_.size(), sequences_.size(), join(sequence_names()).c_str());
     return true;
 }
 
@@ -484,13 +623,16 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     const std::size_t joint_count = ctx_->options().joints.size();
 
     // 字段与类型必须匹配：写错字段名比写错值更难发现，这里直接拒绝。
-    const bool uses_target = !step->target.empty();
-    const bool uses_to     = !step->to.empty();
-    const bool uses_offset = !step->offset.empty();
-    const bool uses_action = !step->action.empty();
+    const bool uses_target      = !step->target.empty();
+    const bool uses_to          = !step->to.empty();
+    const bool uses_offset      = !step->offset.empty();
+    const bool uses_action      = !step->action.empty();
+    const bool uses_orientation = !step->orientation.empty();
+    const bool uses_frame       = !step->frame.empty();
+    const bool uses_tool_offset = step->has_tool_offset;
 
     if (step->type == "joint_move") {
-        if (uses_offset || uses_action) {
+        if (uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
             return fail("joint_move accepts only 'to' or 'target'");
         }
         if (uses_to) {
@@ -509,9 +651,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
             return fail("joint_move requires either 'to' (a point name) or 'target' (joint values)");
         }
         if (step->target.size() != joint_count) {
-            return fail(
-                "joint_move needs " + std::to_string(joint_count) + " joint values, got "
-                + std::to_string(step->target.size()));
+            return fail("joint_move needs " + std::to_string(joint_count) + " joint values, got " + std::to_string(step->target.size()));
         }
         for (const double value : step->target) {
             if (!std::isfinite(value)) {
@@ -532,8 +672,8 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         if (!uses_to && !uses_position) {
             return fail("pos_move requires either 'to' (a position name) or 'position' ([x, y, z])");
         }
-        if (uses_offset || uses_target || uses_action) {
-            return fail("pos_move accepts only 'to' / 'position' / 'max_drift_deg'");
+        if (uses_offset || uses_target || uses_action || uses_frame || uses_tool_offset) {
+            return fail("pos_move accepts only 'to' / 'position' / 'orientation' / 'max_drift_deg'");
         }
         if (uses_to) {
             const auto point = positions_.find(step->to);
@@ -555,25 +695,47 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
                 return fail("pos_move position contains a non-finite value");
             }
         }
+        if (uses_orientation) {
+            if (step->orientation.size() != 4) {
+                return fail("pos_move 'orientation' needs 4 values [x, y, z, w], got " + std::to_string(step->orientation.size()));
+            }
+            double norm_squared = 0.0;
+            for (const double value : step->orientation) {
+                if (!std::isfinite(value)) {
+                    return fail("pos_move orientation contains a non-finite value");
+                }
+                norm_squared += value * value;
+            }
+            if (!(norm_squared > 1e-12)) {
+                return fail("pos_move orientation must be a non-zero quaternion");
+            }
+            const double inverse_norm = 1.0 / std::sqrt(norm_squared);
+            for (double& value : step->orientation) {
+                value *= inverse_norm;
+            }
+            // 绕 z 的滚转被放开，max_drift_deg 在这个模式下没有意义；写了就明确拒绝，
+            // 避免“配置了却没生效”的静默失败（docs/bugs.md C6 的教训）。
+            if (step->max_drift_deg > 0.0) {
+                return fail("pos_move with 'orientation' does not use 'max_drift_deg' (roll about the tool z axis is free)");
+            }
+        } else if (step->max_drift_deg <= 0.0) {
+            step->max_drift_deg = default_max_drift_deg_;
+        }
         if (!(step->tolerance > 0.0)) {
             step->tolerance = kDefaultCartTolerance;
-        }
-        if (step->max_drift_deg <= 0.0) {
-            step->max_drift_deg = default_max_drift_deg_;
         }
         return true;
     }
 
     if (step->type == "cart_move" || step->type == "admittance_move") {
-        if (uses_to || uses_target || uses_action) {
+        if (uses_to || uses_target || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
             return fail(step->type + " accepts only 'offset'");
         }
         if (!uses_offset) {
             return fail(step->type + " requires an 'offset' (relative end-effector displacement)");
         }
         if (step->offset.size() != 3) {
-            return fail(
-                step->type + " needs a 3-element 'offset', got " + std::to_string(step->offset.size()));
+            return fail(step->type + " needs a 3-element 'offset', got " + std::to_string(step->offset.size()));
         }
         for (const double value : step->offset) {
             if (!std::isfinite(value)) {
@@ -587,22 +749,20 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     if (step->type == "tool") {
-        if (uses_to || uses_target || uses_offset) {
+        if (uses_to || uses_target || uses_offset || uses_orientation || uses_frame || uses_tool_offset) {
             return fail("tool accepts only 'action'");
         }
         if (!uses_action) {
             return fail("tool requires an 'action'");
         }
         if (!tool_action_is_on(step->action) && !tool_action_is_off(step->action)) {
-            return fail(
-                "tool action '" + step->action + "' is neither '" + tool_on_ + "'/'on' nor '" + tool_off_
-                + "'/'off'");
+            return fail("tool action '" + step->action + "' is neither '" + tool_on_ + "'/'on' nor '" + tool_off_ + "'/'off'");
         }
         return true;
     }
 
     if (step->type == "joint_console") {
-        if (uses_to || uses_target || uses_offset || uses_action) {
+        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
             return fail("joint_console accepts only 'duration' (the default motion time) and 'tolerance'");
         }
         // duration 是缺省执行时间，可省略；写了就必须为正，0 表示「用节点参数」。
@@ -615,9 +775,30 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         return true;
     }
 
+    if (step->type == "box_move") {
+        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || !step->position.empty()
+            || step->max_drift_deg > 0.0) {
+            return fail("box_move accepts only 'duration' / 'tolerance' / 'frame' / 'tool_offset'");
+        }
+        if (step->frame.empty()) {
+            step->frame = box_frame_;
+        }
+        if (step->has_tool_offset) {
+            if (!std::isfinite(step->tool_offset) || step->tool_offset < 0.0) {
+                return fail("box_move 'tool_offset' must be a finite non-negative number");
+            }
+        } else {
+            step->tool_offset = box_tool_offset_;
+        }
+        if (!(step->tolerance > 0.0)) {
+            step->tolerance = kDefaultCartTolerance;
+        }
+        return true;
+    }
+
     // wait / idel / reset / teach / measure 不接受任何额外字段。
-    if (uses_to || uses_target || uses_offset || uses_action || !step->position.empty()
-        || step->max_drift_deg > 0.0) {
+    if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset
+        || !step->position.empty() || step->max_drift_deg > 0.0) {
         return fail(step->type + " accepts no fields other than 'duration' and 'tolerance'");
     }
     return true;
@@ -645,7 +826,7 @@ bool TaskExecutor::wait_for_idel(const std::string& context, std::string* error)
         if (std::chrono::steady_clock::now() >= deadline) {
             if (error != nullptr) {
                 *error = context + " did not reach '" + kIdleState + "' within " + std::to_string(step_timeout_)
-                         + " s (current state: " + (state.empty() ? "<unknown>" : state) + ")";
+                       + " s (current state: " + (state.empty() ? "<unknown>" : state) + ")";
             }
             return false;
         }
@@ -687,7 +868,7 @@ bool TaskExecutor::wait_for_state(const std::string& expected, std::string* erro
         if (std::chrono::steady_clock::now() >= deadline) {
             if (error != nullptr) {
                 *error = "arm_controller did not enter '" + expected + "' within " + std::to_string(step_timeout_)
-                         + " s (current state: " + (state.empty() ? "<unknown>" : state) + ")";
+                       + " s (current state: " + (state.empty() ? "<unknown>" : state) + ")";
             }
             return false;
         }
@@ -745,9 +926,9 @@ bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
 
     if (ctx_->have_joint_states() && ctx_->joint_positions().size() == step.target.size()) {
         const std::vector<double>& settled = ctx_->joint_positions();
-        double residual = 0.0;
-        double commanded = 0.0;
-        double moved = 0.0;
+        double residual                    = 0.0;
+        double commanded                   = 0.0;
+        double moved                       = 0.0;
         for (std::size_t i = 0; i < settled.size(); ++i) {
             residual  = std::max(residual, std::abs(settled[i] - step.target[i]));
             commanded = std::max(commanded, std::abs(step.target[i] - start[i]));
@@ -757,13 +938,13 @@ bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
         bool off_target = false;
         if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
             return fail(
-                "joint trajectory appears to have been ignored: moved " + std::to_string(moved)
-                + " rad of the commanded " + std::to_string(commanded) + " rad");
+                "joint trajectory appears to have been ignored: moved " + std::to_string(moved) + " rad of the commanded "
+                + std::to_string(commanded) + " rad");
         }
         if (off_target) {
             RCLCPP_WARN(
-                node_->get_logger(), "joint trajectory finished with a residual joint error of %.4f rad (tolerance %.4f rad)",
-                residual, step.tolerance);
+                node_->get_logger(), "joint trajectory finished with a residual joint error of %.4f rad (tolerance %.4f rad)", residual,
+                step.tolerance);
         } else {
             RCLCPP_INFO(node_->get_logger(), "joint trajectory finished, max joint error %.4f rad", residual);
         }
@@ -862,16 +1043,14 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
     };
 
     while (rclcpp::ok()) {
-        RCLCPP_INFO(
-            node_->get_logger(), "joint_console> 开始输入：逐项敲 %zu 个关节角（度），再敲执行时间（秒）", joint_count);
+        RCLCPP_INFO(node_->get_logger(), "joint_console> 开始输入：逐项敲 %zu 个关节角（度），再敲执行时间（秒）", joint_count);
 
         // 1. 逐个关节输入角度：一次只收一个数，避免行内看错第几列，也能逐项校验限位。
         std::vector<double> target(joint_count, 0.0);
         bool cancelled = false;
         bool quit      = false;
         for (std::size_t i = 0; i < joint_count && !cancelled && !quit;) {
-            RCLCPP_INFO(
-                node_->get_logger(), "  [%zu/%zu] %s 角度 (deg)，回车取消本组: ", i + 1, joint_count, joints[i].c_str());
+            RCLCPP_INFO(node_->get_logger(), "  [%zu/%zu] %s 角度 (deg)，回车取消本组: ", i + 1, joint_count, joints[i].c_str());
             std::string line;
             if (!next_line(&line)) {
                 RCLCPP_INFO(node_->get_logger(), "joint_console: 终端输入已关闭，结束步骤");
@@ -900,8 +1079,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             }
             if (values.size() != 1) {
                 RCLCPP_WARN(
-                    node_->get_logger(), "joint_console: 一次只输入一个数，收到 %zu 个；请重输 %s", values.size(),
-                    joints[i].c_str());
+                    node_->get_logger(), "joint_console: 一次只输入一个数，收到 %zu 个；请重输 %s", values.size(), joints[i].c_str());
                 continue;
             }
             if (!std::isfinite(values.front())) {
@@ -913,8 +1091,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             if (radians < joint_min_[i] || radians > joint_max_[i]) {
                 RCLCPP_WARN(
                     node_->get_logger(), "joint_console: %s = %s deg 超出限位 [%s, %s] deg，请重输", joints[i].c_str(),
-                    format_number(values.front(), 1).c_str(), format_deg(joint_min_[i]).c_str(),
-                    format_deg(joint_max_[i]).c_str());
+                    format_number(values.front(), 1).c_str(), format_deg(joint_min_[i]).c_str(), format_deg(joint_max_[i]).c_str());
                 continue;
             }
 
@@ -955,8 +1132,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
                 continue;
             }
             if (command.empty()) {
-                RCLCPP_INFO(
-                    node_->get_logger(), "joint_console: 执行时间用默认值 %s s", format_number(duration, 2).c_str());
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 执行时间用默认值 %s s", format_number(duration, 2).c_str());
                 duration_ok = true;
                 break;
             }
@@ -971,9 +1147,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
                 continue;
             }
             if (!(values.front() > 0.0) || !std::isfinite(values.front())) {
-                RCLCPP_WARN(
-                    node_->get_logger(), "joint_console: 执行时间必须为正数，收到 %s",
-                    format_number(values.front(), 3).c_str());
+                RCLCPP_WARN(node_->get_logger(), "joint_console: 执行时间必须为正数，收到 %s", format_number(values.front(), 3).c_str());
                 continue;
             }
             duration    = values.front();
@@ -994,9 +1168,8 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
                 const double delta = std::abs(target[i] - before[i]);
                 if (delta > console_max_step_) {
                     RCLCPP_WARN(
-                        node_->get_logger(), "joint_console: %s 单步变化 %s deg，超过上限 %s deg；本次输入作废",
-                        joints[i].c_str(), format_number(delta / kDegToRad, 1).c_str(),
-                        format_deg(console_max_step_).c_str());
+                        node_->get_logger(), "joint_console: %s 单步变化 %s deg，超过上限 %s deg；本次输入作废", joints[i].c_str(),
+                        format_number(delta / kDegToRad, 1).c_str(), format_deg(console_max_step_).c_str());
                     too_far = true;
                     break;
                 }
@@ -1010,8 +1183,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
         std::string echo;
         for (std::size_t i = 0; i < joint_count; ++i) {
             echo += (i == 0 ? "" : ", ");
-            echo += joints[i] + "=" + format_number(target[i] / kDegToRad, 1) + "deg/" + format_number(target[i], 4)
-                    + "rad";
+            echo += joints[i] + "=" + format_number(target[i] / kDegToRad, 1) + "deg/" + format_number(target[i], 4) + "rad";
         }
         RCLCPP_INFO(node_->get_logger(), "joint_console: 目标 %s", echo.c_str());
         RCLCPP_INFO(node_->get_logger(), "joint_console: 执行时间 %.2f s", duration);
@@ -1095,12 +1267,11 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             bool off_target = false;
             if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
                 return fail(
-                    "joint trajectory appears to have been ignored: moved " + std::to_string(moved)
-                    + " rad of the commanded " + std::to_string(commanded) + " rad");
+                    "joint trajectory appears to have been ignored: moved " + std::to_string(moved) + " rad of the commanded "
+                    + std::to_string(commanded) + " rad");
             }
             if (off_target) {
-                RCLCPP_WARN(
-                    node_->get_logger(), "joint_console: 到位残差 %.4f rad（容差 %.4f rad）", residual, step.tolerance);
+                RCLCPP_WARN(node_->get_logger(), "joint_console: 到位残差 %.4f rad（容差 %.4f rad）", residual, step.tolerance);
             } else {
                 RCLCPP_INFO(node_->get_logger(), "joint_console: 到位，最大关节误差 %.4f rad", residual);
             }
@@ -1146,8 +1317,8 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
         return fail("failed to publish the task space trajectory");
     }
     RCLCPP_INFO(
-        node_->get_logger(), "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s", state_name.c_str(),
-        start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2], step.duration);
+        node_->get_logger(), "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s", state_name.c_str(), start_pose[0],
+        start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2], step.duration);
 
     sleep_with_spin(node_, step.duration);
 
@@ -1163,9 +1334,9 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
 
     std::vector<double> current_pose;
     if (ctx_->end_effector_pose(&current_pose)) {
-        double residual = 0.0;
+        double residual  = 0.0;
         double commanded = 0.0;
-        double moved = 0.0;
+        double moved     = 0.0;
         for (std::size_t i = 0; i < 3; ++i) {
             residual  = std::max(residual, std::abs(current_pose[i] - target_pose[i]));
             commanded = std::max(commanded, std::abs(target_pose[i] - start_pose[i]));
@@ -1175,13 +1346,13 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
         bool off_target = false;
         if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
             return fail(
-                "task space trajectory appears to have been ignored: moved " + std::to_string(moved)
-                + " m of the commanded " + std::to_string(commanded) + " m");
+                "task space trajectory appears to have been ignored: moved " + std::to_string(moved) + " m of the commanded "
+                + std::to_string(commanded) + " m");
         }
         if (off_target) {
             RCLCPP_WARN(
-                node_->get_logger(), "%s finished with a residual position error of %.4f m (tolerance %.4f m)",
-                state_name.c_str(), residual, step.tolerance);
+                node_->get_logger(), "%s finished with a residual position error of %.4f m (tolerance %.4f m)", state_name.c_str(),
+                residual, step.tolerance);
         } else {
             RCLCPP_INFO(node_->get_logger(), "%s finished, position error %.4f m", state_name.c_str(), residual);
         }
@@ -1189,13 +1360,16 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
     return true;
 }
 
-bool TaskExecutor::run_position_move(const Step& step, std::string* error) {
+bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool* precheck_rejected, bool strict_position) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
             *error = message;
         }
         return false;
     };
+    if (precheck_rejected != nullptr) {
+        *precheck_rejected = false;
+    }
 
     const std::string state_name = "cart_traj";
     if (!ctx_->set_exp_state(state_name)) {
@@ -1207,46 +1381,104 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error) {
     }
     sleep_with_spin(node_, settle_duration_);
 
-    // 起点与起点姿态都取实测值：首点必须落在当前位姿上，姿态用于事后量测漂移。
+    // 起点与起点姿态都取实测值：首点必须落在当前位姿上。
     std::vector<double> start_pose;
     if (!ctx_->end_effector_pose(&start_pose)) {
-        return fail(
-            "cannot read the end-effector pose before publishing the position-only trajectory (TF unavailable)");
+        return fail("cannot read the end-effector pose before publishing the position-constrained trajectory (TF unavailable)");
     }
     std::vector<double> start_quaternion;
     if (!ctx_->end_effector_quaternion(&start_quaternion)) {
-        return fail(
-            "cannot read the end-effector orientation before the position-only trajectory (TF unavailable)");
+        return fail("cannot read the end-effector orientation before the position-constrained trajectory (TF unavailable)");
     }
 
-    // 6 维消息契约不变：姿态分量照抄起点，控制器按 MODE_POSITION_ONLY 投影掉。
+    const bool constrain_tool_axis = !step.orientation.empty();
+
+    // 6 维消息契约不变：只改位置；姿态缺省照抄起点（控制器投影掉）。
     std::vector<double> target_pose = start_pose;
     for (std::size_t i = 0; i < 3; ++i) {
         target_pose[i] = step.position[i];
     }
 
+    tf2::Vector3 target_axis(0.0, 0.0, 1.0);
+    if (constrain_tool_axis) {
+        const std::vector<double> target_rotation = build_tool_axis_target(start_quaternion, step.orientation);
+        if (target_rotation.size() != 3) {
+            return fail("internal error: failed to build the tool-axis target orientation");
+        }
+        for (std::size_t i = 0; i < 3; ++i) {
+            target_pose[3 + i] = target_rotation[i];
+        }
+
+        tf2::Quaternion q_given(step.orientation[0], step.orientation[1], step.orientation[2], step.orientation[3]);
+        q_given.normalize();
+        target_axis = tool_axis_from_quaternion(q_given);
+    }
+
+    const auto mode =
+        constrain_tool_axis ? robot_msgs::msg::CartTrajCmd::MODE_POSITION_AND_TOOL_AXIS : robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY;
     const std::vector<std::vector<float>> points{to_float(start_pose), to_float(target_pose)};
     const std::vector<float> seconds{0.0f, static_cast<float>(step.duration)};
-    if (!ctx_->publish_cart_traj(points, seconds, robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY)) {
-        return fail("failed to publish the position-only trajectory");
+    if (!ctx_->publish_cart_traj(points, seconds, mode)) {
+        return fail("failed to publish the position-constrained trajectory");
     }
-    RCLCPP_INFO(
-        node_->get_logger(),
-        "pos_move: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s (orientation unconstrained)",
-        start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2], step.duration);
+
+    if (constrain_tool_axis) {
+        tf2::Quaternion q_start(start_quaternion[0], start_quaternion[1], start_quaternion[2], start_quaternion[3]);
+        q_start.normalize();
+        const tf2::Vector3 start_axis = tool_axis_from_quaternion(q_start);
+        const double axis_change_deg  = std::acos(std::clamp(start_axis.dot(target_axis), -1.0, 1.0)) / kDegToRad;
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], tool axis [%.3f %.3f %.3f] -> "
+            "[%.3f %.3f %.3f] (%.2f deg), moving in %.2f s",
+            step.type.c_str(), start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2],
+            start_axis.x(), start_axis.y(), start_axis.z(), target_axis.x(), target_axis.y(), target_axis.z(), axis_change_deg,
+            step.duration);
+    } else {
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s "
+            "(orientation unconstrained)",
+            step.type.c_str(), start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2],
+            step.duration);
+    }
 
     sleep_with_spin(node_, step.duration);
 
     const std::string state = ctx_->controller_state(2.0);
     if (state != state_name) {
+        // 区分「预检拒绝、完全没动」与「运动中途失败」：前者允许 box_move 回退到
+        // position-only；后者可能已经有部分运动，绝不能自动重试。
+        double moved_m   = 0.0;
+        double angle_deg = 180.0;
+        std::vector<double> pose_after_failure;
+        std::vector<double> quaternion_after_failure;
+        if (ctx_->end_effector_pose(&pose_after_failure)) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                moved_m = std::max(moved_m, std::abs(pose_after_failure[i] - start_pose[i]));
+            }
+        }
+        if (ctx_->end_effector_quaternion(&quaternion_after_failure)) {
+            angle_deg = quaternion_angle_deg(start_quaternion, quaternion_after_failure);
+        }
+        const bool no_motion = moved_m < 0.005 && angle_deg < 1.0;
+        if (precheck_rejected != nullptr) {
+            *precheck_rejected = no_motion;
+        }
         return fail(
             "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
-            + "'); check the controller log — the position-only pre-check may have rejected the target");
+            + "') after moving " + format_number(moved_m, 4) + " m / " + format_number(angle_deg, 2) + " deg; "
+            + (no_motion ? "treated as a pre-check rejection before motion"
+                         : "motion had already started, no automatic fallback"));
     }
 
     // 位置残差：与 cart_move 同一套「是否真的执行了」判据，只看 3 维位置。
     std::vector<double> current_pose;
-    if (ctx_->end_effector_pose(&current_pose)) {
+    if (!ctx_->end_effector_pose(&current_pose)) {
+        if (strict_position) {
+            return fail("cannot verify the final position after the motion (TF unavailable)");
+        }
+    } else {
         double residual  = 0.0;
         double commanded = 0.0;
         double moved     = 0.0;
@@ -1257,17 +1489,48 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error) {
         }
         bool off_target = false;
         if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            // 状态参数刷新可能比控制器内部切换慢半拍；位姿几乎没动时按预检拒绝处理，
+            // 让 box_move 仍能回退。已经动了则不回退。
+            if (precheck_rejected != nullptr && moved < 0.005 && commanded > step.tolerance) {
+                *precheck_rejected = true;
+            }
             return fail(
-                "position-only trajectory appears to have been ignored: moved " + std::to_string(moved)
-                + " m of the commanded " + std::to_string(commanded) + " m");
+                "position-constrained trajectory appears to have been ignored: moved " + std::to_string(moved) + " m of the commanded "
+                + std::to_string(commanded) + " m");
         }
         if (off_target) {
+            if (strict_position) {
+                return fail(
+                    step.type + " finished with a residual position error of " + format_number(residual, 4)
+                    + " m (tolerance " + format_number(step.tolerance, 4) + " m)");
+            }
             RCLCPP_WARN(
-                node_->get_logger(), "pos_move finished with a residual position error of %.4f m (tolerance %.4f m)",
+                node_->get_logger(), "%s finished with a residual position error of %.4f m (tolerance %.4f m)", step.type.c_str(),
                 residual, step.tolerance);
         } else {
-            RCLCPP_INFO(node_->get_logger(), "pos_move finished, position error %.4f m", residual);
+            RCLCPP_INFO(node_->get_logger(), "%s finished, position error %.4f m", step.type.c_str(), residual);
         }
+    }
+
+    if (constrain_tool_axis) {
+        // z 轴角误差是硬指标：超过全局 axis_tolerance_deg 直接判失败。
+        std::vector<double> current_quaternion;
+        if (!ctx_->end_effector_quaternion(&current_quaternion)) {
+            return fail("cannot verify the tool-axis constraint after the motion (TF unavailable)");
+        }
+        tf2::Quaternion q_current(current_quaternion[0], current_quaternion[1], current_quaternion[2], current_quaternion[3]);
+        q_current.normalize();
+        const tf2::Vector3 current_axis = tool_axis_from_quaternion(q_current);
+        const double error_deg          = std::acos(std::clamp(current_axis.dot(target_axis), -1.0, 1.0)) / kDegToRad;
+        if (error_deg > default_axis_tolerance_deg_) {
+            return fail(
+                step.type + " tool-axis error " + format_number(error_deg, 2) + " deg exceeds "
+                + format_number(default_axis_tolerance_deg_, 2) + " deg");
+        }
+        RCLCPP_INFO(
+            node_->get_logger(), "%s finished, tool-axis error %.2f deg (tolerance %.2f deg; roll about z is free)",
+            step.type.c_str(), error_deg, default_axis_tolerance_deg_);
+        return true;
     }
 
     // 姿态漂移：只量测、只告警，绝不判失败（姿态本来就不约束）。
@@ -1275,18 +1538,133 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error) {
     if (ctx_->end_effector_quaternion(&current_quaternion)) {
         const double drift_deg = quaternion_angle_deg(start_quaternion, current_quaternion);
         if (drift_deg > step.max_drift_deg) {
-            const std::string message = "pos_move orientation drift " + format_number(drift_deg, 2)
-                                        + " deg exceeds " + format_number(step.max_drift_deg, 2) + " deg";
+            const std::string message = step.type + " orientation drift " + format_number(drift_deg, 2) + " deg exceeds "
+                                      + format_number(step.max_drift_deg, 2) + " deg";
             RCLCPP_WARN(node_->get_logger(), "%s (warning only; orientation is unconstrained)", message.c_str());
             if (status_sink_) {
                 status_sink_("sequence:warning: " + message);
             }
         } else {
             RCLCPP_INFO(
-                node_->get_logger(), "pos_move orientation drift %.2f deg (warn threshold %.2f deg)", drift_deg,
+                node_->get_logger(), "%s orientation drift %.2f deg (warn threshold %.2f deg)", step.type.c_str(), drift_deg,
                 step.max_drift_deg);
         }
     }
+    return true;
+}
+
+bool TaskExecutor::run_box_move(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    const std::string frame       = step.frame;
+    const double tool_offset      = step.tool_offset;
+    const auto deadline           = std::chrono::steady_clock::now() + std::chrono::duration<double>(box_target_timeout_);
+    robot_msgs::msg::TargetFace target;
+    std::vector<double> face_pose;
+    std::vector<double> face_quaternion;
+    rclcpp::Time tf_stamp;
+    double target_age = 0.0;
+    bool have_target  = false;
+    std::string last_reason = "no TargetFace message received yet";
+
+    // 等到一帧 valid + 新鲜 + TF 可查的目标。视觉节点在失效后还会继续广播
+    // target_lost_timeout_ms 的旧 TF，所以不能只看 TF 是否存在。
+    while (rclcpp::ok()) {
+        ctx_->spin_some();
+
+        if (ctx_->latest_target_face(&target)) {
+            if (!target.valid) {
+                last_reason = "TargetFace.valid=false";
+            } else if (target.child_frame_id != frame) {
+                last_reason = "TargetFace.child_frame_id='" + target.child_frame_id + "' != '" + frame + "'";
+            } else {
+                const rclcpp::Time stamp(target.header.stamp, node_->get_clock()->get_clock_type());
+                const double age = (node_->now() - stamp).seconds();
+                if (std::abs(age) > box_max_age_) {
+                    last_reason = "TargetFace stamp age " + format_number(age, 3) + " s exceeds max_age "
+                                + format_number(box_max_age_, 3) + " s (check use_sim_time)";
+                } else if (ctx_->lookup_frame_pose(frame, &face_pose, &face_quaternion, &tf_stamp)) {
+                    const double tf_age = (node_->now() - tf_stamp).seconds();
+                    if (std::abs(tf_age) <= box_max_age_) {
+                        target_age = age;
+                        have_target = true;
+                        break;
+                    }
+                    last_reason = "TF stamp age " + format_number(tf_age, 3) + " s exceeds max_age "
+                                + format_number(box_max_age_, 3) + " s";
+                } else {
+                    last_reason = "TF " + std::string("base_link -> ") + frame + " is not available yet";
+                }
+            }
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+        sleep_with_spin(node_, 0.02);
+    }
+
+    if (!have_target) {
+        return fail(
+            "box_move: no valid target in frame '" + frame + "' within " + format_number(box_target_timeout_, 2)
+            + " s (last state: " + last_reason + "); check the detector, the frame name and use_sim_time");
+    }
+
+    tf2::Quaternion q_face(face_quaternion[0], face_quaternion[1], face_quaternion[2], face_quaternion[3]);
+    q_face.normalize();
+    const tf2::Vector3 face_axis = tool_axis_from_quaternion(q_face);
+
+    // 5 维目标：link6 原点沿面法线后退 tool_offset，使工具尖端落在面心；
+    // 姿态只取面坐标系的 +Z，滚转由控制器投影放开。
+    Step resolved = step;
+    resolved.type = "box_move";
+    resolved.position = {
+        face_pose[0] - tool_offset * face_axis.x(),
+        face_pose[1] - tool_offset * face_axis.y(),
+        face_pose[2] - tool_offset * face_axis.z(),
+    };
+    resolved.orientation = face_quaternion;
+    resolved.max_drift_deg = 0.0;
+
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "box_move: frame '%s', target age %.3f s, face [%.3f %.3f %.3f], face z [%.3f %.3f %.3f], "
+        "tool_offset %.3f m, link6 target [%.3f %.3f %.3f]",
+        frame.c_str(), target_age, face_pose[0], face_pose[1], face_pose[2], face_axis.x(), face_axis.y(), face_axis.z(),
+        tool_offset, resolved.position[0], resolved.position[1], resolved.position[2]);
+
+    bool precheck_rejected = false;
+    std::string first_error;
+    if (run_position_move(resolved, &first_error, &precheck_rejected, true)) {
+        return true;
+    }
+    if (!precheck_rejected) {
+        return fail(first_error);
+    }
+
+    // 5 维预检拒绝且没有产生运动：放宽为只到位置。目标仍是同一个 link6 位置
+    // （面心 - tool_offset * 面 z），姿态不约束；工具尖端位置不再有定义。
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "box_move: tool-axis target is unreachable before motion; falling back to position-only "
+        "(orientation unconstrained): %s",
+        first_error.c_str());
+    if (status_sink_) {
+        status_sink_("sequence:warning: box_move fell back to position-only (tool-axis target unreachable)");
+    }
+
+    resolved.orientation.clear();
+    resolved.max_drift_deg = default_max_drift_deg_;
+    std::string fallback_error;
+    if (!run_position_move(resolved, &fallback_error, nullptr, true)) {
+        return fail("position-only fallback failed: " + fallback_error);
+    }
+    RCLCPP_WARN(node_->get_logger(), "box_move finished with position-only fallback; orientation is unconstrained");
     return true;
 }
 
@@ -1334,9 +1712,7 @@ bool TaskExecutor::run_tool(const Step& step, std::string* error) {
     message.data = on;
     tool_pub_->publish(message);
 
-    RCLCPP_INFO(
-        node_->get_logger(), "tool '%s' -> %s (action '%s')", tool_name_.c_str(), on ? "ON" : "OFF",
-        step.action.c_str());
+    RCLCPP_INFO(node_->get_logger(), "tool '%s' -> %s (action '%s')", tool_name_.c_str(), on ? "ON" : "OFF", step.action.c_str());
 
     // 只发布不等待：开关量本身没有运动过程。需要建立时间（例如吸盘抽真空）时，
     // 由序列里紧随其后的 wait 步骤承担，这样时长由配置决定而不是写死在代码里。
@@ -1371,6 +1747,10 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
 
     if (step.type == "pos_move") {
         return run_position_move(step, error);
+    }
+
+    if (step.type == "box_move") {
+        return run_box_move(step, error);
     }
 
     if (step.type == "admittance_move") {
@@ -1418,16 +1798,14 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
 bool TaskExecutor::run_sequence(const std::string& name) {
     const auto sequence = sequences_.find(name);
     if (sequence == sequences_.end()) {
-        RCLCPP_ERROR(
-            node_->get_logger(), "unknown sequence '%s'; available sequences: %s", name.c_str(),
-            join(sequence_names()).c_str());
+        RCLCPP_ERROR(node_->get_logger(), "unknown sequence '%s'; available sequences: %s", name.c_str(), join(sequence_names()).c_str());
         return false;
     }
 
     RCLCPP_INFO(node_->get_logger(), "running sequence '%s' (%zu steps)", name.c_str(), sequence->second.size());
 
     for (std::size_t i = 0; i < sequence->second.size(); ++i) {
-        const Step& step = sequence->second[i];
+        const Step& step    = sequence->second[i];
         const StepSpec spec = step_spec(step.type);
 
         // 控制器侧「只能 idel 进出」的约束由步骤类型属性驱动，不是硬编码名单。

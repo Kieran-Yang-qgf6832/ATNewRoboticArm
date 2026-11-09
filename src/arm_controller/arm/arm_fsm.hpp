@@ -81,7 +81,9 @@ public:
     float torque(std::size_t index) const;
 
     /// 是否启用（控制器参数 gravity_compensation）
-    bool enabled() const { return enabled_; }
+    bool enabled() const {
+        return enabled_;
+    }
 
 private:
     bool enabled_{true};        ///< 是否启用，来自参数 gravity_compensation
@@ -211,22 +213,22 @@ public:
     bool run(const rclcpp::Time& time) override;
 
 private:
-    FSMArmControlFactory* factory{nullptr};      ///< 状态机工厂指针
-    std::size_t joint_count_{0};                 ///< 关节数量
-    std::vector<float> start_joint_pos_;         ///< 起始关节位置
-    std::vector<float> reset_joint_pos_;         ///< 目标复位位置
-    std::vector<float> default_kp_;              ///< 默认位置增益
-    std::vector<float> default_kd_;              ///< 默认速度增益
-    std::vector<double> reset_joint_pos_param_;  ///< 复位位置参数原始值
-    std::vector<double> default_kp_param_;       ///< 位置增益参数原始值
-    std::vector<double> default_kd_param_;       ///< 速度增益参数原始值
-    rclcpp::Time reset_start_time_;              ///< 复位开始时间
-    float reset_duration_{3.0f};                 ///< 复位时长（秒）
-    float reset_tolerance_{0.01f};               ///< 到位容差（弧度）
-    float reset_settle_{2.0f};                   ///< 复位时长结束后的宽限时长（秒）
-    float progress_{0.0f};                       ///< 复位进度 [0, 1]
-    bool reset_done_{false};                     ///< 复位完成标志
-    bool give_up_warned_{false};                 ///< 是否已就「超时仍未到位」告警（只告警一次）
+    FSMArmControlFactory* factory{nullptr};     ///< 状态机工厂指针
+    std::size_t joint_count_{0};                ///< 关节数量
+    std::vector<float> start_joint_pos_;        ///< 起始关节位置
+    std::vector<float> reset_joint_pos_;        ///< 目标复位位置
+    std::vector<float> default_kp_;             ///< 默认位置增益
+    std::vector<float> default_kd_;             ///< 默认速度增益
+    std::vector<double> reset_joint_pos_param_; ///< 复位位置参数原始值
+    std::vector<double> default_kp_param_;      ///< 位置增益参数原始值
+    std::vector<double> default_kd_param_;      ///< 速度增益参数原始值
+    rclcpp::Time reset_start_time_;             ///< 复位开始时间
+    float reset_duration_{3.0f};                ///< 复位时长（秒）
+    float reset_tolerance_{0.01f};              ///< 到位容差（弧度）
+    float reset_settle_{2.0f};                  ///< 复位时长结束后的宽限时长（秒）
+    float progress_{0.0f};                      ///< 复位进度 [0, 1]
+    bool reset_done_{false};                    ///< 复位完成标志
+    bool give_up_warned_{false};                ///< 是否已就「超时仍未到位」告警（只告警一次）
 
     /// 重力补偿（docs/bugs.md O6）。buffer 在构造阶段分配，run() 中不再分配内存。
     HoldGravityFeedforward gravity_;
@@ -292,20 +294,20 @@ public:
     bool run(const rclcpp::Time& time) override;
 
 private:
-    Point point;                ///< 当前轨迹点（预分配 buffer）
-    TrajPhase state{TrajPhase::STOP}; ///< 当前轨迹阶段
-    Trajectory traj;            ///< 轨迹对象
-    rclcpp::Time traj_start_time_;    ///< 轨迹开始时间
-    Eigen::VectorXd joint_pos_;       ///< 关节位置
-    Eigen::VectorXd torque_;          ///< 关节力矩
-    Eigen::VectorXd task_force_;      ///< 任务空间力
-    std::vector<float> default_kp_;    ///< 默认位置增益
-    std::vector<float> default_kd_;    ///< 默认速度增益
-    std::vector<float> hold_position_; ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
-    std::vector<double> default_kp_param_; ///< 位置增益参数原始值
-    std::vector<double> default_kd_param_; ///< 速度增益参数原始值
-    std::size_t joint_count_{0};       ///< 关节数量
-    std::size_t task_dof_{6};          ///< 任务空间自由度
+    Point point;                            ///< 当前轨迹点（预分配 buffer）
+    TrajPhase state{TrajPhase::STOP};       ///< 当前轨迹阶段
+    Trajectory traj;                        ///< 轨迹对象
+    rclcpp::Time traj_start_time_;          ///< 轨迹开始时间
+    Eigen::VectorXd joint_pos_;             ///< 关节位置
+    Eigen::VectorXd torque_;                ///< 关节力矩
+    Eigen::VectorXd task_force_;            ///< 任务空间力
+    std::vector<float> default_kp_;         ///< 默认位置增益
+    std::vector<float> default_kd_;         ///< 默认速度增益
+    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
+    std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
+    std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
+    std::size_t joint_count_{0};            ///< 关节数量
+    std::size_t task_dof_{6};               ///< 任务空间自由度
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
 
     /// 保持路径的重力前馈（docs/bugs.md O7）。等待轨迹到达期间用它补掉重力静差。
@@ -315,28 +317,29 @@ private:
     /// 6 维轨迹只查终点：单次逆解实测最坏约 386 us（200 次迭代），一个控制周期 2 ms。
     /// position-only 轨迹额外查若干等分中间点（绝对目标可能跨越半个工作空间），
     /// 次数受 kMaxPrecheckSamples 限制，保证 (1 + samples) × 386 us < 2 ms。
-    bool precheck_pending_{false};    ///< 是否有一条新轨迹等待预检
-    Eigen::VectorXd precheck_target_; ///< 待检终点（6 维）
+    bool precheck_pending_{false};                  ///< 是否有一条新轨迹等待预检
+    Eigen::VectorXd precheck_target_;               ///< 待检终点（6 维）
     std::vector<Eigen::VectorXd> precheck_samples_; ///< 等分中间点池（构造期分配）
-    int precheck_count_{0};           ///< 本次实际启用的中间点数
-    Eigen::VectorXd precheck_seed_;   ///< 预检用的关节角种子（当前实测关节角）
-    Eigen::VectorXd precheck_solution_; ///< 预检的解算结果
+    int precheck_count_{0};                         ///< 本次实际启用的中间点数
+    Eigen::VectorXd precheck_seed_;                 ///< 预检用的关节角种子（当前实测关节角）
+    Eigen::VectorXd precheck_solution_;             ///< 预检的解算结果
 
     /// 当前轨迹的任务空间模式（由 CartTrajCmd.mode 决定，默认 6 维）
     PoseMode pose_mode_{PoseMode::kFullPose};
-    /// position-only 的纯位置容差（米）与零空间就近偏好权重
+    /// 位置约束类轨迹的容差：纯位置容差（米）、工具 z 轴角容差（弧度）、零空间偏好权重
     double position_tolerance_{1e-3};
+    double axis_tolerance_{1.7453292519943296e-2}; ///< 1°（弧度）；仅 position-and-axis 模式使用
     double nullspace_weight_{0.0};
-    Eigen::VectorXd posture_reference_;  ///< position-only 轨迹起点的关节角（构造期分配）
-    /// position-only 的预检中间采样点数（构造期按实时预算 clamp）
+    Eigen::VectorXd posture_reference_;            ///< 位置约束轨迹起点的关节角（构造期分配）
+    /// 位置约束类轨迹的预检中间采样点数（构造期按实时预算 clamp）
     int precheck_sample_count_{0};
-    /// 实机模式：position-only 轨迹未经真机验证，拒绝并回 idel
+    /// 实机模式：位置约束类轨迹未经真机验证，拒绝并回 idel
     bool real_mode_{false};
-    bool reject_position_only_on_real_{false};
+    bool reject_constrained_on_real_{false};
 
     /**
      * @brief 对一个 6 维目标做一次逆解，确认可达
-     * @param target   待检目标（6 维；position-only 下姿态分量会被映射层投影掉）
+     * @param target   待检目标（6 维；position-only / position-and-axis 下姿态分量按模式投影）
      * @param[out] residual 不可达时写入「最近可达位姿到目标还有多远」，否则写 0
      * @return 目标可达返回 true
      */
@@ -404,17 +407,17 @@ public:
     bool run(const rclcpp::Time& time) override;
 
 private:
-    Point point;                ///< 当前轨迹点（预分配 buffer）
-    TrajPhase state{TrajPhase::STOP}; ///< 当前轨迹阶段
-    Trajectory traj;            ///< 轨迹对象
-    rclcpp::Time traj_start_time_;    ///< 轨迹开始时间
-    Eigen::VectorXd torque;            ///< 关节力矩
-    std::vector<float> default_kp_;    ///< 默认位置增益
-    std::vector<float> default_kd_;    ///< 默认速度增益
-    std::vector<float> hold_position_; ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
-    std::vector<double> default_kp_param_; ///< 位置增益参数原始值
-    std::vector<double> default_kd_param_; ///< 速度增益参数原始值
-    std::size_t joint_count_{0};       ///< 关节数量
+    Point point;                            ///< 当前轨迹点（预分配 buffer）
+    TrajPhase state{TrajPhase::STOP};       ///< 当前轨迹阶段
+    Trajectory traj;                        ///< 轨迹对象
+    rclcpp::Time traj_start_time_;          ///< 轨迹开始时间
+    Eigen::VectorXd torque;                 ///< 关节力矩
+    std::vector<float> default_kp_;         ///< 默认位置增益
+    std::vector<float> default_kd_;         ///< 默认速度增益
+    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
+    std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
+    std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
+    std::size_t joint_count_{0};            ///< 关节数量
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
 
     /// 保持路径的重力前馈（docs/bugs.md O7）。等待轨迹到达期间用它补掉重力静差。
@@ -474,22 +477,22 @@ public:
     bool run(const rclcpp::Time& time) override;
 
 private:
-    FSMArmControlFactory* factory{nullptr};           ///< 状态机工厂指针
-    std::size_t joint_count_{0};                      ///< 关节数量
-    std::size_t task_dof_{6};                         ///< 任务空间自由度
-    rclcpp::Time last_update_time_;                   ///< 上次更新时间
-    Eigen::VectorXd joint_pos_;                       ///< 关节位置
-    Eigen::VectorXd joint_velocity_;                  ///< 关节速度
-    Eigen::VectorXd task_position_;                   ///< 任务空间位置
-    Eigen::VectorXd desired_task_position_;           ///< 期望任务空间位置
-    Eigen::VectorXd desired_task_velocity_;           ///< 期望任务空间速度
-    Eigen::VectorXd desired_task_acceleration_;       ///< 期望任务空间加速度
-    Eigen::VectorXd task_force_;                      ///< 任务空间力
-    Eigen::VectorXd torque_;                          ///< 关节力矩
-    std::vector<float> default_kp_;                   ///< 默认位置增益
-    std::vector<float> default_kd_;                   ///< 默认速度增益
-    std::vector<double> default_kp_param_;            ///< 位置增益参数原始值
-    std::vector<double> default_kd_param_;            ///< 速度增益参数原始值
+    FSMArmControlFactory* factory{nullptr};                                             ///< 状态机工厂指针
+    std::size_t joint_count_{0};                                                        ///< 关节数量
+    std::size_t task_dof_{6};                                                           ///< 任务空间自由度
+    rclcpp::Time last_update_time_;                                                     ///< 上次更新时间
+    Eigen::VectorXd joint_pos_;                                                         ///< 关节位置
+    Eigen::VectorXd joint_velocity_;                                                    ///< 关节速度
+    Eigen::VectorXd task_position_;                                                     ///< 任务空间位置
+    Eigen::VectorXd desired_task_position_;                                             ///< 期望任务空间位置
+    Eigen::VectorXd desired_task_velocity_;                                             ///< 期望任务空间速度
+    Eigen::VectorXd desired_task_acceleration_;                                         ///< 期望任务空间加速度
+    Eigen::VectorXd task_force_;                                                        ///< 任务空间力
+    Eigen::VectorXd torque_;                                                            ///< 关节力矩
+    std::vector<float> default_kp_;                                                     ///< 默认位置增益
+    std::vector<float> default_kd_;                                                     ///< 默认速度增益
+    std::vector<double> default_kp_param_;                                              ///< 位置增益参数原始值
+    std::vector<double> default_kd_param_;                                              ///< 速度增益参数原始值
 
     rclcpp::Subscription<robot_msgs::msg::ServoCtrlCmd>::SharedPtr servo_ctrl_cmd_sub_; ///< 伺服指令订阅
 };
@@ -555,35 +558,35 @@ private:
      */
     void load_admittance_parameters(const char* name, const Eigen::VectorXd& fallback, Eigen::VectorXd& destination);
 
-    FSMArmControlFactory* factory{nullptr};           ///< 状态机工厂指针
-    std::size_t joint_count_{0};                      ///< 关节数量
-    std::size_t task_dof_{6};                         ///< 任务空间自由度
-    bool trajectory_active_{false};                   ///< 轨迹激活标志
-    rclcpp::Time traj_start_time_;                    ///< 轨迹开始时间
-    rclcpp::Time last_update_time_;                   ///< 上次更新时间
-    Trajectory traj;                                  ///< 轨迹对象
-    Point point;                                      ///< 当前轨迹点
-    Eigen::VectorXd joint_pos_;                       ///< 关节位置
-    Eigen::VectorXd joint_velocity_;                  ///< 关节速度
-    Eigen::VectorXd joint_acceleration_;              ///< 关节加速度
-    Eigen::VectorXd model_torque_;                    ///< 模型力矩
-    Eigen::VectorXd torque_residual_;                 ///< 力矩残差（估计外力）
-    Eigen::VectorXd task_force_;                      ///< 任务空间力
-    Eigen::VectorXd task_position_;                   ///< 任务空间位置
-    Eigen::VectorXd desired_task_position_;           ///< 期望任务空间位置
-    Eigen::VectorXd desired_task_velocity_;           ///< 期望任务空间速度
-    Eigen::VectorXd desired_task_acceleration_;       ///< 期望任务空间加速度
-    Eigen::VectorXd position_error_;                  ///< 位置误差
-    Eigen::VectorXd velocity_error_;                  ///< 速度误差
-    Eigen::VectorXd torque_;                          ///< 关节力矩
-    Eigen::VectorXd admittance_mass_;                 ///< 导纳质量参数
-    Eigen::VectorXd admittance_damping_;              ///< 导纳阻尼参数
-    Eigen::VectorXd admittance_stiffness_;            ///< 导纳刚度参数
-    std::vector<float> default_kp_;                   ///< 默认位置增益
-    std::vector<float> default_kd_;                   ///< 默认速度增益
-    std::vector<float> hold_position_;                ///< 锁存的保持位置（轨迹未激活时使用）
-    std::vector<double> default_kp_param_;            ///< 位置增益参数原始值
-    std::vector<double> default_kd_param_;            ///< 速度增益参数原始值
+    FSMArmControlFactory* factory{nullptr};     ///< 状态机工厂指针
+    std::size_t joint_count_{0};                ///< 关节数量
+    std::size_t task_dof_{6};                   ///< 任务空间自由度
+    bool trajectory_active_{false};             ///< 轨迹激活标志
+    rclcpp::Time traj_start_time_;              ///< 轨迹开始时间
+    rclcpp::Time last_update_time_;             ///< 上次更新时间
+    Trajectory traj;                            ///< 轨迹对象
+    Point point;                                ///< 当前轨迹点
+    Eigen::VectorXd joint_pos_;                 ///< 关节位置
+    Eigen::VectorXd joint_velocity_;            ///< 关节速度
+    Eigen::VectorXd joint_acceleration_;        ///< 关节加速度
+    Eigen::VectorXd model_torque_;              ///< 模型力矩
+    Eigen::VectorXd torque_residual_;           ///< 力矩残差（估计外力）
+    Eigen::VectorXd task_force_;                ///< 任务空间力
+    Eigen::VectorXd task_position_;             ///< 任务空间位置
+    Eigen::VectorXd desired_task_position_;     ///< 期望任务空间位置
+    Eigen::VectorXd desired_task_velocity_;     ///< 期望任务空间速度
+    Eigen::VectorXd desired_task_acceleration_; ///< 期望任务空间加速度
+    Eigen::VectorXd position_error_;            ///< 位置误差
+    Eigen::VectorXd velocity_error_;            ///< 速度误差
+    Eigen::VectorXd torque_;                    ///< 关节力矩
+    Eigen::VectorXd admittance_mass_;           ///< 导纳质量参数
+    Eigen::VectorXd admittance_damping_;        ///< 导纳阻尼参数
+    Eigen::VectorXd admittance_stiffness_;      ///< 导纳刚度参数
+    std::vector<float> default_kp_;             ///< 默认位置增益
+    std::vector<float> default_kd_;             ///< 默认速度增益
+    std::vector<float> hold_position_;          ///< 锁存的保持位置（轨迹未激活时使用）
+    std::vector<double> default_kp_param_;      ///< 位置增益参数原始值
+    std::vector<double> default_kd_param_;      ///< 速度增益参数原始值
 
     /// 保持路径的重力前馈（docs/bugs.md O7）。轨迹未激活时用它补掉重力静差。
     HoldGravityFeedforward gravity_;
@@ -713,17 +716,16 @@ public:
     bool run(const rclcpp::Time& time) override;
 
 private:
-
-    FSMArmControlFactory* factory{nullptr};                  ///< 状态机工厂指针
-    std::size_t joint_count_{0};                             ///< 关节数量
+    FSMArmControlFactory* factory{nullptr};                       ///< 状态机工厂指针
+    std::size_t joint_count_{0};                                  ///< 关节数量
     std::shared_ptr<ExcitationTrajectory> excitation_trajectory_; ///< 激励轨迹生成器
-    std::unique_ptr<ParamterIdentify> paramter_identify_;    ///< 
+    std::unique_ptr<ParamterIdentify> paramter_identify_;         ///<
 
     std::atomic_bool trajectory_generation_failed_{false};
     Trajectory move_to_start_trajectory_;
     Point move_to_start_point_;
-    Point start_point_;   // run() 内构造 move_to_start 轨迹起点用的预分配 buffer
-    Point end_point_;     // run() 内构造 move_to_start 轨迹终点用的预分配 buffer
+    Point start_point_;                                           // run() 内构造 move_to_start 轨迹起点用的预分配 buffer
+    Point end_point_;                                             // run() 内构造 move_to_start 轨迹终点用的预分配 buffer
     std::vector<float> hold_position_;
     std::vector<float> default_kp_;
     std::vector<float> default_kd_;
@@ -734,7 +736,7 @@ private:
     Eigen::VectorXd excitation_end_position_;
     Eigen::VectorXd measured_position_;
     Eigen::VectorXd measured_velocity_;
-    Eigen::VectorXd measured_acceleration_; ///< 真实关节加速度（O8），来自 state interface
+    Eigen::VectorXd measured_acceleration_;                       ///< 真实关节加速度（O8），来自 state interface
     Eigen::VectorXd measured_torque_;
     // O8 时间对齐用：上一拍的位置/速度/时间。MuJoCo 的 qacc 对应**步进前**的状态，
     // 必须延后一拍与它配对，刚体方程才成立（残差 0.25% -> 0.0003%）。
@@ -754,4 +756,3 @@ private:
     bool record_full_warned_{false}; ///< 记录缓冲区写满只告警一次
     MeasurePhase measure_phase_{MeasurePhase::HoldingEnd};
 };
-

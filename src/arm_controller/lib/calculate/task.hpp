@@ -6,14 +6,16 @@
  * @brief 任务空间约束模式
  *
  * - @c kFullPose：位置 3 维 + 姿态 3 维全部参与收敛（默认，6 维任务）；
- * - @c kPositionOnly：只约束 3 维位置，姿态误差与姿态雅可比行整体置零。
+ * - @c kPositionOnly：只约束 3 维位置，姿态误差与姿态雅可比行整体置零；
+ * - @c kPositionAndToolAxis：位置 3 维 + 工具 z 轴方向 2 维，绕 z 轴的滚转不约束
+ *   （投影方式与 @c set_roll_free 相同，但只对当前轨迹生效）。
  *
- * 6 维向量与 IKSolver 的尺寸断言始终不变，降维只在映射层显式完成
- * （与 @c set_roll_free 同一思路，但投影掉的是全部 3 个旋转分量）。
+ * 6 维向量与 IKSolver 的尺寸断言始终不变，降维只在映射层显式完成。
  */
 enum class PoseMode {
-    kFullPose = 0,
-    kPositionOnly = 1,
+    kFullPose            = 0,
+    kPositionOnly        = 1,
+    kPositionAndToolAxis = 2,
 };
 
 class TaskMapping {
@@ -21,9 +23,7 @@ public:
     virtual ~TaskMapping() = default;
 
     // Map the model state to the user-defined task coordinates.
-    virtual bool position_map(const Eigen::VectorXd& joint_pos,
-                              const Eigen::Isometry3d& pose,
-                              Eigen::VectorXd* task_position) = 0;
+    virtual bool position_map(const Eigen::VectorXd& joint_pos, const Eigen::Isometry3d& pose, Eigen::VectorXd* task_position) = 0;
 
     /**
      * @brief 把模型几何雅可比映射为「任务误差对关节角导数」的相反数
@@ -44,10 +44,9 @@ public:
      * @param task_jacobian 输出：任务误差的 Gauss-Newton 雅可比
      * @return true 映射成功
      */
-    virtual bool jacobian_map(const Eigen::VectorXd& joint_pos,
-                              const Eigen::VectorXd& error,
-                              const Eigen::MatrixXd& jacobian,
-                              Eigen::MatrixXd* task_jacobian) = 0;
+    virtual bool jacobian_map(
+        const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, const Eigen::MatrixXd& jacobian,
+        Eigen::MatrixXd* task_jacobian) = 0;
 
     /**
      * @brief 计算任务空间误差（目标 - 当前）
@@ -64,9 +63,7 @@ public:
      * @param error   输出：与 @p target 同维度的任务空间误差
      * @return true 计算成功
      */
-    virtual bool error_map(const Eigen::VectorXd& target,
-                           const Eigen::VectorXd& current,
-                           Eigen::VectorXd* error) = 0;
+    virtual bool error_map(const Eigen::VectorXd& target, const Eigen::VectorXd& current, Eigen::VectorXd* error) = 0;
 
     /**
      * @brief 切换「是否放弃绕工具轴的姿态控制」（5 维任务）
@@ -78,17 +75,24 @@ public:
      * @param roll_free true = 5 维任务（不控滚转）；false = 6 维任务（默认）
      * @note 默认实现什么都不做，只有支持降维的映射需要重写。
      */
-    virtual void set_roll_free(bool /*roll_free*/) {}
+    virtual void set_roll_free(bool /*roll_free*/) {
+    }
 
     /// 当前是否工作在降维（5 维）模式
-    virtual bool roll_free() const { return false; }
+    virtual bool roll_free() const {
+        return false;
+    }
 
     /**
      * @brief 切换任务空间约束模式（按轨迹下发，仅标量赋值，可在实时路径调用）
      * @note 默认实现保持 6 维任务；只有支持投影的映射需要重写。
      */
-    virtual void set_pose_mode(PoseMode mode) { (void)mode; }
+    virtual void set_pose_mode(PoseMode mode) {
+        (void)mode;
+    }
 
     /// 当前任务空间约束模式
-    virtual PoseMode pose_mode() const { return PoseMode::kFullPose; }
+    virtual PoseMode pose_mode() const {
+        return PoseMode::kFullPose;
+    }
 };

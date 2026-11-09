@@ -90,6 +90,7 @@ std::string join(const std::vector<std::string>& values) {
  * - @c joints：关节顺序（默认 joint1..joint6）；
  * - @c cart_traj_topic / @c joint_traj_topic / @c admittance_topic：轨迹话题；
  * - @c base_frame / @c ee_frame：末端位姿参考系与末端坐标系（默认 "base_link" / "link6"）；
+ * - @c target_face_topic：视觉目标面消息话题（默认 "target_face"）；
  * - @c startup_timeout：等待控制器与 /joint_states 就绪的超时（秒，默认 10）；
  * - @c exit_settle：序列结束后保持 idel 的时长（秒，默认 0.5）；
  * - @c controller_idle_timeout：切入任务前等待控制器进入 idel 的最长时间（秒，默认 0.5）；
@@ -97,7 +98,7 @@ std::string join(const std::vector<std::string>& values) {
  *   - @c "sequence:pending <name>"：开始执行某序列；
  *   - @c "sequence:finished <name>"：序列正常走完；
  *   - @c "sequence:failed: <原因>"：前置条件不满足或某步骤失败；
- *   - @c "sequence:warning: <原因>"：非致命告警（目前是 pos_move 的姿态漂移超阈值）；
+ *   - @c "sequence:warning: <原因>"：非致命告警（pos_move 姿态漂移超阈值、box_move 回退到只到位置）；
  *   - @c "idle; waiting for a new task_sequence parameter"：已结束，常驻等待新序列。
  */
 class TaskRunner : public rclcpp::Node {
@@ -111,6 +112,7 @@ public:
         admittance_topic_        = declare_parameter<std::string>("admittance_topic", "arm_admittance");
         base_frame_              = declare_parameter<std::string>("base_frame", "base_link");
         ee_frame_                = declare_parameter<std::string>("ee_frame", "link6");
+        target_face_topic_       = declare_parameter<std::string>("target_face_topic", "target_face");
         tasks_config_            = declare_parameter<std::string>("tasks_config", default_tasks_config());
         task_sequence_           = declare_parameter<std::string>("task_sequence", "");
         startup_timeout_         = declare_parameter<double>("startup_timeout", 10.0);
@@ -184,6 +186,7 @@ public:
         options.admittance_topic        = admittance_topic_;
         options.base_frame              = base_frame_;
         options.ee_frame                = ee_frame_;
+        options.target_face_topic       = target_face_topic_;
         options.controller_idle_timeout = controller_idle_timeout_;
         auto ctx                        = std::make_unique<TaskContext>(shared_from_this(), options);
 
@@ -260,6 +263,7 @@ private:
     std::string admittance_topic_;           ///< 导纳期望轨迹话题
     std::string base_frame_;                 ///< 末端位姿参考系
     std::string ee_frame_;                   ///< 末端坐标系
+    std::string target_face_topic_;          ///< 视觉目标面话题
     std::string tasks_config_;               ///< 任务配置文件路径
     std::string task_sequence_;              ///< 要执行的序列名
     std::string task_status_topic_;          ///< 任务状态话题名

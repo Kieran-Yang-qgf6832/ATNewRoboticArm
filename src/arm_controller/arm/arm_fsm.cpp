@@ -17,11 +17,14 @@ namespace {
 
 constexpr int kMaxArmTrajectoryPoints = 8;
 
-/// position-only 预检中间点上限：单次 IK 最坏约 386 us、控制周期 2 ms，
-/// 含终点在内最多 4 次（约 1.54 ms），再多就可能被实时周期卡住。
-constexpr int kMaxPrecheckSamples = 3;
-
 const std::string kIdelStateName = "idel";
+
+/// 角度换算：度 -> 弧度（-std=c++17 下不保证 M_PI 可用）。
+constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+
+/// position-only / position-and-axis 预检中间点上限：单次 IK 最坏约 386 us、
+/// 控制周期 2 ms，含终点在内最多 4 次（约 1.54 ms），再多就可能被实时周期卡住。
+constexpr int kMaxPrecheckSamples = 3;
 
 // load_trajectory_from_message 依赖各 FSM 的 traj 预分配容量不小于最大点数，
 // 在订阅回调中复用预分配 buffer（clear + add_point），避免实时路径内重新分配内存。
@@ -47,16 +50,12 @@ int model_dof_from_context(std::any ctx) {
  * @return 计算成功返回 true；模型不可用、抛异常或结果非有限值时返回 false，
  *         调用方应退回纯 kp 保持（会有静差，但不会失控）
  */
-bool compute_gravity_torque(FSMArmControlFactory* factory,
-                            std::size_t joint_count,
-                            Eigen::VectorXd* joint_pos,
-                            const Eigen::VectorXd& zero,
-                            Eigen::VectorXd* gravity_torque,
-                            const char* state_name) {
+bool compute_gravity_torque(
+    FSMArmControlFactory* factory, std::size_t joint_count, Eigen::VectorXd* joint_pos, const Eigen::VectorXd& zero,
+    Eigen::VectorXd* gravity_torque, const char* state_name) {
     const auto count = static_cast<Eigen::Index>(joint_count);
-    if (factory == nullptr || factory->model_ == nullptr || factory->node_ == nullptr || joint_pos == nullptr
-        || gravity_torque == nullptr || joint_pos->size() != count || zero.size() != count
-        || gravity_torque->size() != count || factory->state_.size() != joint_count) {
+    if (factory == nullptr || factory->model_ == nullptr || factory->node_ == nullptr || joint_pos == nullptr || gravity_torque == nullptr
+        || joint_pos->size() != count || zero.size() != count || gravity_torque->size() != count || factory->state_.size() != joint_count) {
         return false;
     }
 
@@ -74,15 +73,14 @@ bool compute_gravity_torque(FSMArmControlFactory* factory,
         }
     } catch (const std::exception& error) {
         RCLCPP_WARN_THROTTLE(
-            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
-            "%s: 重力补偿抛出异常：%s，本次退回纯 kp 保持", state_name, error.what());
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000, "%s: 重力补偿抛出异常：%s，本次退回纯 kp 保持", state_name,
+            error.what());
         return false;
     }
 
     if (!gravity_torque->allFinite()) {
         RCLCPP_WARN_THROTTLE(
-            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
-            "%s: 重力补偿结果非有限值，本次退回纯 kp 保持", state_name);
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000, "%s: 重力补偿结果非有限值，本次退回纯 kp 保持", state_name);
         return false;
     }
 
@@ -100,10 +98,8 @@ bool compute_gravity_torque(FSMArmControlFactory* factory,
  * @param joint_count   关节数
  * @param hold_position 输出：预分配的保持位置缓存
  */
-void latch_joint_position(
-    FSMArmControlFactory* factory, std::size_t joint_count, std::vector<float>* hold_position) {
-    if (factory == nullptr || hold_position == nullptr || factory->state_.size() != joint_count
-        || hold_position->size() != joint_count) {
+void latch_joint_position(FSMArmControlFactory* factory, std::size_t joint_count, std::vector<float>* hold_position) {
+    if (factory == nullptr || hold_position == nullptr || factory->state_.size() != joint_count || hold_position->size() != joint_count) {
         return;
     }
 
@@ -131,9 +127,8 @@ void latch_joint_position(
  * @param state_name    状态名，仅用于补偿失败的日志
  */
 void write_hold_command(
-    FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& hold_position,
-    const std::vector<float>& default_kp, const std::vector<float>& default_kd, HoldGravityFeedforward* gravity,
-    const char* state_name) {
+    FSMArmControlFactory* factory, std::size_t joint_count, const std::vector<float>& hold_position, const std::vector<float>& default_kp,
+    const std::vector<float>& default_kd, HoldGravityFeedforward* gravity, const char* state_name) {
     if (factory == nullptr || factory->command_.size() != joint_count || hold_position.size() != joint_count
         || default_kp.size() != joint_count || default_kd.size() != joint_count) {
         return;
@@ -181,15 +176,13 @@ bool trajectory_finished(const Trajectory& traj, const rclcpp::Time& start_time,
 }
 
 bool load_trajectory_from_message(
-    const std::vector<robot_msgs::msg::Vector>& points, const std::vector<float>& seconds, std::size_t dof,
-    Trajectory* traj) {
+    const std::vector<robot_msgs::msg::Vector>& points, const std::vector<float>& seconds, std::size_t dof, Trajectory* traj) {
     if (traj == nullptr || points.empty() || seconds.size() != points.size() || points.size() > traj->capacity()) {
         return false;
     }
 
     for (const auto& point : points) {
-        if (point.pos.size() != dof || (!point.vel.empty() && point.vel.size() != dof)
-            || (!point.acc.empty() && point.acc.size() != dof)) {
+        if (point.pos.size() != dof || (!point.vel.empty() && point.vel.size() != dof) || (!point.acc.empty() && point.acc.size() != dof)) {
             return false;
         }
     }
@@ -199,9 +192,7 @@ bool load_trajectory_from_message(
         if (seconds[i] < 0.0f || !std::isfinite(seconds[i])) {
             return false;
         }
-        if (!traj->add_point(
-                points[i].pos, points[i].vel, points[i].acc,
-                rclcpp::Duration(std::chrono::duration<double>(seconds[i])))) {
+        if (!traj->add_point(points[i].pos, points[i].vel, points[i].acc, rclcpp::Duration(std::chrono::duration<double>(seconds[i])))) {
             return false;
         }
     }
@@ -472,8 +463,8 @@ bool ResetState::run(const rclcpp::Time& time) {
             "reset did not reach the target within %.2f s (reset_duration=%.2f s, reset_settle=%.2f s): max joint "
             "error %.4f rad on joint%zu (tolerance %.4f rad); forcing the switch to idel, check reset_tolerance / "
             "default_kp (gravity sag) if the offset persists",
-            elapsed_s, static_cast<double>(reset_duration_), static_cast<double>(reset_settle_),
-            static_cast<double>(max_error), worst + 1, static_cast<double>(reset_tolerance_));
+            elapsed_s, static_cast<double>(reset_duration_), static_cast<double>(reset_settle_), static_cast<double>(max_error), worst + 1,
+            static_cast<double>(reset_tolerance_));
         reset_done_ = true;
     }
     return true;
@@ -507,7 +498,10 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     if (!(nullspace_weight_ > 0.0)) {
         nullspace_weight_ = 0.0;
     }
-    precheck_sample_count_ = std::clamp(precheck_sample_count_, 0, kMaxPrecheckSamples);
+    // 工具 z 轴角容差：配置单位是度，内部统一用弧度。非法值退回 1°。
+    const double axis_tolerance_deg = factory->node_->get_parameter("pos_move_axis_tolerance_deg").as_double();
+    axis_tolerance_                 = axis_tolerance_deg > 0.0 ? axis_tolerance_deg * kDegToRad : kDegToRad;
+    precheck_sample_count_          = std::clamp(precheck_sample_count_, 0, kMaxPrecheckSamples);
     precheck_samples_.resize(static_cast<std::size_t>(kMaxPrecheckSamples));
     for (auto& sample : precheck_samples_) {
         sample.setZero(static_cast<Eigen::Index>(task_dof_));
@@ -515,35 +509,47 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     posture_reference_.setZero(static_cast<Eigen::Index>(joint_count_));
     RCLCPP_INFO(
         factory->node_->get_logger(),
-        "position-only: tolerance=%.3g m, nullspace_weight=%.3g, precheck_samples=%d (max %d), real_mode=%s",
-        position_tolerance_, nullspace_weight_, precheck_sample_count_, kMaxPrecheckSamples,
-        real_mode_ ? "true (position-only disabled)" : "false");
+        "cart constraint: position_tolerance=%.3g m, axis_tolerance=%.3g deg, nullspace_weight=%.3g, "
+        "precheck_samples=%d (max %d), real_mode=%s",
+        position_tolerance_, axis_tolerance_ / kDegToRad, nullspace_weight_, precheck_sample_count_, kMaxPrecheckSamples,
+        real_mode_ ? "true (constrained trajectories disabled)" : "false");
 
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
             if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, task_dof_, &traj)) {
                 return;
             }
-            const bool position_only = msg.mode == robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY;
+            const bool position_only  = msg.mode == robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY;
+            const bool tool_axis_only = msg.mode == robot_msgs::msg::CartTrajCmd::MODE_POSITION_AND_TOOL_AXIS;
+            const bool constrained    = position_only || tool_axis_only;
 
-            // 实机从未上电验证、且只有 5 自由度：position-only 的零空间行为与仿真不同，
-            // 明确拒绝而不是悄悄执行。交给 run() 返回 false，由 update() 统一裁决回 idel。
-            reject_position_only_on_real_ = position_only && real_mode_;
+            // 实机从未上电验证、且只有 5 自由度：位置约束类轨迹（纯位置 3 维与
+            // 位置 + 工具轴 5 维）的零空间行为与仿真不同，明确拒绝而不是悄悄执行。
+            // 交给 run() 返回 false，由 update() 统一裁决回 idel。
+            reject_constrained_on_real_ = constrained && real_mode_;
 
-            pose_mode_ = position_only ? PoseMode::kPositionOnly : PoseMode::kFullPose;
+            if (position_only) {
+                pose_mode_ = PoseMode::kPositionOnly;
+            } else if (tool_axis_only) {
+                pose_mode_ = PoseMode::kPositionAndToolAxis;
+            } else {
+                pose_mode_ = PoseMode::kFullPose;
+            }
             factory->task_map_->set_pose_mode(pose_mode_);
+            // 分离判据只在 5 维模式启用；纯位置仍用单一位置范数，6 维位姿用默认混合范数。
             factory->arm_solve_->set_solve_options(
-                position_only ? position_tolerance_ : 0.0, position_only ? nullspace_weight_ : 0.0);
+                constrained ? position_tolerance_ : 0.0, tool_axis_only ? axis_tolerance_ : 0.0, constrained ? nullspace_weight_ : 0.0);
 
-            // 终点沿用 6 维消息契约；position-only 下姿态分量会被映射层投影掉。
+            // 终点沿用 6 维消息契约；投影由映射层按当前模式完成。
             const auto& final_waypoint = msg.position.back().pos;
             for (Eigen::Index row = 0; row < precheck_target_.size(); ++row) {
                 precheck_target_(row) = final_waypoint[static_cast<std::size_t>(row)];
             }
 
-            // position-only 的绝对目标可能离起点很远，额外等分采样中间位置。
+            // 位置约束类轨迹的绝对目标可能离起点很远，额外等分采样中间位姿
+            // （6 维一起插值；纯位置模式下旋转分量会被映射层忽略）。
             precheck_count_ = 0;
-            if (position_only && precheck_sample_count_ > 0) {
+            if (constrained && precheck_sample_count_ > 0) {
                 const auto& first_waypoint = msg.position.front().pos;
                 for (int i = 0; i < precheck_sample_count_; ++i) {
                     const double s = static_cast<double>(i + 1) / (precheck_sample_count_ + 1);
@@ -575,8 +581,7 @@ bool CartTrajState::check_target_reachable(const Eigen::VectorXd& target, double
     }
 
     precheck_solution_ = precheck_seed_;
-    if (!factory->arm_solve_->inverse_kinamic(target, &precheck_solution_)
-        || !precheck_solution_.allFinite()) {
+    if (!factory->arm_solve_->inverse_kinamic(target, &precheck_solution_) || !precheck_solution_.allFinite()) {
         *residual = factory->arm_solve_->last_ik_error_norm();
         return false;
     }
@@ -596,11 +601,11 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
 
     state = TrajPhase::STOP;
     traj.stop();
-    // 从任何状态切入都恢复 6 维默认模式，避免上一条 position-only 轨迹的映射设置
+    // 从任何状态切入都恢复 6 维默认模式，避免上一条位置约束轨迹的映射设置
     // 泄露到别的也用 IK 的状态。新轨迹的 mode 会由订阅回调重新设置。
     pose_mode_ = PoseMode::kFullPose;
     factory->task_map_->set_pose_mode(pose_mode_);
-    factory->arm_solve_->set_solve_options(0.0, 0.0);
+    factory->arm_solve_->set_solve_options(0.0, 0.0, 0.0);
     factory->arm_solve_->clear_posture_reference();
     // 进入时锁存一次当前位置。保持命令必须基于固定目标：若每个周期重新读取实测值，
     // 位置误差恒为 0，kp 再大也不产生恢复力，机械臂会在重力下缓慢坠落。
@@ -614,12 +619,12 @@ bool CartTrajState::exit(const std::string& next_state) {
     traj.stop();
     state = TrajPhase::STOP;
     // 清掉未消费的预检请求：否则下一次进入本状态时会拿旧轨迹的途经点做预检。
-    precheck_pending_             = false;
-    precheck_count_               = 0;
-    reject_position_only_on_real_ = false;
-    pose_mode_                    = PoseMode::kFullPose;
+    precheck_pending_           = false;
+    precheck_count_             = 0;
+    reject_constrained_on_real_ = false;
+    pose_mode_                  = PoseMode::kFullPose;
     factory->task_map_->set_pose_mode(pose_mode_);
-    factory->arm_solve_->set_solve_options(0.0, 0.0);
+    factory->arm_solve_->set_solve_options(0.0, 0.0, 0.0);
     factory->arm_solve_->clear_posture_reference();
     return true;
 }
@@ -648,17 +653,17 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         return true;
     }
 
-    // 实机模式下的 position-only 轨迹：在下发任何运动指令之前拒绝。
+    // 实机模式下的位置约束类轨迹（纯位置 / 位置 + 工具轴）：在下发任何运动指令之前拒绝。
     // 返回 false 交给 ArmController::update() 统一裁决（写保持命令 + 切回 idel），
     // 与逆解失败走同一条失效安全路径。
-    if (reject_position_only_on_real_) {
-        reject_position_only_on_real_ = false;
-        state = TrajPhase::STOP;
+    if (reject_constrained_on_real_) {
+        reject_constrained_on_real_ = false;
+        state                       = TrajPhase::STOP;
         traj.stop();
-        set_fault_stage("position-only trajectory rejected on real hardware");
+        set_fault_stage("position-constrained trajectory rejected on real hardware");
         RCLCPP_ERROR(
-            factory->node_->get_logger(),
-            "position-only trajectory REJECTED before any motion: real_mode=true (5-DOF hardware, not validated)");
+            factory->node_->get_logger(), "position-constrained trajectory REJECTED before any motion: real_mode=true "
+                                          "(5-DOF hardware, not validated)");
         return false;
     }
 
@@ -670,7 +675,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
 
         // 每条轨迹只设一次：参考位形取轨迹开始时的实测关节角，跨所有控制周期复用。
         // 若跟着每周期重置，偏好就退化成「偏好当前位形」，抑制不了累积姿态漂移。
-        if (pose_mode_ == PoseMode::kPositionOnly) {
+        if (pose_mode_ == PoseMode::kPositionOnly || pose_mode_ == PoseMode::kPositionAndToolAxis) {
             for (std::size_t i = 0; i < joint_count_; ++i) {
                 posture_reference_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
             }
@@ -679,7 +684,7 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             factory->arm_solve_->clear_posture_reference();
         }
 
-        // 6 维轨迹只查终点；position-only 再查若干等分中间点。预检沿用与执行相同的
+        // 6 维轨迹只查终点；位置约束类轨迹再查若干等分中间点。预检沿用与执行相同的
         // 映射模式与容差，否则「终点可达」的结论会是另一种任务空间的结论。
         double residual = 0.0;
         bool reachable  = check_target_reachable(precheck_target_, &residual);
@@ -691,26 +696,49 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             traj.stop();
             set_fault_stage("Cartesian target reachability pre-check");
 
-            // 残余与判据的单位随模式变化：6 维是「米+弧度」混合范数，
-            // position-only 是纯位置米数。日志里必须写清楚（docs/bugs.md 的教训）。
-            const bool position_only = pose_mode_ == PoseMode::kPositionOnly;
-            const char* unit = position_only ? "m (position only)" : "mixed m+rad (6-D pose)";
-            const double tolerance = position_only ? position_tolerance_ : IKSolver::tuning().tolerance;
-            if (factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable) {
-                // 这是「目标不可达」，不是「求解器坏了」：报出最近可达位姿离终点还有多远，
-                // 让操作者知道该改目标，而不是去查逆解器。
-                RCLCPP_ERROR(
-                    factory->node_->get_logger(),
-                    "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
-                    "pose is still %.6f %s away from it (IK tolerance is %.1e %s). Without this pre-check the arm would "
-                    "have walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
-                    residual, unit, tolerance, unit);
+            // 残余与判据的单位随模式变化：6 维是「米+弧度」混合范数，position-only 是
+            // 纯位置米数，position-and-axis 是位置（米）+ 工具 z 轴角（度）两项。
+            // 日志里必须写清楚（docs/bugs.md 的教训）。
+            const bool position_only  = pose_mode_ == PoseMode::kPositionOnly;
+            const bool tool_axis_only = pose_mode_ == PoseMode::kPositionAndToolAxis;
+            const bool unreachable    = factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable;
+            if (tool_axis_only) {
+                // 分离判据下分别报位置与工具轴残余，避免把两项混在一个范数里看不出是哪一项不可达。
+                const double position_residual = factory->arm_solve_->last_ik_position_error_norm();
+                const double axis_residual_deg = factory->arm_solve_->last_ik_axis_error_norm() / kDegToRad;
+                if (unreachable) {
+                    RCLCPP_ERROR(
+                        factory->node_->get_logger(),
+                        "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest "
+                        "reachable pose is still %.6f m away in position and %.3f deg away in tool-axis direction "
+                        "(IK tolerances are %.1e m and %.3g deg). Fix the target, not the solver.",
+                        position_residual, axis_residual_deg, position_tolerance_, axis_tolerance_ / kDegToRad);
+                } else {
+                    RCLCPP_ERROR(
+                        factory->node_->get_logger(),
+                        "Cartesian trajectory REJECTED before any motion: inverse kinematics failed numerically "
+                        "(residual %.6f m in position, %.3f deg in tool-axis direction); reachability is unknown.",
+                        position_residual, axis_residual_deg);
+                }
             } else {
-                RCLCPP_ERROR(
-                    factory->node_->get_logger(),
-                    "Cartesian trajectory REJECTED before any motion: inverse kinematics failed numerically "
-                    "(residual %.6f %s); reachability is unknown.",
-                    residual, unit);
+                const char* unit       = position_only ? "m (position only)" : "mixed m+rad (6-D pose)";
+                const double tolerance = position_only ? position_tolerance_ : IKSolver::tuning().tolerance;
+                if (unreachable) {
+                    // 这是「目标不可达」，不是「求解器坏了」：报出最近可达位姿离终点还有多远，
+                    // 让操作者知道该改目标，而不是去查逆解器。
+                    RCLCPP_ERROR(
+                        factory->node_->get_logger(),
+                        "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
+                        "pose is still %.6f %s away from it (IK tolerance is %.1e %s). Without this pre-check the arm would "
+                        "have walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
+                        residual, unit, tolerance, unit);
+                } else {
+                    RCLCPP_ERROR(
+                        factory->node_->get_logger(),
+                        "Cartesian trajectory REJECTED before any motion: inverse kinematics failed numerically "
+                        "(residual %.6f %s); reachability is unknown.",
+                        residual, unit);
+                }
             }
             return false;
         }
@@ -733,8 +761,8 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     }
 
     try {
-        if (!factory->arm_solve_->inverse_kinamic(point.pos, &joint_pos_)
-            || joint_pos_.size() != static_cast<Eigen::Index>(joint_count_) || !joint_pos_.allFinite()) {
+        if (!factory->arm_solve_->inverse_kinamic(point.pos, &joint_pos_) || joint_pos_.size() != static_cast<Eigen::Index>(joint_count_)
+            || !joint_pos_.allFinite()) {
             state = TrajPhase::STOP;
             traj.stop();
             set_fault_stage("Cartesian trajectory inverse kinematics");
@@ -763,11 +791,10 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                     factory->arm_solve_->last_ik_result() == IKSolver::SolveResult::Unreachable
                         ? "target is UNREACHABLE (iteration stalled at the edge of the reachable set)"
                         : "solver failed numerically (reachability unknown)",
-                    factory->arm_solve_->last_ik_error_norm(),
-                    factory->arm_solve_->last_ik_iterations(), error_norm, point.pos(0), point.pos(1), point.pos(2),
-                    point.pos(3), point.pos(4), point.pos(5), seed_joints(0), seed_joints(1), seed_joints(2),
-                    seed_joints(3), seed_joints(4), seed_joints(5), measured_task(0), measured_task(1), measured_task(2),
-                    measured_task(3), measured_task(4), measured_task(5));
+                    factory->arm_solve_->last_ik_error_norm(), factory->arm_solve_->last_ik_iterations(), error_norm, point.pos(0),
+                    point.pos(1), point.pos(2), point.pos(3), point.pos(4), point.pos(5), seed_joints(0), seed_joints(1), seed_joints(2),
+                    seed_joints(3), seed_joints(4), seed_joints(5), measured_task(0), measured_task(1), measured_task(2), measured_task(3),
+                    measured_task(4), measured_task(5));
             }
             return false;
         }
@@ -1098,8 +1125,8 @@ AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
             }
             const auto now = factory->node_->get_clock()->now();
             traj.start(now);
-            traj_start_time_         = now;
-            last_update_time_        = now;
+            traj_start_time_           = now;
+            last_update_time_          = now;
             desired_task_position_     = traj.front().pos;
             desired_task_velocity_     = traj.front().vel;
             desired_task_acceleration_ = traj.front().acc;
@@ -1149,8 +1176,7 @@ bool AdmittanceState::exit(const std::string& next_state) {
 }
 
 const std::string& AdmittanceState::check_switch() const {
-    if (factory != nullptr && !trajectory_active_ && !factory->exp_state_name.empty()
-        && factory->exp_state_name != fsm_name_) {
+    if (factory != nullptr && !trajectory_active_ && !factory->exp_state_name.empty() && factory->exp_state_name != fsm_name_) {
         return factory->exp_state_name;
     }
     return fsm_name_;
@@ -1449,20 +1475,20 @@ ParamterMeasureState::ParamterMeasureState(const std::string& name, std::any ctx
         default_kd_[i] = i < default_kd_param_.size() ? static_cast<float>(default_kd_param_[i]) : 0.0f;
     }
 
-    const std::string urdf_path                        = factory->node_->get_parameter("urdf_path").as_string();
-    excitation_trajectory_                             = std::make_shared<ExcitationTrajectory>(urdf_path);
+    const std::string urdf_path = factory->node_->get_parameter("urdf_path").as_string();
+    excitation_trajectory_      = std::make_shared<ExcitationTrajectory>(urdf_path);
     excitation_trajectory_->set_seed(static_cast<std::uint64_t>(measure_trajectory_seed));
-    excitation_trajectory_->end_effector_x_lower_limit = end_effector_x_lower_limit;
-    excitation_trajectory_->end_effector_x_upper_limit = end_effector_x_upper_limit;
-    excitation_trajectory_->end_effector_y_lower_limit = end_effector_y_lower_limit;
-    excitation_trajectory_->end_effector_y_upper_limit = end_effector_y_upper_limit;
-    excitation_trajectory_->end_effector_z_lower_limit = end_effector_z_lower_limit;
-    excitation_trajectory_->end_effector_z_upper_limit = end_effector_z_upper_limit;
-    excitation_trajectory_->traj_torque_limit_rate    = traj_torque_limit_rate;
-    excitation_trajectory_->end_effector_tool_offset  = end_effector_tool_offset;
+    excitation_trajectory_->end_effector_x_lower_limit   = end_effector_x_lower_limit;
+    excitation_trajectory_->end_effector_x_upper_limit   = end_effector_x_upper_limit;
+    excitation_trajectory_->end_effector_y_lower_limit   = end_effector_y_lower_limit;
+    excitation_trajectory_->end_effector_y_upper_limit   = end_effector_y_upper_limit;
+    excitation_trajectory_->end_effector_z_lower_limit   = end_effector_z_lower_limit;
+    excitation_trajectory_->end_effector_z_upper_limit   = end_effector_z_upper_limit;
+    excitation_trajectory_->traj_torque_limit_rate       = traj_torque_limit_rate;
+    excitation_trajectory_->end_effector_tool_offset     = end_effector_tool_offset;
     excitation_trajectory_->traj_collision_safe_distance = traj_collision_safe_distance;
     excitation_trajectory_->traj_ground_clearance        = traj_ground_clearance;
-    paramter_identify_                                 = std::make_unique<ParamterIdentify>(urdf_path);
+    paramter_identify_                                   = std::make_unique<ParamterIdentify>(urdf_path);
     const auto record_capacity =
         static_cast<int>(std::ceil(trajectory_period_ * static_cast<double>(trajectory_repeat_cnt_) * measure_record_sample_rate_)) + 2;
     paramter_identify_->application_memory(record_capacity, static_cast<int>(joint_count_));
@@ -1570,12 +1596,9 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
         RCLCPP_INFO(
             factory->node_->get_logger(),
             "激励轨迹就绪：可辨识参数 %d 个，seed=%lu，原始违例 %.3e rad，缩放 %.4f，最终违例 %.3e rad，得分 %.4f",
-            excitation_trajectory_->get_available_param_num(),
-            static_cast<unsigned long>(excitation_trajectory_->get_seed()),
-            excitation_trajectory_->get_raw_violation(),
-            excitation_trajectory_->get_applied_scale(),
-            excitation_trajectory_->get_final_violation(),
-            excitation_trajectory_->get_final_score());
+            excitation_trajectory_->get_available_param_num(), static_cast<unsigned long>(excitation_trajectory_->get_seed()),
+            excitation_trajectory_->get_raw_violation(), excitation_trajectory_->get_applied_scale(),
+            excitation_trajectory_->get_final_violation(), excitation_trajectory_->get_final_score());
         // 约束的实际生效值也必须打出来（C6：写错的参数名不会有任何提示）。
         // O12：碰撞约束的实际生效值与违例量也在这里打出来——判断「碰撞约束到底有没有在
         // 约束优化」只能看这一行，不能只看 YAML（C6 的教训）。
@@ -1583,12 +1606,9 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
             factory->node_->get_logger(),
             "激励约束：关节软限位 %.3f，力矩上限 %.3f×额定，末端工具偏移 %.4f m，末端 z 下限 %.4f m，"
             "连杆间安全间距 %.4f m，地面净空 %.4f m，碰撞违例 %.3e",
-            excitation_trajectory_->traj_pos_soft_limit_rate,
-            excitation_trajectory_->traj_torque_limit_rate,
-            excitation_trajectory_->end_effector_tool_offset,
-            excitation_trajectory_->end_effector_z_lower_limit,
-            excitation_trajectory_->traj_collision_safe_distance,
-            excitation_trajectory_->traj_ground_clearance,
+            excitation_trajectory_->traj_pos_soft_limit_rate, excitation_trajectory_->traj_torque_limit_rate,
+            excitation_trajectory_->end_effector_tool_offset, excitation_trajectory_->end_effector_z_lower_limit,
+            excitation_trajectory_->traj_collision_safe_distance, excitation_trajectory_->traj_ground_clearance,
             excitation_trajectory_->get_collision_violation());
         measure_phase_ = MeasurePhase::MovingToStart;
     }
@@ -1634,10 +1654,10 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
 
         const bool has_acceleration = factory->state_acceleration_.size() == joint_count_;
         for (std::size_t i = 0; i < joint_count_; ++i) {
-            const auto index              = static_cast<Eigen::Index>(i);
-            measured_position_(index)     = factory->state_[i].position;
-            measured_velocity_(index)     = factory->state_[i].velocity;
-            measured_torque_(index)       = factory->state_[i].torque;
+            const auto index          = static_cast<Eigen::Index>(i);
+            measured_position_(index) = factory->state_[i].position;
+            measured_velocity_(index) = factory->state_[i].velocity;
+            measured_torque_(index)   = factory->state_[i].torque;
             // 真实加速度（O8）：MuJoCo 的 qacc。取不到就记 0，报告里会体现出来。
             measured_acceleration_(index) = has_acceleration ? factory->state_acceleration_[i] : 0.0;
         }
@@ -1651,14 +1671,13 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
         // 把位置/速度**延后一拍**再与加速度/力矩配对后，残差降到 **0.0003%**（机器精度）。
         // 时间列同样用上一拍的时间，保持三元组自洽。
         if (has_prev_sample_) {
-            const std::size_t remaining = paramter_identify_->record_value(
-                prev_position_, prev_velocity_, measured_acceleration_, measured_torque_, prev_time_);
+            const std::size_t remaining =
+                paramter_identify_->record_value(prev_position_, prev_velocity_, measured_acceleration_, measured_torque_, prev_time_);
             if (remaining == 0 && !record_full_warned_) {
                 // 缓冲区写满：后续样本会被静默丢弃，这里只告警一次，避免实时线程刷屏。
                 record_full_warned_ = true;
                 RCLCPP_WARN(
-                    factory->node_->get_logger(),
-                    "measure 记录缓冲区已满（%zu 个样本），后续样本被丢弃；请调大 measure_record_sample_rate",
+                    factory->node_->get_logger(), "measure 记录缓冲区已满（%zu 个样本），后续样本被丢弃；请调大 measure_record_sample_rate",
                     paramter_identify_->record_capacity());
             }
         }

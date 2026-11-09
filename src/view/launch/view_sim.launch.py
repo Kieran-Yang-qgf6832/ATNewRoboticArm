@@ -37,7 +37,7 @@ import xml.etree.ElementTree as ET
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -136,16 +136,11 @@ def _camera_pose(scene_path, name):
     raise RuntimeError('在 %s 里找不到 camera name="%s"' % (scene_path, name))
 
 
-def generate_launch_description():
-    arm_model_share = get_package_share_directory('arm_model')
-    scene_path = os.path.join(arm_model_share, 'model', 'scene_vision.xml')
+def _launch_setup(context, arm_model_share):
+    scene_path = LaunchConfiguration('scene_path').perform(context)
     position, rotation = _camera_pose(scene_path, CAMERA_NAME)
 
-    display_arg = DeclareLaunchArgument(
-        'display', default_value='true',
-        description='是否开 OpenCV 预览窗口（无图形环境时检测与发布照常运行）')
-
-    # 第一段：MuJoCo 相机位姿，从 scene_vision.xml 原样搬运
+    # 第一段：MuJoCo 相机位姿，从场景文件原样搬运
     mount_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',
@@ -202,4 +197,23 @@ def generate_launch_description():
         }],
     )
 
-    return LaunchDescription([display_arg, mount_tf, optical_tf, detector])
+    return [mount_tf, optical_tf, detector]
+
+
+def generate_launch_description():
+    arm_model_share = get_package_share_directory('arm_model')
+
+    scene_path_arg = DeclareLaunchArgument(
+        'scene_path',
+        default_value=os.path.join(arm_model_share, 'model', 'scene_vision.xml'),
+        description='含 <camera name="vision_camera"> 的 MJCF 场景；相机 TF 直接从这里解析')
+
+    display_arg = DeclareLaunchArgument(
+        'display', default_value='true',
+        description='是否开 OpenCV 预览窗口（无图形环境时检测与发布照常运行）')
+
+    return LaunchDescription([
+        scene_path_arg,
+        display_arg,
+        OpaqueFunction(function=_launch_setup, args=[arm_model_share]),
+    ])

@@ -60,11 +60,16 @@ arm_controller:
     # 时间上（reset_duration + reset_settle），不宜过大；也不能大到超过任务层的 step_timeout
     # （默认 30 s，见 task_executor.hpp）。
     reset_settle: 2.0
-    # ---- pos_move（只约束末端位置）----
-    # 只对 MODE_POSITION_ONLY 轨迹生效；6 维轨迹仍用 IKSolver 全局 1e-3「米+弧度」混合范数。
+    # ---- pos_move（位置约束类轨迹）----
+    # 只对 MODE_POSITION_ONLY / MODE_POSITION_AND_TOOL_AXIS 轨迹生效；6 维轨迹仍用
+    # IKSolver 全局 1e-3「米+弧度」混合范数。
     # 控制器在**构造阶段**读这些参数，改这里必须重启控制器（docs/bugs.md C6）；
-    # 实际生效值会打在控制器日志的 "position-only:" 那一行，不要只看本文件写了什么。
-    #   tolerance：纯位置收敛判据（米）。
+    # 实际生效值会打在控制器日志的 "cart constraint:" 那一行，不要只看本文件写了什么。
+    #   tolerance：位置收敛判据（米）。
+    #   axis_tolerance_deg：MODE_POSITION_AND_TOOL_AXIS 下工具 z 轴的角容差（度）。
+    #     与位置判据**分别**检查（不是混合范数）；任务层 tasks.yaml 的
+    #     position_move.axis_tolerance_deg 应保持一致，否则会出现一侧判失败、
+    #     另一侧仍认为可达的情况。
     #   nullspace_weight：零空间「就近」偏好权重，抑制姿态/joint6 漂移；0 = 关闭。
     #     实测整定：0.005 可用（漂移 14.77° -> 14.42°）；0.05 会让轨迹后段 IK 在
     #     t≈1.58 s 停滞（残余 1.16e-3 > 1e-3 判据）。抑制效果有限，不能靠它保证
@@ -72,6 +77,7 @@ arm_controller:
     #   precheck_samples：终点之外再等分采样的中间点数。单次 IK 最坏约 386 us、
     #     控制周期 2 ms，内部会 clamp 到 3（含终点最多 4 次）。
     pos_move_tolerance: 0.001
+    pos_move_axis_tolerance_deg: 1.0
     pos_move_nullspace_weight: 0.005
     pos_move_precheck_samples: 2
     measure_trajectory_period: 10.0

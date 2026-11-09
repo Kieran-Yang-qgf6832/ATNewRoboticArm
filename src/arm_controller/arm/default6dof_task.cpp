@@ -62,7 +62,7 @@ Eigen::Matrix3d right_jacobian(const Eigen::Vector3d& rho) {
     return Eigen::Matrix3d::Identity() - first * skew + second * (skew * skew);
 }
 
-}  // namespace
+} // namespace
 
 Default6DofTaskSpaceMapping::Default6DofTaskSpaceMapping() = default;
 
@@ -74,9 +74,8 @@ void Default6DofTaskSpaceMapping::set_pose_mode(PoseMode mode) {
     pose_mode_ = mode;
 }
 
-bool Default6DofTaskSpaceMapping::position_map(const Eigen::VectorXd& joint_pos,
-                                               const Eigen::Isometry3d& pose,
-                                               Eigen::VectorXd* task_position) {
+bool Default6DofTaskSpaceMapping::position_map(
+    const Eigen::VectorXd& joint_pos, const Eigen::Isometry3d& pose, Eigen::VectorXd* task_position) {
     (void)joint_pos;
     if (task_position == nullptr) {
         return false;
@@ -105,10 +104,8 @@ bool Default6DofTaskSpaceMapping::position_map(const Eigen::VectorXd& joint_pos,
     return task_position->allFinite();
 }
 
-bool Default6DofTaskSpaceMapping::jacobian_map(const Eigen::VectorXd& joint_pos,
-                                               const Eigen::VectorXd& error,
-                                               const Eigen::MatrixXd& jacobian,
-                                               Eigen::MatrixXd* task_jacobian) {
+bool Default6DofTaskSpaceMapping::jacobian_map(
+    const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& error, const Eigen::MatrixXd& jacobian, Eigen::MatrixXd* task_jacobian) {
     (void)joint_pos;
     if (task_jacobian == nullptr || jacobian.rows() != 6 || error.size() != 6) {
         return false;
@@ -136,7 +133,7 @@ bool Default6DofTaskSpaceMapping::jacobian_map(const Eigen::VectorXd& joint_pos,
     // 写成 Matrix3d 会在 N != 3 时触发 Eigen 的 resize 断言（进程直接 abort）。
     const Eigen::MatrixXd rotation_rows = rotation_error_jacobian * jacobian.bottomRows<3>();
 
-    if (roll_free_) {
+    if (roll_free_ || pose_mode_ == PoseMode::kPositionAndToolAxis) {
         // 5 维任务：P = I - z·zᵀ 把绕工具轴的旋转行投影掉。
         // 末端回转关节那一列经投影后精确为 0，LM 步长在该维恒为 0，
         // 于是 joint6 停在初值——与实机「无电机、机械锁死」的物理行为一致。
@@ -149,9 +146,7 @@ bool Default6DofTaskSpaceMapping::jacobian_map(const Eigen::VectorXd& joint_pos,
     return task_jacobian->allFinite();
 }
 
-bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target,
-                                            const Eigen::VectorXd& current,
-                                            Eigen::VectorXd* error) {
+bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target, const Eigen::VectorXd& current, Eigen::VectorXd* error) {
     if (error == nullptr || target.size() != 6 || current.size() != 6 || error->size() != 6) {
         return false;
     }
@@ -171,8 +166,7 @@ bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target,
     // 改用相对旋转 R_err = exp(target_rv) · exp(current_rv)^T，其对数映射的角度恒在 [0, π]。
     const Eigen::AngleAxisd target_rotation  = rotation_vector_to_angle_axis(target.tail<3>());
     const Eigen::AngleAxisd current_rotation = rotation_vector_to_angle_axis(current.tail<3>());
-    const Eigen::Matrix3d relative =
-        target_rotation.toRotationMatrix() * current_rotation.toRotationMatrix().transpose();
+    const Eigen::Matrix3d relative           = target_rotation.toRotationMatrix() * current_rotation.toRotationMatrix().transpose();
     const Eigen::AngleAxisd relative_rotation(relative);
 
     if (std::abs(relative_rotation.angle()) < kMinRotationAngle) {
@@ -181,9 +175,10 @@ bool Default6DofTaskSpaceMapping::error_map(const Eigen::VectorXd& target,
         error->tail<3>() = relative_rotation.angle() * relative_rotation.axis();
     }
 
-    if (roll_free_) {
+    if (roll_free_ || pose_mode_ == PoseMode::kPositionAndToolAxis) {
         // 5 维任务：只保留「垂直于工具轴」的旋转误差，绕工具轴的滚转不再参与求解。
-        // 位置 3 维不变，姿态部分实际只张成 2 维。
+        // 位置 3 维不变，姿态部分实际只张成 2 维；投影为 0 等价于目标与当前的
+        // 工具 z 轴方向一致（相对旋转只剩绕 z 的分量）。
         error->tail<3>() -= error->tail<3>().dot(tool_axis_) * tool_axis_;
     }
 

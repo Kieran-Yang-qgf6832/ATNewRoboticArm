@@ -27,16 +27,20 @@
  * 由 @ref TaskExecutor 在配置加载阶段完成。
  */
 struct Step {
-    std::string type;           ///< 步骤类型名，必须属于 @ref known_step_types
-    double duration{0.0};       ///< 运动/等待时长（秒）
-    double tolerance{0.0};      ///< 到位容差；0 表示由执行器取默认值
-    std::vector<double> target;   ///< joint_move：绝对关节角（由 to 解析或直接给出）
-    std::vector<double> offset;   ///< cart_move / admittance_move：相对末端位移（3 维）
-    std::vector<double> position; ///< pos_move：基座系绝对目标 [x, y, z]（由 to 解析或直接给出）
-    std::string action;           ///< tool：语义名（如 suck / release）
-    std::string to;               ///< joint_move 引用 points；pos_move 引用 positions
-    double max_drift_deg{0.0};    ///< pos_move：姿态漂移告警阈值（度）；0 = 用配置默认值
-    int yaml_line{0};             ///< 在 YAML 中的行号（1 起），用于报错定位
+    std::string type;                ///< 步骤类型名，必须属于 @ref known_step_types
+    double duration{0.0};            ///< 运动/等待时长（秒）
+    double tolerance{0.0};           ///< 到位容差；0 表示由执行器取默认值
+    std::vector<double> target;      ///< joint_move：绝对关节角（由 to 解析或直接给出）
+    std::vector<double> offset;      ///< cart_move / admittance_move：相对末端位移（3 维）
+    std::vector<double> position;    ///< pos_move：基座系绝对目标 [x, y, z]（由 to 解析或直接给出）
+    std::vector<double> orientation; ///< pos_move：目标姿态四元数 [x, y, z, w]（基座系；只约束 link6 z 轴）
+    std::string action;              ///< tool：语义名（如 suck / release）
+    std::string to;                  ///< joint_move 引用 points；pos_move 引用 positions
+    std::string frame;               ///< box_move：视觉目标帧名（空 = 用全局默认）
+    double tool_offset{-1.0};        ///< box_move：工具尖端沿 +z 到 link6 原点的距离（米）
+    bool has_tool_offset{false};     ///< 步骤是否显式给出 tool_offset（区分 0 与“未写”）
+    double max_drift_deg{0.0};       ///< pos_move：姿态漂移告警阈值（度）；0 = 用配置默认值
+    int yaml_line{0};                ///< 在 YAML 中的行号（1 起），用于报错定位
 };
 
 /**
@@ -45,9 +49,9 @@ struct Step {
  * @see step_spec
  */
 struct StepSpec {
-    bool known{false};          ///< 是否为已知类型
-    bool requires_idel{false};  ///< 执行前是否要求控制器处于 idel
-    bool needs_duration{false}; ///< 是否必须提供正的 duration
+    bool known{false};              ///< 是否为已知类型
+    bool requires_idel{false};      ///< 执行前是否要求控制器处于 idel
+    bool needs_duration{false};     ///< 是否必须提供正的 duration
     const char* exp_state{nullptr}; ///< 对应的控制器状态名；nullptr 表示不切换状态
 };
 

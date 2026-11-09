@@ -2,8 +2,8 @@
 
 #include "modelbase.hpp"
 #include "task.hpp"
-#include <memory>
 #include <Eigen/Dense>
+#include <memory>
 
 /**
  * @brief 阻尼最小二乘逆解器（信赖域 + Levenberg-Marquardt）
@@ -70,9 +70,9 @@ public:
      * （docs/bugs.md O2）。
      */
     enum class SolveResult {
-        Converged,   ///< 残余已在 @ref Tuning::tolerance 以内
+        Converged, ///< 残余已在 @ref Tuning::tolerance 以内
         Unreachable, ///< 迭代结束（停滞或次数用尽）时残余仍超判据：目标没有达到，通常意味着落在可达集之外
-        Failed,      ///< 数值失败（输入非法、雅可比不可用、步长非有限），可达性未知
+        Failed, ///< 数值失败（输入非法、雅可比不可用、步长非有限），可达性未知
     };
 
     IKSolver(std::shared_ptr<ModelBase> robot, std::shared_ptr<TaskMapping> task_mapping);
@@ -91,11 +91,14 @@ public:
 
     /**
      * @brief 设置求解选项（只做标量赋值，可在实时路径每周期调用）
-     * @param tolerance position-only 模式使用的纯位置容差（米）；<= 0 表示沿用 Tuning::tolerance
+     * @param tolerance position-only / position-and-axis 模式使用的位置容差（米）；
+     *                  <= 0 表示沿用 Tuning::tolerance
+     * @param axis_tolerance position-and-axis 模式的工具 z 轴角容差（弧度）；
+     *                  <= 0 表示不启用分离判据，仍用单一误差范数
      * @param nullspace_weight 零空间「就近」偏好权重；0 = 关闭
-     * @note 两个值都是 IKSolver 实例状态，调用方须在每次 solve() 之前按当前轨迹模式设好。
+     * @note 三个值都是 IKSolver 实例状态，调用方须在每次 solve() 之前按当前轨迹模式设好。
      */
-    void set_solve_options(double tolerance, double nullspace_weight);
+    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight);
 
     /**
      * @brief 设置零空间偏好的参考位形（轨迹起点关节角）
@@ -129,32 +132,51 @@ public:
     bool task_position(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_position);
 
     /// @return 上一次 solve() 结束时的任务空间误差范数，用于诊断
-    double last_error_norm() const { return last_error_norm_; }
+    double last_error_norm() const {
+        return last_error_norm_;
+    }
+
+    /// @return 上一次 solve() 结束时误差的位置分量范数（米），用于诊断
+    double last_position_error_norm() const {
+        return last_position_error_norm_;
+    }
+
+    /// @return 上一次 solve() 结束时误差的姿态分量范数（弧度；5 维模式下即工具轴角误差），用于诊断
+    double last_axis_error_norm() const {
+        return last_axis_error_norm_;
+    }
 
     /// @return 上一次 solve() 实际使用的迭代次数，用于诊断
-    int last_iterations() const { return last_iterations_; }
+    int last_iterations() const {
+        return last_iterations_;
+    }
 
     /// @return 上一次 solve() 的结果，用于区分「不可达」与「数值失败」
-    SolveResult last_result() const { return last_result_; }
+    SolveResult last_result() const {
+        return last_result_;
+    }
 
 private:
     /// 计算给定关节角下的任务空间误差
     bool evaluate_error(const Eigen::VectorXd& target, const Eigen::VectorXd& joint_pos, Eigen::VectorXd* error);
 
+    /// 记录一次误差诊断（总范数 + 位置/姿态分量）
+    void record_error(const Eigen::VectorXd& error);
+
     struct Workspace {
         Eigen::VectorXd solution;
         Eigen::VectorXd current;
         Eigen::VectorXd error;
-        Eigen::VectorXd zero_error; ///< 速度映射路径用的零误差（右雅可比退化为单位阵）
+        Eigen::VectorXd zero_error;         ///< 速度映射路径用的零误差（右雅可比退化为单位阵）
         Eigen::VectorXd trial;
         Eigen::VectorXd trial_error;
         Eigen::VectorXd rhs;
         Eigen::VectorXd joint_step;
-        Eigen::VectorXd seed;              ///< 本次 solve 的初值，作为零空间偏好的参考位形
-        Eigen::VectorXd posture_step;      ///< 偏好方向 w
-        Eigen::VectorXd task_posture_step; ///< J·w（6 维）
-        Eigen::VectorXd rhs_posture;       ///< Jᵀ·(J·w)
-        Eigen::VectorXd joint_step_posture;///< J⁺·(J·w)
+        Eigen::VectorXd seed;               ///< 本次 solve 的初值，作为零空间偏好的参考位形
+        Eigen::VectorXd posture_step;       ///< 偏好方向 w
+        Eigen::VectorXd task_posture_step;  ///< J·w（6 维）
+        Eigen::VectorXd rhs_posture;        ///< Jᵀ·(J·w)
+        Eigen::VectorXd joint_step_posture; ///< J⁺·(J·w)
         Eigen::MatrixXd geometric_jacobian;
         Eigen::MatrixXd task_jacobian;
         Eigen::MatrixXd hessian;
@@ -165,10 +187,13 @@ private:
     std::shared_ptr<TaskMapping> task_mapping_;
     Workspace workspace_;
     double last_error_norm_{0.0};
+    double last_position_error_norm_{0.0};  ///< 位置分量范数（米）
+    double last_axis_error_norm_{0.0};      ///< 姿态分量范数（弧度）
     int last_iterations_{0};
     SolveResult last_result_{SolveResult::Failed};
-    double tolerance_override_{0.0};  ///< >0 时替代 Tuning::tolerance（position-only 用纯位置米数）
-    double nullspace_weight_{0.0};    ///< 0 = 关闭零空间就近偏好
-    Eigen::VectorXd posture_reference_;  ///< 轨迹起点关节角（构造期分配）
+    double tolerance_override_{0.0};        ///< >0 时替代 Tuning::tolerance（position-only 用纯位置米数）
+    double axis_tolerance_override_{0.0};   ///< >0 时启用位置/工具轴分离判据
+    double nullspace_weight_{0.0};          ///< 0 = 关闭零空间就近偏好
+    Eigen::VectorXd posture_reference_;     ///< 轨迹起点关节角（构造期分配）
     bool has_posture_reference_{false};
 };

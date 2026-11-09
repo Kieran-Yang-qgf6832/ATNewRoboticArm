@@ -1,13 +1,16 @@
 # 任务层配置：序列由步骤组合而成，新增任务只需编辑本文件，不需要重新编译。
 #
-# 步骤类型（封闭集合，共 11 类）：
+# 步骤类型（封闭集合，共 12 类）：
 #   wait            不切换控制器状态，纯等待 duration 秒
 #   idel            切回 idel 并锁定当前位置
 #   reset           复位；只等控制器 current_state 回到 idel
 #   joint_move      关节空间轨迹；用 to 引用目标点，或直接给 target
 #   joint_console   终端交互式关节运动；运行时在终端输入角度（度）与可选执行时间
 #   cart_move       笛卡尔轨迹；offset 为相对当前末端位姿的位移（3 维），严格保持姿态
-#   pos_move        只把末端移动到基座系绝对位置（to / position），姿态不参与收敛
+#   pos_move        把末端移动到基座系绝对位置（to / position）；可选 orientation
+#                   约束 link6 的 z 轴方向，缺省则姿态完全不参与收敛
+#   box_move        读取视觉目标面 TF，移动到箱体位姿；工具 z 对齐面 z，
+#                   5D 预检不可达时自动回退到只到位置
 #   admittance_move 导纳控制下的期望轨迹；同样用 offset
 #   tool            末端执行器开关量；action 取下面 tool 段定义的语义名
 #   teach           示教；需 duration
@@ -16,7 +19,10 @@
 # 常用字段：duration（秒）、tolerance（到位容差）。
 # reset / joint_console / teach / measure 只能从 idel 进出，执行器会自动先等待控制器空闲。
 # pos_move 的 to 查 positions 段（3 维坐标），joint_move 的 to 查 points 段（6 维关节角），
-# 两者同名但互不相关；pos_move 还可用 max_drift_deg 覆盖默认姿态漂移告警阈值。
+# 两者同名但互不相关。
+# pos_move 的可选 orientation 是基座系四元数 [x, y, z, w]：只取它的 z 轴作为
+# link6 的目标朝向，绕 z 的滚转不约束；给了 orientation 就不能再写 max_drift_deg
+# （全姿态漂移告警只对纯位置模式有意义）。
 
 # 当前挂载的末端执行器：只影响 tool 步骤的语义名与日志。
 # 换夹爪时把 name 改成 gripper、on/off 改成 clamp/release 即可，任务序列不用动。
@@ -30,6 +36,18 @@ points:
   home:      [0.0, 0.0,  0.0, 0.0, 0.0, 0.0]
   ready:     [0.0, 0.3, -0.3, 0.0, 0.3, 0.0]
   above_box: [0.2, 0.1,  0.4, 0.0, 0.5, 0.0]
+  # 抬高视觉场景（scene_vision_raised.xml，箱体/相机 z=0.6）的粗定位点。
+  # 由该场景 target_face 的 5D IK 解与 ready 做 90% 关节插值得到：
+  #   末端约 [0.556, -0.018, 0.697]，到最终 [0.566, -0.019, 0.601] 约 10 cm。
+  # 直接从 ready 走一条 1 m 的长笛卡尔直线会在 t≈1.6 s 处越过 5D 可达集；
+  # 先用关节空间粗定位、再由 box_move 做最后 10 cm 的视觉修正，路径才可行。
+  # 换箱体位置/相机后必须重算这个点（或用 joint_console 手动找）。
+  box_pregrasp: [-0.035035025, 0.032012081, -1.580386931, 0.126714924, 0.560780707, 0.790765396]
+  # 低处视觉场景（scene_vision.xml，箱体/相机 z≈0.175）的回退验证粗定位点。
+  # 由低处 position-only IK 解与 ready 做约 90% 关节插值得到：
+  #   末端约 [0.676, -0.103, 0.295]，到最终 [0.617, -0.109, 0.176] 约 12 cm。
+  # 直接从 ready 走一条 1.2 m 的长直线会撞关节限位/不可达区；先粗定位再回退。
+  box_low_pregrasp: [-0.0512, -0.412, -1.712, -0.214, -0.4278, 0.0]
 
 # 基座系绝对目标点（pos_move 专用，单位：米）。只存 [x, y, z]，与上面 points 的
 # 6 维关节角不是一回事。下面两个值由 fk_dump 在 ready 位形实测：
@@ -40,10 +58,27 @@ positions:
   above_ready_5cm: [-0.147874, -0.015725, 1.282796]
   below_ready_5cm: [-0.147874, -0.015725, 1.182796]
 
-# pos_move 的默认姿态漂移告警阈值（度）。步骤可用 max_drift_deg 覆盖。
-# 只告警、不判失败：姿态本来就不约束，量测是为了让漂移可观测、可回归。
+# pos_move 的默认参数。
+# max_drift_deg：纯位置模式（没写 orientation）的全姿态漂移告警阈值（度）。
+#   只告警、不判失败：姿态本来就不约束，量测是为了让漂移可观测、可回归。
+# axis_tolerance_deg：写了 orientation 时工具 z 轴角误差的**硬判据**（度）。
+#   必须与控制器 ros2_controller.yaml 的 pos_move_axis_tolerance_deg 保持一致：
+#   控制器用它做 IK 收敛，任务层用它做最终验收。
 position_move:
   max_drift_deg: 10.0
+  axis_tolerance_deg: 1.0
+
+# box_move 的全局默认。
+# frame：视觉目标帧名，必须与 /target_face 消息的 child_frame_id 一致；
+# tool_offset：link6 +z 到工具尖端的距离（米）。5D 目标位置 = 面心 - tool_offset * 面 z，
+#   即工具尖端落在面心；回退到 position-only 时仍用同一个 link6 位置。
+# target_timeout：等待 valid 目标的最长时间（秒）。
+# max_age：TargetFace 与 TF 时间戳允许的最大年龄（秒）；防止视觉节点卡住时用旧目标。
+box_move:
+  frame: target_face
+  tool_offset: 0.039
+  target_timeout: 5.0
+  max_age: 0.5
 
 # 交互输入的门禁（joint_console 专用）：超限只提示重输，一个运动指令都不下发。
 # 单位是**度**，抄自 arm_model/model/robotic_arm.urdf 的 <limit>（弧度换成度）：
@@ -184,4 +219,38 @@ sequences:
       - {type: reset}
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: pos_move, position: [-0.147874, -0.015725, 1.182796], duration: 2.0, max_drift_deg: 15.0}
+      - {type: idel}
+
+  # pos_move 的工具轴约束演示（orientation 字段）：
+  #   1) ready -> below_ready_5cm，四元数取 ready 姿态 -> 只动位置、工具方向不变；
+  #   2) below_ready_5cm -> ready_pos，目标 z 轴从 ready 方向再抬高 15°
+  #      （[-0.0183, 0, 0, 0.99983] 的 z 轴 = [0, 0.0366, 0.9993]）。
+  # 两个目标都已用 ik_solve --axis 离线验证（5 维模式收敛，位置残余 < 1e-4 m）。
+  pos_axis_demo:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: pos_move, to: below_ready_5cm, orientation: [0.0, 0.148650700, 0.988889766, 0.000000546], duration: 2.0}
+      - {type: pos_move, to: ready_pos, orientation: [-0.018302957, 0.0, 0.0, 0.999832487], duration: 2.0}
+      - {type: idel}
+
+  # box_move 演示：需要视觉场景（仿真相机 + 红色箱子）。
+  # 抬高场景（scene_vision_raised.xml）里 5D 目标可达；先用 joint_move 到
+  # box_pregrasp 做粗定位，再由 box_move 走最后约 10 cm 并读取 TF 修正。
+  box_move_demo:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: box_pregrasp, duration: 4.0}
+      - {type: box_move, duration: 2.0}
+      - {type: idel}
+
+  # 低处回退验证：原 scene_vision.xml（箱体/相机 z≈0.175）。
+  # 5D 预检会拒绝，box_move 自动回退到 position-only；低处目标已接近该臂
+  # 的实际可达边界，实测残差约 1.2 cm，所以这里把位置容差放宽到 2 cm。
+  # 若位置也超出容差，步骤会失败（退出码 1），日志里能看到回退原因和残差。
+  box_move_low:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: box_low_pregrasp, duration: 6.0}
+      - {type: box_move, duration: 4.0, tolerance: 0.02}
       - {type: idel}

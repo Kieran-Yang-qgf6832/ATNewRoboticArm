@@ -42,9 +42,9 @@ bool ArmSolve::inverse_kinamic(const Eigen::VectorXd& task_pos, Eigen::VectorXd*
     return ik_solver_->solve(task_pos, *joint_pos) == IKSolver::SolveResult::Converged;
 }
 
-void ArmSolve::set_solve_options(double tolerance, double nullspace_weight) {
+void ArmSolve::set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight) {
     if (ik_solver_ != nullptr) {
-        ik_solver_->set_solve_options(tolerance, nullspace_weight);
+        ik_solver_->set_solve_options(tolerance, axis_tolerance, nullspace_weight);
     }
 }
 
@@ -72,15 +72,20 @@ double ArmSolve::last_ik_error_norm() const {
     return ik_solver_ != nullptr ? ik_solver_->last_error_norm() : 0.0;
 }
 
+double ArmSolve::last_ik_position_error_norm() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_position_error_norm() : 0.0;
+}
+
+double ArmSolve::last_ik_axis_error_norm() const {
+    return ik_solver_ != nullptr ? ik_solver_->last_axis_error_norm() : 0.0;
+}
+
 int ArmSolve::last_ik_iterations() const {
     return ik_solver_ != nullptr ? ik_solver_->last_iterations() : 0;
 }
 
 bool ArmSolve::inverse_dynamic(
-    const Eigen::VectorXd& joint_pos,
-    const Eigen::VectorXd& task_vel,
-    const Eigen::VectorXd& task_acc,
-    const Eigen::VectorXd& task_force,
+    const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& task_vel, const Eigen::VectorXd& task_acc, const Eigen::VectorXd& task_force,
     Eigen::VectorXd* joint_torque) {
     if (joint_torque == nullptr) {
         return false;
@@ -138,7 +143,7 @@ bool ArmSolve::inverse_dynamic(
     workspace_.jacobian_velocity.noalias() = workspace_.jacobian_delta * workspace_.joint_vel;
 
     workspace_.task_acc_rhs.noalias() = task_acc - workspace_.jacobian_velocity;
-    workspace_.joint_acc = workspace_.jacobian_solver.solve(workspace_.task_acc_rhs);
+    workspace_.joint_acc              = workspace_.jacobian_solver.solve(workspace_.task_acc_rhs);
     if (!workspace_.joint_acc.allFinite()) {
         return false;
     }
@@ -152,8 +157,7 @@ bool ArmSolve::inverse_dynamic(
     return joint_torque->allFinite();
 }
 
-bool ArmSolve::inverse_velocity(
-    const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& task_vel, Eigen::VectorXd* joint_vel) {
+bool ArmSolve::inverse_velocity(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& task_vel, Eigen::VectorXd* joint_vel) {
     if (joint_vel == nullptr) {
         return false;
     }
@@ -184,9 +188,7 @@ bool ArmSolve::inverse_velocity(
     return true;
 }
 
-bool ArmSolve::static_force(const Eigen::VectorXd& joint_pos,
-                            const Eigen::VectorXd& joint_torque_residual,
-                            Eigen::VectorXd* task_force) {
+bool ArmSolve::static_force(const Eigen::VectorXd& joint_pos, const Eigen::VectorXd& joint_torque_residual, Eigen::VectorXd* task_force) {
     if (task_force == nullptr) {
         return false;
     }

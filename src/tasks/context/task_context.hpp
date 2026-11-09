@@ -33,6 +33,7 @@
 #include <robot_msgs/msg/admittance_cmd.hpp>
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
 #include <robot_msgs/msg/joint_traj_cmd.hpp>
+#include <robot_msgs/msg/target_face.hpp>
 
 /**
  * @brief 任务层共享上下文
@@ -54,6 +55,7 @@ public:
         std::string admittance_topic{"arm_admittance"};   ///< 导纳期望轨迹话题
         std::string base_frame{"base_link"};              ///< 末端位姿参考系
         std::string ee_frame{"link6"};                    ///< 末端执行器坐标系
+        std::string target_face_topic{"target_face"};     ///< 视觉目标面消息（TargetFace）
         double controller_idle_timeout{0.5};              ///< 切入新任务前等待控制器进入 idel 的最长时间（秒）
     };
 
@@ -144,6 +146,25 @@ public:
     bool end_effector_quaternion(std::vector<double>* quaternion) const;
 
     /**
+     * @brief 查询任意 TF 帧在基座系下的位姿
+     * @param frame       目标帧名（如 "target_face"）
+     * @param pose        输出：6 维任务空间向量 [x, y, z, rx, ry, rz]；可为 nullptr
+     * @param quaternion  输出：[x, y, z, w]；可为 nullptr
+     * @param stamp       输出：该 TF 的时间戳；可为 nullptr
+     * @return true 查询成功；false TF 不可用（帧不存在、链断裂或查询超时）
+     */
+    bool lookup_frame_pose(const std::string& frame, std::vector<double>* pose, std::vector<double>* quaternion,
+                           rclcpp::Time* stamp) const;
+
+    /**
+     * @brief 读取最近一帧视觉目标面消息
+     * @param msg 输出：消息副本
+     * @return true 已收到过至少一帧；false 尚未收到
+     * @note @c box_move 用它检查 valid、child_frame_id 与时间戳新鲜度。
+     */
+    bool latest_target_face(robot_msgs::msg::TargetFace* msg) const;
+
+    /**
      * @brief 发布笛卡尔轨迹指令
      * @param points  轨迹点，每个点为 6 维任务空间向量
      * @param seconds 与 @p points 一一对应的时刻（相对轨迹起点，秒）
@@ -197,13 +218,22 @@ private:
      */
     void on_joint_state(const sensor_msgs::msg::JointState::SharedPtr msg);
 
+    /**
+     * @brief /target_face 回调，缓存最近一帧视觉目标面
+     * @param msg 目标面消息
+     */
+    void on_target_face(const robot_msgs::msg::TargetFace::SharedPtr msg);
+
     rclcpp::Node::SharedPtr node_; ///< runner 节点
     Options options_;              ///< 上下文配置
 
     std::vector<double> joint_positions_;  ///< 最近一帧对齐后的关节角
     bool have_joint_states_{false};        ///< 是否已收到有效关节状态
+    robot_msgs::msg::TargetFace latest_target_face_; ///< 最近一帧视觉目标面
+    bool have_target_face_{false};                   ///< 是否已收到视觉目标面
 
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_; ///< /joint_states 订阅
+    rclcpp::Subscription<robot_msgs::msg::TargetFace>::SharedPtr target_face_sub_;  ///< /target_face 订阅
     rclcpp::Publisher<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_pub_;       ///< 笛卡尔轨迹发布
     rclcpp::Publisher<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_traj_pub_;     ///< 关节轨迹发布
     rclcpp::Publisher<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_pub_;    ///< 导纳期望轨迹发布
