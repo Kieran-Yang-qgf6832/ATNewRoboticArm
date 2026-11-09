@@ -45,8 +45,7 @@ public:
      * @param status_sink 任务状态出口；pos_move 的姿态漂移告警经它上报
      * @note 不持有 @p ctx 的所有权，其生命周期必须覆盖本对象
      */
-    TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx,
-                 std::function<void(const std::string&)> status_sink = {});
+    TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx, std::function<void(const std::string&)> status_sink = {});
 
     /**
      * @brief 加载并校验任务配置
@@ -114,13 +113,33 @@ private:
     bool run_task_space_move(const Step& step, const std::string& state_name, std::string* error);
 
     /**
-     * @brief 执行 pos_move：只约束位置的绝对目标轨迹
+     * @brief 执行 pos_move：位置约束的绝对目标轨迹
      *
-     * 目标是基座系 [x, y, z]；下发的 6 维消息里姿态分量照抄起点（控制器会投影掉），
-     * 模式标志置为 MODE_POSITION_ONLY。结束后除位置残差外，还量测相对起点姿态的
-     * 夹角，超过阈值只告警、不判失败。
+     * 目标是基座系 [x, y, z]。可选 @c orientation 四元数 [x, y, z, w]：
+     * - 缺省：下发的 6 维消息里姿态分量照抄起点，模式置为 MODE_POSITION_ONLY；
+     *   结束后量测相对起点姿态的夹角，超过 @c max_drift_deg 只告警、不判失败。
+     * - 给出：只取四元数的 z 轴，以起点姿态为基准构造最小旋转目标姿态，模式置为
+     *   MODE_POSITION_AND_TOOL_AXIS；结束后 z 轴角误差超过全局 axis_tolerance_deg
+     *   判失败（绕 z 的滚转不约束，也不再告警全姿态漂移）。
+     *
+     * @param precheck_rejected 输出：若控制器在**未运动**的情况下因预检拒绝而离开
+     *        cart_traj，置 true；box_move 用它决定是否回退到 position-only。
+     * @param strict_position 为 true 时，位置残差超过 @c step.tolerance 直接判失败；
+     *        为 false 时沿用 pos_move 的“只告警”行为。
      */
-    bool run_position_move(const Step& step, std::string* error);
+    bool run_position_move(const Step& step, std::string* error, bool* precheck_rejected = nullptr,
+                           bool strict_position = false);
+
+    /**
+     * @brief 执行 box_move：读取视觉目标面 TF，移动到箱体位姿
+     *
+     * 目标来源为 @c frame（默认 target_face）在基座系下的 TF，并同时检查
+     * TargetFace 消息的 valid 与时间戳新鲜度。5 维模式（位置 + 工具 z 轴）优先：
+     * link6 原点 = 面心 - tool_offset * 面 z，使工具尖端落在面心。
+     * 若控制器预检在未运动时拒绝，则自动回退为 position-only（目标仍为同一
+     * link6 位置，姿态不约束）；回退成功时步骤成功并上报告警。
+     */
+    bool run_box_move(const Step& step, std::string* error);
 
     /**
      * @brief 执行「切入某状态 -> 保持 duration -> 切回 idel」型步骤
@@ -158,17 +177,24 @@ private:
     /// 末端执行器开关量发布器（std_msgs/Bool，见 tool 步骤）
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr tool_pub_;
 
-    std::map<std::string, std::vector<double>> points_;      ///< 命名关节目标点（6 维关节角）
-    std::map<std::string, std::vector<double>> positions_;   ///< 命名基座系绝对目标（3 维）
-    std::map<std::string, std::vector<Step>> sequences_;     ///< 序列名 → 步骤列表
-    std::function<void(const std::string&)> status_sink_;    ///< 任务状态出口（可为空）
-    double default_max_drift_deg_{10.0};                     ///< pos_move 默认姿态漂移告警阈值（度）
-    std::string tool_name_{"tool"};                          ///< 当前末端执行器名（仅日志）
-    std::string tool_on_{"on"};                              ///< 「开」的语义名
-    std::string tool_off_{"off"};                            ///< 「关」的语义名
-    double step_timeout_{30.0};                              ///< 单步骤超时（秒）
-    double idel_hold_{0.3};                                  ///< 切到 idel 后的稳定时长（秒）
-    double settle_duration_{0.3};                            ///< 切入运动状态后的稳定时长（秒）
+    std::map<std::string, std::vector<double>> points_;    ///< 命名关节目标点（6 维关节角）
+    std::map<std::string, std::vector<double>> positions_; ///< 命名基座系绝对目标（3 维）
+    std::map<std::string, std::vector<Step>> sequences_;   ///< 序列名 → 步骤列表
+    std::function<void(const std::string&)> status_sink_;  ///< 任务状态出口（可为空）
+    double default_max_drift_deg_{10.0};                   ///< pos_move 默认姿态漂移告警阈值（度）
+    /// pos_move 工具 z 轴角容差（度）；必须与控制器 pos_move_axis_tolerance_deg 一致
+    double default_axis_tolerance_deg_{1.0};
+    /// box_move 的全局默认：视觉目标帧、工具尖端长度、等待与新鲜度阈值
+    std::string box_frame_{"target_face"};
+    double box_tool_offset_{0.039};
+    double box_target_timeout_{5.0};
+    double box_max_age_{0.5};
+    std::string tool_name_{"tool"}; ///< 当前末端执行器名（仅日志）
+    std::string tool_on_{"on"};     ///< 「开」的语义名
+    std::string tool_off_{"off"};   ///< 「关」的语义名
+    double step_timeout_{30.0};     ///< 单步骤超时（秒）
+    double idel_hold_{0.3};         ///< 切到 idel 后的稳定时长（秒）
+    double settle_duration_{0.3};   ///< 切入运动状态后的稳定时长（秒）
 
     /// joint_console 缺省执行时间（秒），仅在步骤未写 duration 时使用
     double console_default_duration_{3.0};
