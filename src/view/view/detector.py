@@ -44,7 +44,8 @@ from rcl_interfaces.msg import SetParametersResult
 from rclpy.exceptions import InvalidParameterTypeException
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (HistoryPolicy, QoSProfile, ReliabilityPolicy,
+                       qos_profile_sensor_data)
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
@@ -112,11 +113,34 @@ class RedQuadDetector(Node):
         self.declare_parameter('child_frame_id', 'target_face')
         self.declare_parameter('target_topic', 'target_face')
         self.declare_parameter('camera_axis', 'optical')
+        # 仿真里必须为 true：图像的 header.stamp 本身就是仿真时间，直接拿它发 TF，
+        # 不要依赖 use_sim_time。原因：mujoco_ros2_control 以**物理频率（500 Hz）**
+        # 发布 /clock，rclpy 的 TimeSource 订阅它时仅这一项就吃掉约一个核（实测
+        # use_sim_time=true 时空节点 106% CPU、false 时 1%），叠加 GIL 争用后检测
+        # 主循环从 30 Hz 掉到 1.3 Hz。实机用默认 false 即可。
+        self.declare_parameter('stamp_from_image', False)
+        # 图像订阅 QoS：sensor（默认，best-effort，与 RealSense 驱动一致）或
+        # reliable。MuJoCo 相机插件用 depth=1 的 reliable 发布，best-effort 订阅
+        # 实测只能收到 4.7~6.9 Hz（reliable 14.5 Hz），深度帧因此常常超过
+        # max_depth_age 被判过期，分面退化为单面。仿真 launch 传 reliable。
+        self.declare_parameter('image_qos', 'sensor')
         self._parent_frame_fallback = str(
             self.get_parameter('parent_frame_fallback').value)
         self._child_frame_id = str(self.get_parameter('child_frame_id').value)
         target_topic = str(self.get_parameter('target_topic').value)
         self._camera_axis = str(self.get_parameter('camera_axis').value)
+        self._stamp_from_image = bool(
+            self.get_parameter('stamp_from_image').value)
+        qos_name = str(self.get_parameter('image_qos').value).strip().lower()
+        if qos_name == 'reliable':
+            self._image_qos = QoSProfile(depth=10,
+                                         reliability=ReliabilityPolicy.RELIABLE,
+                                         history=HistoryPolicy.KEEP_LAST)
+        elif qos_name == 'sensor':
+            self._image_qos = qos_profile_sensor_data
+        else:
+            self._image_qos = qos_profile_sensor_data
+            qos_name = 'sensor（非法值 %r，已回落）' % qos_name
         # 覆盖值的类型必须与声明一致，否则 rclpy 直接抛异常、节点连启动日志都打不出来
         # （launch 曾把 min_area 当 INTEGER 传给声明成 DOUBLE 的参数）。类型不符就丢弃
         # 该覆盖、回落默认值，与 config_from_values 的“非法项不阻塞启动”保持同一策略。
@@ -156,9 +180,9 @@ class RedQuadDetector(Node):
         info_topic = self.get_parameter('camera_info_topic').value
         depth_topic = self.get_parameter('aligned_depth_topic').value
         self.create_subscription(Image, color_topic, self._on_color,
-                                 qos_profile_sensor_data)
+                                 self._image_qos)
         self.create_subscription(Image, depth_topic, self._on_depth,
-                                 qos_profile_sensor_data)
+                                 self._image_qos)
         self.create_subscription(CameraInfo, info_topic, self._on_camera_info, 10)
         self.add_on_set_parameters_callback(self._on_parameters)
 
@@ -170,6 +194,8 @@ class RedQuadDetector(Node):
         self.get_logger().info('彩色话题: ' + color_topic)
         self.get_logger().info('相机内参: ' + info_topic)
         self.get_logger().info('对齐深度: ' + depth_topic)
+        self.get_logger().info('图像 QoS: %s；图像时间戳作为唯一时间基准: %s'
+                               % (qos_name, self._stamp_from_image))
         self.get_logger().info(config_module.describe(self._config))
         self.get_logger().info('目标帧: %s -> %s，消息: %s，父帧优先取彩色 header.frame_id'
                                % (self._parent_frame_fallback,
@@ -265,7 +291,13 @@ class RedQuadDetector(Node):
         self.get_logger().warning(text)
 
     def _stamp_msg(self, color: Frame):
-        """TF 与消息统一用彩色帧 stamp；为 0 或明显偏离节点时钟时回落 now()。"""
+        """TF 与消息统一用彩色帧 stamp；为 0 或明显偏离节点时钟时回落 now()。
+
+        stamp_from_image=True 时无条件用图像时间戳（仿真时间），既不读节点时钟，
+        也不做漂移检查——图像头就是唯一时间基准。
+        """
+        if self._stamp_from_image and color.stamp > 0.0:
+            return Time(seconds=color.stamp).to_msg()
         now = self.get_clock().now()
         now_s = now.nanoseconds * 1e-9
         if (color.stamp <= 0.0

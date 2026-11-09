@@ -205,7 +205,8 @@ source /opt/ros/jazzy/setup.bash && source install/setup.bash
 ros2 launch launch_pack arm_real.launch.py show_rviz:=true
 ```
 
-**预期日志**：`loopback=false`、5 行 `dir=/zero=` 打印（当前是占位值）、`arm_controller[active]`。
+**预期日志**：`loopback=false`、5 行 `dir=/zero=` 打印（`dir` 已按固件 `inv_motor` 预填、
+`zero` 仍是 0）、`arm_controller[active]`。
 
 **为什么这时候机械臂不会动**：实机配置 `config/ros2_controller_real.yaml` 里 `exp_state: idel`（仿真那份是 `reset`），
 `idel` 只做一件事——锁存当前实测角度并原地保持。而且它下发的是「换算回 `q_raw` 后等于当前实测值」的指令，
@@ -244,14 +245,18 @@ Phase 5 第一次点动时才是第一次真正的比对）。
 
 ```yaml
 joints:
-  joint1: {dir:  1.0, zero: 0.0}
-  joint2: {dir: -1.0, zero: 0.0}   # 注意当前文件里 joint2 的 dir 已经是 -1（占位值中的特例）
-  joint3: {dir:  1.0, zero: 0.0}
+  joint1: {dir: -1.0, zero: 0.0}
+  joint2: {dir:  1.0, zero: 0.0}   # 固件 joint[2] 的 inv_motor = -1，符号仍待实机确认
+  joint3: {dir: -1.0, zero: 0.0}
   joint4: {dir:  1.0, zero: 0.0}
   joint5: {dir:  1.0, zero: 0.0}
 joint6:
   fixed: 0.0
 ```
+
+> 上面是仓库里**当前**的初值：`dir` 已按固件 `inv_motor` 预填，`zero` 全部为 0。
+> `dir` 仍要用 5.3 的实测确认（尤其 joint2），`zero` 必须用 5.4 摆到 URDF 零位后实测填入；
+> 在这之前只允许 `idel`，不要跑会动机械臂的序列。
 
 | 参数 | 含义 | 怎么定 |
 | --- | --- | --- |

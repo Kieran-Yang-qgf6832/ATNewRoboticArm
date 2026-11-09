@@ -8,8 +8,8 @@
 - 仿真：`ArmController` -> `SimPidController` -> `mujoco_ros2_control/MujocoSystem`
 - 实机：`ArmController` -> `ArmRealInterfaces` -> USB CDC -> MCU
 - 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，仿真默认 500 Hz；
-  实机差异在 `config/ros2_controller_real.yaml` 叠加覆盖（200 Hz、`idel`、
-  仿真增益 20%、重力前馈 0.1 倍）。
+  实机差异在 `config/ros2_controller_real.yaml` 叠加覆盖（100 Hz、`idel`、
+  位置增益 20%、**重力前馈关闭**，`gravity_compensation_scale: 0.1` 已备好但未启用）。
 - 仿真与实机共用同一份 `robotic_arm.urdf`，`arm_real.launch.py` 传
   `hardware:=real` 切换 `<ros2_control>` 块；`loopback:=true` 不打开 USB 设备，
   只用于无硬件冒烟。
@@ -65,18 +65,21 @@
   做一次逆解，不收敛就整条拒绝、**一个运动指令都不下发**（O2）。只查终点是因为单次
   逆解最坏约 386 µs，而控制周期是 2 ms。
 
-## 参数辨识（measure 状态）——当前结果不可用
+## 参数辨识（measure 状态）——已可用
 
-`ParamterMeasureState`（`measure`）生成傅里叶激励轨迹、跟踪它并把
-`position/velocity/torque` 记进 CSV。链路本身已跑通（见 `docs/bugs.md` O8），但
-**辨识结果非物理**，根因是**加速度**：CSV 里没有加速度列，离线辨识只能对 500 Hz 的记录速度
-做二次求导，相对误差 31.5%（换任何平滑参数只能到 20~34%）。记录力矩本身与刚体动力学在机器
-精度上一致（反解加速度满足 `‖M·a + bias − τ‖ = 1.4e-16`）。
+`ParamterMeasureState`（`measure`）生成傅里叶激励轨迹、跟踪它，并把
+`position/velocity/acceleration/effort` 与**仿真时间**记进 CSV。加速度不再是「对记录速度
+二次求导」，而是直接读 MuJoCo 的 `qacc`（`mujoco_ros2_control` 导出 `acceleration`
+状态接口，O8），因此辨识结果物理可行：
 
-**要修的话**：让本状态把加速度一起写进 CSV——`FourierTrajectory::acceleration(t)` 已经有解析
-值，只需给 `ExcitationTrajectory` 加一个取值接口并在 `run()` 里写入 `acc_*` 列；离线侧的
-`csv_loader` 与 `acceleration_source: recorded` 已经支持。注意解析加速度是**指令值**，
-精度取决于跟踪质量。详见 `docs/bugs.md` O8。
+- 好激励下参数误差 **0.0011%**、力矩预测误差 **0.0003%**、`physical_validation` 通过；
+  默认配置实测参数误差 **0.39%**（O8 修复前是 11.56%）。
+- 激励轨迹带碰撞/地面/力矩可行性约束（O11、O12），生成约 50 s，measure launch 的
+  `step_timeout` 默认已提到 240 s。
+- **不要把辨识输出当下一轮辨识的先验**：可辨识的只有 36 个基参数，其余落在零空间、
+  完全由先验填充，反复喂回去会让误差单调放大（30 轮 0.29% → 272.7%，C7）。
+
+详见 `docs/bugs.md` 的 O8 / O10–O12 与 `src/parameter_identify/README.md`。
 
 ## 离线排查工具
 

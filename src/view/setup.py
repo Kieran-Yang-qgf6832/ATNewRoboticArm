@@ -24,6 +24,7 @@ setup(
     entry_points={
         'console_scripts': [
             'red_quad_detector = view.detector:main',
+            'check_sim_vision = view.check_sim_vision:main',
         ],
     },
 )

@@ -6,11 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
-> **现状**：仿真链路已端到端跑通并验证；实机链路已打通到控制器层，
+> **现状**：仿真链路已端到端跑通并验证（含 MuJoCo 深度相机 + 红色目标检测）；实机链路已打通到控制器层，
 > **loopback 冒烟通过，尚未在真机上电验证**。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O11 已全部闭环。
+> 里面记了 10 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
+> `auto_declare`、**不要把辨识输出当下一轮先验**、仿真相机参数与 Python 节点时钟 等）。
+> F 系列与 O1–O14 已全部闭环。
 
 ## 常用命令
 
@@ -30,6 +31,12 @@ colcon build --packages-select arm_controller parameter_identify --symlink-insta
 ```bash
 # MuJoCo 仿真（控制器 + RViz）
 ros2 launch launch_pack arm_controller_test_sim.launch.py
+
+# 视觉链路（三个终端）：带相机与红色目标箱的场景 → 仿真相机 TF + 检测节点 → 数值验收
+ros2 launch launch_pack arm_controller_test_sim.launch.py \
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+ros2 launch view view_sim.launch.py        # 实机仍用 view.launch.py（RealSense 相机）
+ros2 run view check_sim_vision             # 退出码 0 = 通过
 
 # 任务层：跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
 ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
@@ -71,6 +78,24 @@ ArmController (controller_interface, 500 Hz)
 ```
 
 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，默认 500 Hz。
+
+### 视觉链路（MuJoCo → view）
+
+```
+scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
+  └── CameraPlugin（mujoco_ros2_control_plugins）
+        └── /vision_camera/{color, depth, camera_info}   640x480 / fovy 60 / 32FC1 深度
+              └── view/red_quad_detector（HSV → 四边形 → 深度分面 → PnP）
+                    └── /target_face（TargetFace）+ target_face TF（视觉光学系）
+                          └── ros2 run view check_sim_vision（转到 base_link 与真值比对）
+```
+
+- 相机安装位姿只有 `scene_vision.xml` 一个来源：`view_sim.launch.py` 启动时解析
+  `<camera pos/xyaxes>` 发 `base_link → vision_camera_link`，再固定一段绕 X 180° 的
+  `vision_camera_link → vision_camera_optical_frame`。改相机位置只改 MJCF。
+- 仿真场景用主仿真 launch 的 `mujoco_model:=.../scene_vision.xml` 切换；默认仍是
+  `scene.xml`（参数辨识共用，不能加箱子）。
+- 实机检测仍走 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离。
 
 ### 两层控制：控制器侧 FSM + 任务层配置驱动执行器
 
@@ -224,11 +249,18 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 - `src/launch_pack/launch/` 下 `arm_static_display.launch.py` 与
   `arm_mujoco_sim.launch.py` 仍引用不存在的包、当前不可用（`arm`、`arm_calc`、`arm_task`、
   `robot_driver`、`vision`），是旧版本遗留。可用入口：`arm_controller_test_sim.launch.py`、
-  `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟）。
+  `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟），
+  以及视觉链路的 `src/view/launch/view_sim.launch.py`（仿真，见上）。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
-- **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
+- **没有统一的自动化测试框架**：`src/view` 有 55 个 pytest（`cd src/view && python3 -m pytest -q`），
+  其余只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
+- **视觉链路有三个会静默出错的坑**（详见 `docs/bugs.md` C8–C10、O13、O14）：
+  `mujoco_plugins` 参数只能写在 YAML 的 `/**` 段（写 `controller_manager:` 下插件根本不加载）；
+  仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
+  检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
+  检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
 - **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 11 条序列只用到
   `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `tool` / `wait` 八类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，

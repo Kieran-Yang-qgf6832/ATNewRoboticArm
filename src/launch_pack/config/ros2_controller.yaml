@@ -126,3 +126,31 @@ arm_controller:
     # 改完记得看日志 "激励约束：" 行确认实际生效值。
     measure_traj_collision_safe_distance: 0.02
     measure_traj_ground_clearance: 0.01
+
+# ---------------------------------------------------------------------------------------
+# MuJoCo 插件配置（相机等）。
+#
+# 必须写成 /** 通配段：mujoco_ros2_control 在 controller_manager 进程内**另外**创建
+# 一个名为 mujoco_ros2_control_node 的节点来承载插件参数，按 controller_manager 键写
+# 的参数到不了那个节点（list_parameters 会找不到 mujoco_plugins，插件静默不加载）。
+#
+# 相机只在 scene_vision.xml 里存在；默认 scene.xml 没有相机，本段对普通仿真无影响。
+# 话题用 /vision_camera/* 而不是 RealSense 的 /camera/camera/*，仿真与实机数据在
+# 话题层面彻底分开（view_sim.launch.py 会把这三个话题传给检测节点）。
+# ---------------------------------------------------------------------------------------
+/**:
+  ros__parameters:
+    mujoco_plugins:
+      vision_camera_plugin:
+        type: "mujoco_ros2_control_plugins/CameraPlugin"
+        # 渲染线程出图频率。检测节点 30 Hz 取最新帧，15 Hz 足够且不抢物理线程。
+        camera_publish_rate: 15.0
+        vision_camera:
+          policy: streaming
+          # 图像 header.frame_id 必须是光学帧：检测节点只接受 optical 父帧（X 右、Y 下、
+          # Z 前）。MuJoCo 相机本身是 X 右、Y 上、光轴 -Z，180° 修正由 view_sim.launch.py
+          # 的第二段静态 TF（vision_camera_link -> vision_camera_optical_frame）承担。
+          frame_name: vision_camera_optical_frame
+          info_topic: /vision_camera/camera_info
+          image_topic: /vision_camera/color
+          depth_topic: /vision_camera/depth

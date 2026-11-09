@@ -2,9 +2,9 @@
 
 基于 ROS 2 与 `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式，并内置运动学/动力学计算、状态机控制、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
-> **当前状态**：仿真链路已端到端跑通并验证；实机链路已打通到控制器层，
-> **loopback 冒烟通过，尚未在真机上电验证**。
-> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O10 已全部闭环。
+> **当前状态**：仿真链路已端到端跑通并验证（含 MuJoCo 深度相机 + 红色目标检测）；
+> 实机链路已打通到控制器层，**loopback 冒烟通过，尚未在真机上电验证**。
+> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——F 系列与 O1–O14 已全部闭环。
 > **参数辨识链路可用**：measure 记录 MuJoCo 的真实关节加速度（`acc_*` 列）与仿真时间，
 > 辨识出的模型物理可行，参数误差 **0.39%**——见 [O8](docs/bugs.md) 与
 > [`src/parameter_identify/README.md`](src/parameter_identify/README.md)。
@@ -21,6 +21,10 @@
 - **轨迹插值**：五次 Hermite/Bezier 段插值，保证位置、速度、加速度连续。
 - **动力学参数辨识**：激励轨迹生成（傅里叶级数，可复现且保证关节限位可行）、CSV 测量
   记录（含真实关节加速度）、离线辨识与 URDF 回写。实测参数误差 0.39%、物理校验通过。
+- **视觉链路（MuJoCo 验证）**：`scene_vision.xml` 提供一台固定深度相机（640×480 / fovy 60°）
+  与边长 0.35 m 的红色目标箱，`view` 包执行 HSV 分割 → 四边形拟合 → 深度分面 → PnP，
+  发布 `TargetFace` 与目标面 TF；`ros2 run view check_sim_vision` 把结果经 TF 转到
+  `base_link` 与真值比对（实测面心 1.37 mm、法线 0.11°、箱心 1.17 mm）。
 - **实时安全约束**：控制热路径严格无 ROS 参数读写、无动态内存分配。
 - **失效安全**：逆解失败只保持并回退 `idel`，绝不使控制器链失活；不可达的笛卡尔目标在下发前就被拒绝。
 
@@ -66,7 +70,7 @@
 ## 目录结构
 
 ```
-ATNewRoboticArm/
+ATNewRoboticArm_Upper/
 ├── src/
 │   ├── arm_controller/         # 控制核心包（C++ 共享库 + 插件导出）
 │   │   ├── controller/         #   ROS 2 controller 与 hardware interface 插件
@@ -87,6 +91,7 @@ ATNewRoboticArm/
 │   ├── launch_pack/            # launch 文件、控制器 YAML、RViz 配置
 │   ├── mujoco_ros2_control/    # MuJoCo 的 ros2_control 插件（上游 dfki-ric）
 │   ├── parameter_identify/     # 离线动力学参数辨识（Python，ament_python）
+│   ├── view/                   # 红色目标视觉检测、仿真相机 TF 与数值验收（Python）
 │   └── robot_msgs/             # 自定义消息
 ├── third_party/
 │   ├── libcmaes/               # CMA-ES 优化库
@@ -109,7 +114,8 @@ ATNewRoboticArm/
 | `launch_pack` | ament_cmake | launch 文件与控制器配置 |
 | `mujoco_ros2_control` | ament_cmake | MuJoCo 仿真硬件插件（第三方） |
 | `parameter_identify` | ament_python | 离线动力学参数辨识 CLI（`identify_arm`） |
-| `robot_msgs` | ament_cmake | 自定义消息：`CartTrajCmd` / `JointTrajCmd` / `AdmittanceCmd` / `ServoCtrlCmd` / `Vector` / `MotorCmd` / `MotorState` |
+| `view` | ament_python | 红色目标视觉检测（`red_quad_detector`）、仿真相机 TF（`view_sim.launch.py`）与数值验收（`check_sim_vision`） |
+| `robot_msgs` | ament_cmake | 自定义消息：`CartTrajCmd` / `JointTrajCmd` / `AdmittanceCmd` / `ServoCtrlCmd` / `Vector` / `MotorCmd` / `MotorState` / `TargetFace` |
 
 ### `arm_controller` 导出的插件
 
@@ -230,6 +236,7 @@ ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p
 - Python：`numpy`、`scipy`、`pinocchio`、`pyyaml`；物理一致性重建还需要
   `picos` + `cvxopt`（缺了会退回 `nullspace`，结果可能非物理，见
   `src/parameter_identify/README.md`）
+- 视觉：`python3-opencv`、`numpy`；实机相机驱动 `realsense2_camera`
 
 ## 构建
 
@@ -295,6 +302,32 @@ ros2 launch launch_pack arm_real.launch.py
 > 实机只有 5 个自由度（joint6 无电机、机械锁死），所以任务空间降为 5 维
 > （位置 + 工具指向，不控绕工具轴滚转），`teach_pendant` 与 `measure` 在实机模式下被拒绝。
 
+### 3. 视觉链路（仿真）
+
+MuJoCo 场景 `scene_vision.xml` 里有一台固定深度相机和一个边长 0.35 m 的红色目标箱。
+三个终端分别负责：仿真、相机 TF + 检测、数值验收。
+
+```bash
+# 1) 用视觉场景启动仿真（默认仍是 scene.xml，参数辨识共用，不能加箱子）
+ros2 launch launch_pack arm_controller_test_sim.launch.py \
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+
+# 2) 仿真相机 TF（解析 MJCF 里的相机位姿）+ 检测节点
+ros2 launch view view_sim.launch.py            # display:=false 可关预览
+
+# 3) 数值验收：退出码 0 = 通过
+ros2 run view check_sim_vision
+```
+
+- 相机安装位姿只有 `scene_vision.xml` 一个来源，`view_sim.launch.py` 启动时直接解析
+  `<camera pos/xyaxes>`，再固定补一段绕 X 180° 的 optical 帧（MuJoCo 相机是 X 右 / Y 上 / −Z 前）。
+- 检测节点在仿真里**不开 `use_sim_time`**：`/clock` 是 500 Hz，rclpy 的 TimeSource 会吃掉
+  约一个核（O13）；改用图像 `header.stamp` 作唯一时间基准（`stamp_from_image:=true`）。
+- 图像订阅必须 `image_qos:=reliable`：相机插件是 `depth=1` 的 reliable 发布，best-effort
+  订阅会丢掉约 2/3 的帧，深度过期后分面退化为单面（O14）。
+- 实机检测仍用 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离；
+  该 launch 的默认参数未改动。
+
 ### 关于 `/arm_robot_description`
 
 `controller_manager` 是从**话题**（不是参数）取 URDF 的，而同 ROS domain 内任何其他
@@ -313,6 +346,13 @@ ros2 launch launch_pack arm_real.launch.py
 | `ik_solve <urdf> <t0..t5> <s0..s5>` | 用给定目标与初值跑一次逆解，报告 `Converged` / `Unreachable` / `Failed`、残余与耗时 |
 | `ik_benchmark` | 批量采样统计收敛率与迭代次数，用于扫描求解器参数 |
 | `arm_real_joint_count_test` | 不连硬件校验实机接口的关节数处理（5/6/7 关节） |
+
+`src/view` 另有一套 pytest（55 项，覆盖 HSV 分割、四边形拟合、深度分面、目标跟踪与节点发布），
+直接跑：
+
+```bash
+cd src/view && python3 -m pytest -q
+```
 
 ## 参数辨识工作流
 

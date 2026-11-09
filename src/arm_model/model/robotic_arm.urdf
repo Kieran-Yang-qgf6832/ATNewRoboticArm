@@ -19,12 +19,16 @@
   <!-- loopback：实机接口的本地回环，不打开 USB 设备，只用于无硬件冒烟。
        默认 false；接真机时必须保持 false。 -->
   <xacro:arg name="loopback" default="false"/>
+  <!-- mujoco_model：MuJoCo 加载的 MJCF 场景。默认 scene.xml（辨识/测量共用）；
+       视觉验证时由 launch 传 scene_vision.xml（多一台相机和一个红色目标箱）。
+       只影响仿真硬件块，实机与 pinocchio 解析都不读它。 -->
+  <xacro:arg name="mujoco_model" default="$(find arm_model)/model/scene.xml"/>
 
   <xacro:if value="${'$(arg hardware)' == 'mujoco'}">
   <ros2_control name="arm_hw" type="system">
     <hardware>
       <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
-      <param name="mujoco_model">$(find arm_model)/model/scene.xml</param>
+      <param name="mujoco_model">$(arg mujoco_model)</param>
       <!-- mujoco_ros2_control 的硬件参数：headless=true 时用 HeadlessAdapter 代替 GLFW，
            不开窗口、不跑渲染线程，物理线程照常推进。 -->
       <param name="headless">$(arg headless)</param>

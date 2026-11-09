@@ -1,0 +1,59 @@
+<mujoco model="robotic_arm_vision_scene">
+  <!--
+    视觉验证专用场景：scene.xml + 一台固定相机 + 一个红色目标箱。
+    刻意与 scene.xml 分开：scene.xml 同时被参数辨识（arm_measure_sim.launch.py）使用，
+    往里面加一个可碰撞箱子会让激励轨迹在它不知道的情况下撞上去，按 docs/bugs.md O11
+    的教训，接触冲量会直接污染辨识数据。默认仿真仍加载 scene.xml，不受本文件影响。
+
+    相机安装位姿只在本文件定义一次：view_sim.launch.py 启动时直接解析下面的
+    <camera> 元素（pos + xyaxes）生成 TF，渲染与算法用的是同一串数字。
+
+    MuJoCo 相机约定：X 右、Y 上、光轴沿 -Z。这里 Y 取世界 +Z，因此光轴严格水平；
+    X 取 (-0.18429, -0.98288, 0)，光轴 -Z = (0.98288, -0.18429, 0)，正好指向箱心
+    (0.8, 0, 0.175)——相机在 base_link 的 +y 0.15 m、与箱心同高 z=0.175。
+    ROS 光学帧（X 右、Y 下、Z 前）与相机帧差一个绕 X 的 180°，由 launch 的第二段
+    静态 TF 固定承担，本文件不掺和。
+  -->
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+  <include file="robotic_arm.xml"/>
+
+  <statistic center="0.55 0 0.3" extent="1.5"/>
+
+  <visual>
+    <headlight diffuse="0.2 0.2 0.2" ambient="0.35 0.35 0.35" specular="0.1 0.1 0.1"/>
+    <rgba haze="0 0 0 0"/>
+    <global offwidth="1920" offheight="1080"/>
+  </visual>
+
+  <default>
+    <geom group="2" rgba="0.5 0.5 0.9 0.35"/>
+  </default>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.35 0.55 0.75" rgb2="0.05 0.08 0.1" width="512" height="3072"/>
+    <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.25 0.3" rgb2="0.12 0.16 0.2"
+      markrgb="0.8 0.8 0.8" width="300" height="300"/>
+    <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
+  </asset>
+
+  <worldbody>
+    <geom name="ground" type="plane" size="50 50 0.3" pos="0 0 0" material="groundplane" contype="1" conaffinity="1"/>
+    <light name="main_light" pos="0 0 4" dir="0 0 -1" directional="true"/>
+
+    <!-- 仿真深度相机：640x480、fovy 60°，插件按 fovy 反推内参。 -->
+    <camera name="vision_camera" pos="0 0.15 0.175"
+            xyaxes="-0.18429 -0.98288 0  0 0 1"
+            fovy="60" resolution="640 480"/>
+
+    <!--
+      目标：边长 0.35 m 的红色立方体，静态落地（无 joint），中心 (0.8, 0, 0.175)。
+      绕 z 轴逆时针 31°：检测算法按**面心**算入射角（planes.incidence_degrees），
+      这样两个可见面分别是 51.3° 与 59.0°，都在 attach_third 的 65° 门限内，且差
+      7.7° 超过 tracker 的 5° 换面门槛，锁定面确定、不会周期性翻转。
+      group="0" 是显式指定，避免落到上面 default 里的 group 2。
+    -->
+    <geom name="red_box" type="box" size="0.175 0.175 0.175"
+          pos="0.8 0 0.175" quat="0.963630 0 0 0.267238"
+          rgba="1 0 0 1" group="0"/>
+  </worldbody>
+</mujoco>

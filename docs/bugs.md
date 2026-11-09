@@ -1,7 +1,8 @@
 # 缺陷记录
 
 > 范围：`src/arm_controller`（控制器 / 状态机 / 求解器）、`src/tasks`（任务层）、
-> `src/arm_model`（模型）、`src/launch_pack`（launch / 控制器配置）
+> `src/arm_model`（模型）、`src/launch_pack`（launch / 控制器配置）、
+> `src/view`（视觉检测与仿真相机接入）
 > 起点：把任务层从「7 个 C++ 任务类」重构为「配置驱动执行器」的过程中，为验证链路
 > 而做的端到端测试暴露了一批缺陷；此后又做了两轮专项排查（O1/O5 的笛卡尔失败、
 > O3/O6/O2/O4 的修复）。
@@ -13,12 +14,15 @@
 | §0 | **总览表——最新状态以它为准** |
 | §1 | 已修复缺陷的详细记录（现象、根因、修法、验证） |
 | §2 | O 系列条目正文（部分已修、部分已证伪，正文保留是因为实测数据仍有价值） |
-| §3 | **设计约束 C1–C7，动手前必读** |
+| §3 | **设计约束 C1–C10，动手前必读** |
 | §4 | 修复与提交对照 |
 | §5 | 方法论教训 |
 | §6 / §7 | O1 / O5 两轮专项排查的完整记录 |
+| §8 | 实机联调（与下位机固件的对齐、标定、验证状态） |
+| §9 | `pos_move`（只约束末端位置）实现与仿真验证 |
 
-**当前状态**：**F1–F12、O1–O12 全部闭环，参数辨识链路可用。**
+**当前状态**：**F1–F12、O1–O14 全部闭环，参数辨识与视觉链路可用；实机链路
+loopback 冒烟通过，尚未上电验证。**
 
 从「辨识结果非物理」（O8）一路排到「激励轨迹撞地面」（O11），最后一次专项排查（2026-10-13）
 之后：好激励下辨识参数误差 **0.0011%**、力矩预测误差 **0.0003%**，与真值模型一致，
@@ -57,13 +61,15 @@
 | **O9** | measure launch 的覆盖参数（`csv_file_path` / `trajectory_period` 等）全部静默失效 | 中 | **已修** | `00001b8` |
 | **O10** | 激励轨迹不可复现、质量波动极大（CMA-ES 随机种子取自时钟、600 次评估对 36 维欠收敛） | **高** | **已修** | `06af06d` |
 | **O11** | 激励轨迹没避开地面：工具网格钻进地面（−4.6 mm），接触冲量让模型残差出现 81.9 N·m 尖峰 | **高** | **已修** | `340e002` |
-| **O12** | 激励轨迹没有自碰撞与连杆-地面碰撞约束：随机位形 11/1000 处于自碰撞，link4/5/6 可低于 z=0 | **高** | **已修** | （本次，未提交） |
-| **R1** | 上位机通信帧（`0x5B/0x4A`、每电机 6 个 float）与固件（`int 0x01`、每电机 3 个 float）完全不兼容 | **严重** | **已修**（按固件 ABI 重写） | （本次，未提交） |
-| **R2** | USB CDC 的 PID 写成 `0x5740`，固件是 `0x5741`，设备打不开 | **严重** | **已修** | （本次，未提交） |
-| **R3** | 77 字节状态帧被 USB FS 拆成 64+13，上位机按「一次回调一帧」解析，永远收不到状态 | **严重** | **已修**（接口层拼帧） | （本次，未提交） |
-| **R4** | 实机只有 5 个电机，joint6 无电机、机械锁死；6 维到位判据永远不满足 | 高 | **已处理**（joint6 状态回写 + 5 维任务空间） | （本次，未提交） |
+| **O12** | 激励轨迹没有自碰撞与连杆-地面碰撞约束：随机位形 11/1000 处于自碰撞，link4/5/6 可低于 z=0 | **高** | **已修** | `42a5d55` |
+| **O13** | 仿真检测节点开 `use_sim_time` 后被 500 Hz `/clock` 拖死：主循环 30 Hz → 0.6~1.3 Hz（单帧算法只要 16~26 ms） | **高** | **已修**（改用图像时间戳） | （本次，未提交） |
+| **O14** | best-effort 订阅 depth=1 的 reliable 相机发布，丢帧到 4.7~6.9 Hz，深度超 0.5 s 被判过期，分面退化为单面 | **高** | **已修**（`image_qos` 参数） | （本次，未提交） |
+| **R1** | 上位机通信帧（`0x5B/0x4A`、每电机 6 个 float）与固件（`int 0x01`、每电机 3 个 float）完全不兼容 | **严重** | **已修**（按固件 ABI 重写） | `5a787c1` |
+| **R2** | USB CDC 的 PID 写成 `0x5740`，固件是 `0x5741`，设备打不开 | **严重** | **已修** | `5a787c1` |
+| **R3** | 77 字节状态帧被 USB FS 拆成 64+13，上位机按「一次回调一帧」解析，永远收不到状态 | **严重** | **已修**（接口层拼帧） | `5a787c1` |
+| **R4** | 实机只有 5 个电机，joint6 无电机、机械锁死；6 维到位判据永远不满足 | 高 | **已处理**（joint6 状态回写 + 5 维任务空间） | `5a787c1` |
 | **R5** | 固件没有指令看门狗：上位机或 USB 断链后，MCU 继续按最后一帧目标跑 | **高** | **已知限制，未修**（本次不动固件） | — |
-| **R6** | 实机上 `teach_pendant` / `measure` 物理不成立（MCU 不接收增益、不上报加速度） | 中 | **已修**（实机模式拒绝切入） | （本次，未提交） |
+| **R6** | 实机上 `teach_pendant` / `measure` 物理不成立（MCU 不接收增益、不上报加速度） | 中 | **已处理**（实机模式拒绝切入） | `5a787c1` |
 
 ---
 
@@ -1275,7 +1281,98 @@ python3 src/parameter_identify/tools/check_collision.py \
 3. **"包含所有连杆"这种直觉要先验证几何事实**：base_link 的网格本来就在地面以下 9.5 mm，
    纳入地面约束会让可行域恒为空。仿真里它是静态体，MuJoCo 根本不算它对地面的接触。
 4. **新约束会改变总耗时，必须同步检查任务层超时**：加碰撞约束后生成实测约 54 s，
-   任务层默认 30 s 的 `step_timeout` 会把一次成功的测量误判成失败。
+   而任务层当时默认 30 s 的 `step_timeout` 会把一次成功的测量误判成失败
+   （现已提高到 240 s）。
+
+---
+
+### O13 `use_sim_time=true` 把检测节点拖到 1 Hz【高】（已修）
+
+**现象**
+
+MuJoCo 视觉链路跑通后，检测节点的 `/target_face` 只有 **0.6~1.3 Hz**（`ros2 topic hz`
+实测 0.780 / 1.298），而同一份数据离线跑 `vision.detect()` 单帧只要 **16~26 ms**
+（640×480，红色 mask 55k 像素，分面模式）。检测进程 CPU 100%~110%，但主循环就是快不起来。
+节点日志里深度时有时无，`mode` 在 `single` 与 `dual` 之间漂。
+
+**根因**
+
+`mujoco_ros2_control` 的 `clock_publisher_` 在物理循环里发 `/clock`，频率等于
+`update_rate = 500 Hz`（`mujoco_simulation.cpp` 的 `publish_clock()`）。rclpy 节点开
+`use_sim_time=true` 后，TimeSource 会为它订阅 `/clock`，**每条消息都走一次 Python 回调**。
+实测（空节点 + `MultiThreadedExecutor(num_threads=2)`，6 s 均值）：
+
+| `use_sim_time` | CPU |
+| --- | --- |
+| `true` | **106%** |
+| `false` | **1%** |
+
+executor 线程持续抢 GIL，检测主循环的墙钟时间被拉长 20~50 倍——算法本身没变，是调度被拖死。
+
+**修法**
+
+`detector.py` 增加 `stamp_from_image`（默认 `false`）：为 `true` 时 `_stamp_msg()` 直接返回
+彩色帧 `header.stamp`，既不读节点时钟也不做漂移检查。仿真 launch 保持
+`use_sim_time=false` + `stamp_from_image=true`——图像头本身就是仿真时间，这本来就是感知
+节点该有的时间语义（TF 与消息都跟着传感器戳走）。
+
+**验证**
+
+| 项 | 修前 | 修后 |
+| --- | --- | --- |
+| `/target_face` 频率 | 0.6~1.3 Hz | **19 Hz** |
+| 消息 `header.stamp` | 混用墙钟 / 仿真时间 | 仿真时间（实测 `sec: 235`，不是 1.79e9 的墙钟） |
+| `check_sim_vision` | 超时、样本不足 | 30 帧全部 `dual`，PASS |
+
+**教训**：rclpy 订阅 500 Hz 的 `/clock` 不是"顺手开一下"的事；带 `/clock` 的仿真里，
+Python 侧节点应把传感器时间戳当唯一时间基准，别让 TimeSource 进主线程。
+
+---
+
+### O14 best-effort 订阅丢帧，深度过期让分面退化为单面【高】（已修）
+
+**现象**
+
+检测一直输出 `mode=single (1)`、`issues=[depth-stale]`、`has_box=false`，
+`check_sim_vision` 报「无箱体 339 帧」。但同时抓 `/vision_camera/color` 与
+`/vision_camera/depth` 的 `header.stamp`，**差值是 0.000 s**；两个话题各自
+`ros2 topic hz` 也有 8.7~11.8 Hz。也就是说深度并不旧，是检测节点**收不到**。
+
+**根因**
+
+`camera_plugin.cpp` 用 `create_publisher<Image>(topic, 1)`——reliable + `KEEP_LAST(1)`；
+检测节点用的是 `qos_profile_sensor_data`（best-effort）。同一话题 4 s 计数实测：
+
+| 订阅 QoS | 收到频率 |
+| --- | --- |
+| reliable（depth 10） | **14.5 Hz** |
+| best-effort（depth 10） | 6.9 Hz |
+| `qos_profile_sensor_data` | **4.7 Hz** |
+
+检测主循环（19 Hz）比图像快，读到的最新深度帧可能已经落后 0.5 s 以上，
+`usable_depth()` 判 `DEPTH_STALE`，`split_faces()` 整段被跳过 → 只剩单面 PnP，
+`has_box` 自然为 false。
+
+**修法**
+
+`detector.py` 增加 `image_qos` 参数（`sensor` 默认，与 RealSense 的 best-effort 发布一致；
+`reliable` 用于仿真）。`view_sim.launch.py` 传 `image_qos: reliable` 与发布端匹配。
+实机路径 `view.launch.py` 不动，仍用 `sensor`。
+
+**验证**
+
+`mode=dual 30/30`、`issues=[]`、`has_box=true`，验收 PASS：
+
+| 指标 | 实测 | 允许 |
+| --- | --- | --- |
+| 面心误差 | 1.37 mm | 20 mm |
+| 法线夹角 | 0.11° | 3° |
+| 箱心误差 | 1.17 mm | 15 mm |
+| 边长误差 | 0.70 / 11.87 / 0.51 mm | 15 mm |
+
+**教训**：QoS 不是"订阅端越宽松越通用"。发布端 `depth=1` 时 best-effort 读者会丢掉
+约 2/3 的帧；跨进程链路要么把发布端改成 `SensorDataQoS`，要么订阅端显式匹配，
+**不能靠"看起来兼容"**。
 
 ---
 
@@ -1388,6 +1485,49 @@ reset:  gravity_compensation=true (param found=no)
 
 ---
 
+### C8 `mujoco_plugins` 参数必须写在 `/**` 段，写在 `controller_manager` 下会被静默忽略
+
+`mujoco_ros2_control` 在 controller_manager 进程里**另外创建**一个名为
+`mujoco_ros2_control_node` 的节点来承载插件参数，插件加载器是在那个节点上
+`list_parameters({"mujoco_plugins"})`。YAML 里按 `controller_manager:` 键写的参数到不了它，
+后果是**插件根本不加载**，日志里只有一句容易被忽略的
+`No 'mujoco_plugins' parameter found!`。
+
+正确写法见 `src/launch_pack/config/ros2_controller.yaml` 末尾的 `/**` 段
+（`vision_camera_plugin`）。这和 C6 是同一类问题：**参数名对、层级错 = 静默失效**。
+验证方式是看目标节点：`ros2 param get /mujoco_ros2_control_node ...`，或看插件启动日志里的
+`Adding camera: '...'`。
+
+---
+
+### C9 仿真里的 Python 节点不要开 `use_sim_time`
+
+见 O13：本工程的 `/clock` 是 500 Hz，rclpy 的 TimeSource 订阅它单这一项就吃掉约一个核，
+带 GIL 的检测/控制节点会被拖慢一个数量级。**做法**：保持 `use_sim_time=false`，
+用消息自带的 `header.stamp`（本来就是仿真时间）作时间基准；
+`view` 的 `stamp_from_image:=true` 就是为此加的。
+
+> 这条只针对 Python 侧。`controller_manager`、`robot_state_publisher` 等 C++ 节点
+> 仍在用 `use_sim_time=true`，那是正常的。
+
+---
+
+### C10 仿真相机必须显式写 `resolution`，且 `frame_name` 必须是 optical 帧
+
+两个都会静默出错：
+
+1. `<camera>` 的 `resolution` 默认是 `0 0`，MuJoCo 会回落到 `<global offwidth/offheight>`
+   （本场景是 1920×1080）。相机插件按 `fovy` 反推 `K`，分辨率与检测节点
+   `camera_info` 的尺寸校验（`intrinsics-size`）绑定，分辨率不对会直接把 PnP 静默禁用。
+2. MuJoCo 相机帧是 **X 右、Y 上、光轴 −Z**，ROS 光学帧是 **X 右、Y 下、光轴 +Z**，
+   差一个绕 X 的 180°。检测节点只接受 `camera_axis=optical` 的父帧，姿态不对时
+   目标 TF 会被禁用。本工程把 180° 固定放在
+   `view_sim.launch.py` 的第二段静态 TF（`vision_camera_link → vision_camera_optical_frame`，
+   `q=(1,0,0,0)`），第一段 `base_link → vision_camera_link` 直接**解析 MJCF** 的
+   `<camera pos/xyaxes>`，保证渲染位姿与 TF 是同一串数字。
+
+---
+
 ## 4. 修复与提交对照
 
 | 提交 | 内容 |
@@ -1412,11 +1552,16 @@ reset:  gravity_compensation=true (param found=no)
 | `d0da87d` | 记录 C7：不要把辨识输出当下一轮先验（30 轮实测误差 0.29% → 272.7%） |
 | `2836d28` | 新增 `verify_torque.py`：拿最终 URDF 正演验证力矩，不信报告里的 rmse |
 | `340e002` | 激励轨迹加地面净空（卡工具最低点）与指令力矩可行性，残差尖峰 81.9 → 0.26 N·m（O11） |
-| （未提交） | 激励轨迹加自碰撞与连杆-地面碰撞约束：AABB 预筛 + 安全裕度碰撞查询（O12） |
+| `42a5d55` | 激励轨迹加自碰撞与连杆-地面碰撞约束：AABB 预筛 + 安全裕度碰撞查询（O12） |
+| `5a787c1` | 实机适配：按固件 ABI 重写通信帧、USB 状态拼帧、PID 修正、5 维任务空间、实机拒绝 teach/measure（R1–R6） |
+| `681664e` | 新增 `pos_move` 步骤：只约束末端位置、不约束姿态（§9） |
+| `aefd9b9` | `view`：红色目标面检测节点，发布 `TargetFace` 与目标面 TF |
+| （未提交） | MuJoCo 视觉链路：`scene_vision.xml`（相机 + 红色目标箱）、`mujoco_model` 参数、`view_sim.launch.py`、`check_sim_vision` 数值验收 |
+| （未提交） | 检测节点改用图像时间戳、新增 `image_qos` 参数（O13、O14） |
 
 ---
 
-## 5. 本轮的方法论教训
+## 5. 方法论教训（按轮次累积）
 
 1. **把策略集中化时，诊断信息必须一并迁移**（F7）。否则定位问题时要先把诊断补回来。
 2. **清理动作应放在生命周期钩子（`exit()`）里**，不要散落在 `run()` 的失败路径（F8）。
@@ -1657,7 +1802,7 @@ J_task_rot = J_r(ρ_e) · J_geom_rot
 
 ---
 
-## 8. 实机联调：与下位机固件的对齐（2026-10-26）
+## 8. 实机联调：与下位机固件的对齐（2026-10-26，2026-11-07 复核）
 
 下位机固件（`2026_R2_NEW_ARM_LOWER`）本次**一行未改**，全部适配放在上位机侧。
 下面每一条都对应一次实测/读数，不是推测。
@@ -1714,7 +1859,9 @@ USB FS bulk 上限 64 字节，77 字节帧在主机侧必然分成 64 + 13 两�
 固件角度是 `inv_motor × (编码器 − pos_offset)`，零位是固件上电标定的物理姿态，
 与 URDF 的 SolidWorks 零位没有共同基准；`joint[2]` 的 `inv_motor = -1`。
 上位机在 `ArmRealInterfaces` 里做 `q_urdf = dir·(q_raw − zero)`，参数在
-`arm_controller/config/joint_calibration.yaml`（当前是 `dir=1/zero=0` 占位值）。
+`arm_controller/config/joint_calibration.yaml`。当前已按固件 `inv_motor` 填了 `dir`
+（joint2 的符号仍标注为「待实机确认」），`zero` 全部还是 0，joint6 标成
+`fixed: 0.0`——**zero 必须在实机上摆到 URDF 零位后实测填入**，现在的值只够跑 loopback。
 
 标定工具 `tools/joint_calibrate.cpp`（不安装，构建后在 `build/arm_controller/`）：
 
@@ -1734,7 +1881,8 @@ ros2 run 不适用；直接用绝对路径：
   而模型质量/惯量只在仿真里辨识过；等通信与标定确认后再逐档打开。
 - `kp/kd/ki` 仍在 ros2_control 接口里保留（`ArmController` 硬性声明了这 6 个命令接口，
   删掉会激活失败），但**不上总线**，`write()` 里直接丢弃。
-- 气泵 `air_pump` 恒发 0：`/tool_cmd` 的通路本次未接（见 D2）。
+- 气泵 `air_pump` 恒发 0：`/tool_cmd` 目前没有订阅者，通路未接（`arm_real_interfaces.cpp`
+  里直接写死 `pack.air_pump = 0`）。
 
 ### 8.3 验证状态
 
@@ -1746,25 +1894,31 @@ ros2 run 不适用；直接用绝对路径：
 | 仿真链路激活冒烟 | 通过：`task_dim=6`、`real_mode=false`、控制器激活 |
 | 仿真 `reset_only` | 通过 |
 | 仿真 `reset_then_joint` | 通过 |
-| 仿真 `ready_then_cart` | **不稳定**：同代码 2 次里 1 次通过、1 次在 IK 阶段报 `joint6 is outside its model limit` |
-| 仿真 `pick_demo` | **失败**（4/4），都停在 `cart_move` 下降 5 cm 那一步，joint6 冲出限位 → IK 失败 → 安全保持 |
+| 仿真 `ready_then_cart` | 通过（2026-11-07 复核，见 §9.2；此前的「不稳定」是 install 混入旧工作区二进制导致的） |
+| 仿真 `pick_demo` | 通过（2026-11-07 复核，见 §9.2；下面保留当年失败时的归因记录） |
 | 仿真反例 `reset_then_cart` / `unreachable_near` / `unreachable_far` | 均按预期被拒绝（控制器退出 `cart_traj`、无崩溃） |
 | 实机真机联调 | **未做**，需现场标定后执行 |
 
-#### pick_demo 失败的归因（已排除本次改动）
+#### pick_demo 曾失败的归因（2026-11-07 已复核为通过）
+
+> **复核结论**：从本工作区全量重建后，`reset_only` / `reset_then_joint` /
+> `ready_then_cart` / `pick_demo` 四条 6 维序列全部通过（§9.2）。当时判定的
+> 「时序相关的偶发问题」并不是代码缺陷，而是 `install/` 里混入了另一份工作区的
+> 旧二进制与 YAML（见本节末尾的状态说明）。下面这段保留为历史记录。
 
 为了区分「本次改动」与「环境本身」，做了 A/B：把 `controller.cpp` 与 `default6dof_task.cpp`
 **还原成改动前的版本**（`/tmp` 备份），重新编译后在本工作区跑 `pick_demo` —— 仍然失败，
 且 `joint6 is outside its model limit` 一模一样。同时 `ready_then_cart` 在**同一份代码**上
 出现了「一次通过、一次失败」，说明这是**时序相关的偶发问题**，与协议/5 维改动无因果关系。
 
-共同特征是 joint6 几乎无刚度（`default_kp[5] = 1.0`，见 O11/O13）并漂到 ±π 限位：
+共同特征是 joint6 几乎无刚度（`default_kp[5] = 1.0`，见
+`src/launch_pack/config/ros2_controller.yaml`）并漂到 ±π 限位：
 仿真里 joint6 是真实电机但增益极低，cart 运动时被惯性带到限位；实机上 joint6 **没有电机**，
 5 维任务空间又把它从误差/雅可比里投影掉，因此这个失效模式在实机不会出现（也就不会修它）。
 
-> 另外注意：本工作区的 `install/` 里有若干条目是指向另一份工作区
->（`/home/kangy/MyProjects/ATNewRoboticArm`）的符号链接，`tasks` 的二进制与 YAML 都来自那里。
-> 想做可信的仿真回归，应先 `rm -rf build install` 从本工作区源码全量重建。
+> 环境状态（2026-11-09 核对）：`install/` 内的库、模型与头文件链接现在**全部指向本工作区**
+>（只有 `/opt/ros` 的环境钩子脚本指向系统路径），上面那条「跨工作区符号链接」的提示已失效。
+> 换机器或重新 clone 后仍建议先 `rm -rf build install` 全量重建一次再做回归。
 
 ## 9. `pos_move`（只约束末端位置）实现与仿真验证
 
@@ -1811,4 +1965,4 @@ ros2 run 不适用；直接用绝对路径：
 抑制效果有限，**不能靠它保证工具朝向**；姿态不约束是语义，告警才是可观测性保障。
 
 **本轮未执行**：`joint_console_only`（交互式，无法无人值守）、`measure_only`
-（长时测量会话，与本次改动无交集）。
+（本轮未重复；该链路已在 2026-10-10 / 10-12 独立验证，见 CLAUDE.md 的测量记录）。
