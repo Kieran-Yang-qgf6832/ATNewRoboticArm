@@ -568,7 +568,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         if (uses_to || uses_target || uses_action) {
             return fail(step->type + " accepts only 'offset'");
         }
-        // admittance_move 的 offset 是**可选**的（docs/bugs.md O14）：
+        // admittance_move 的 offset 是**可选**的（docs/bugs.md O22）：
         //   给 offset -> 旧的「导纳下的期望轨迹」语义（轨迹点 + 柔顺位移）；
         //   不给     -> 自由导纳：进入导纳后停 duration 秒，由外力推着走、撤力停下。
         // 自由导纳没有位移目标，所以不做「到位/残差」判定。

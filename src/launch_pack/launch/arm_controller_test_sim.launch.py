@@ -48,12 +48,13 @@ def generate_launch_description():
 
     urdf_path = os.path.join(arm_model_share, "model_4dof", "robotic_arm.urdf")
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
-    # MuJoCo 插件配置（外部力注入，docs/bugs.md O14）：导纳/示教的验收脚本要在末端施力。
+    # MuJoCo 插件配置（外部力注入，docs/bugs.md O22）：导纳/示教的验收脚本要在末端施力。
     mujoco_plugins_yaml = os.path.join(launch_pack_share, "config", "mujoco_plugins.yaml")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
 
     # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开；
     # headless 透传给 mujoco_ros2_control，默认 false = 保留 MuJoCo UI 窗口。
+    # mujoco_model 默认 scene.xml；视觉验证传 scene_vision.xml（含相机与红色箱子）。
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
@@ -61,6 +62,8 @@ def generate_launch_description():
             urdf_path,
             " headless:=",
             LaunchConfiguration("headless"),
+            " mujoco_model:=",
+            LaunchConfiguration("mujoco_model"),
         ]
     )
     robot_description = {
@@ -86,6 +89,15 @@ def generate_launch_description():
         "headless",
         default_value="false",
         description="是否关掉 MuJoCo 自带 UI 窗口（true = 纯命令行跑仿真）",
+    )
+
+    mujoco_model_arg = DeclareLaunchArgument(
+        "mujoco_model",
+        default_value=os.path.join(arm_model_share, "model", "scene.xml"),
+        description=(
+            "MuJoCo 加载的 MJCF 场景。默认 scene.xml（辨识/测量共用）；"
+            "视觉验证时传 arm_model/model/scene_vision.xml（含相机与红色目标箱）"
+        ),
     )
 
     show_rviz_arg = DeclareLaunchArgument(
@@ -229,6 +241,7 @@ def generate_launch_description():
     return LaunchDescription(
         [
             headless_arg,
+            mujoco_model_arg,
             show_rviz_arg,
             use_sim_time_arg,
             controller_manager_timeout_arg,

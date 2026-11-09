@@ -28,7 +28,7 @@
 #     漂 4–8°、15 cm 平移漂 10–12°。吸盘取放可以接受；需要严格贴面时改用 joint_move。
 #   · y 方向工作空间只有约 4 cm 厚（结构限制），|dy| 超过约 2 cm 的目标会被
 #     控制器在下发前判为不可达。
-#   · 4 轴模型下 admittance / teach_pendant 都可用（docs/bugs.md O14）：导纳的 M/D/K、
+#   · 4 轴模型下 admittance / teach_pendant 都可用（docs/bugs.md O22）：导纳的 M/D/K、
 #     限速、死区、滤波都按 task_space_dof 取值；不给 offset 时是自由导纳，给 offset 时
 #     是「轨迹 + 柔顺」。示教（teach）是零力拖动，靠 kd 阻尼停住。
 #
@@ -92,7 +92,7 @@ joint_limits:
     joint6: {min: -180.0, max: 180.0}   # URDF ±3.14159 rad
 
 sequences:
-  # 导纳演示（docs/bugs.md O14）：不带 offset = **自由导纳**。
+  # 导纳演示（docs/bugs.md O22）：不带 offset = **自由导纳**。
   #
   # 进入后控制器把「实测力矩 − 模型力矩」的残差当外力，按 M·ẍ + D·ẋ = F 积分成让开运动
   # （K = 0：撤力就停在原地）。速度受 admittance_velocity_limit（0.1 m/s）/ 自转上限
@@ -109,7 +109,7 @@ sequences:
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: admittance_move, duration: 25.0}
 
-  # 拖动示教演示（docs/bugs.md O14）：零力拖动（kp = 0、只留 kd 阻尼 + 重力前馈）。
+  # 拖动示教演示（docs/bugs.md O22）：零力拖动（kp = 0、只留 kd 阻尼 + 重力前馈）。
   # 同样需要外力脚本配合，一条命令的验收入口：
   #   python3 src/launch_pack/tools/admittance_demo_check.py --mode teach
   # 12 s 是给验收入口留的施力/撤力窗口；撤力后靠阻尼停住，不会自己滑出去。

@@ -24,7 +24,7 @@ public:
      * @brief 任务空间维度
      *
      * 4 轴臂的 6 维几何雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达
-     * （docs/bugs.md O13）。IKSolver / ArmSolve / 各 FSM 状态的任务维都从这里取，
+     * （docs/bugs.md O21）。IKSolver / ArmSolve / 各 FSM 状态的任务维都从这里取，
      * 不再写死 6。
      */
     virtual int task_dim() const = 0;

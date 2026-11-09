@@ -12,7 +12,7 @@
   3 条反例退出码 1（按设计在下发前拒绝）。
 - 导纳/示教专项验收：`--mode force` 2/2、`--mode admittance` 9/9、`--mode teach` 2/2 通过。
 - 辨识链路的 6 轴配置已修好，`identify_arm` 默认配置可以成功写 URDF；
-  但 4 轴测量数据质量仍不足，**辨识出的 URDF 不可用**（见 `docs/bugs.md` O15）。
+  但 4 轴测量数据质量仍不足，**辨识出的 URDF 不可用**（见 `docs/bugs.md` O23）。
 - 实机链路仍按 6 电机 MCU 帧，4 关节 URDF 会被 `ArmRealInterfaces::on_init` 拒绝；
   在确认硬件电机数前没有改动（安全相关）。
 
@@ -28,7 +28,7 @@
 | `src/launch_pack/rviz/display_config.rviz` | RobotModel/TF 里陈旧的四足 link 树替换为 `world -> base_link -> link1..link4` |
 | `src/launch_pack/rviz/arm_display_config.rviz` | `/robot_description` -> `/arm_robot_description`（与 O4 的话题重映射一致） |
 | `README.md` / `AGENT.md` / `CLAUDE.md` / `src/arm_controller/package.xml` / `src/parameter_identify/README.md` / `docs/teach/NOTES.md` | 4 轴现状、工具新用法、默认 frame、O8 已修等陈旧描述 |
-| `docs/bugs.md` | 新增 O15：4 轴辨识配置残留 + 高加速度数据质量待办 |
+| `docs/bugs.md` | 新增 O23：4 轴辨识配置残留 + 高加速度数据质量待办 |
 
 ## 3. 实验步骤
 
@@ -106,7 +106,7 @@ python3 src/parameter_identify/tools/verify_torque.py \
   corr 0.985，`physical_validation.passed: true`。
 - 但 `verify_torque.py` 显示辨识 URDF 对 CSV 的误差是**百万百分比**，
   `reconstruction_base_residual_after_projection` 也很大 —— **该 URDF 不可用于替换模型**。
-  根因与待办见 `docs/bugs.md` O15。
+  根因与待办见 `docs/bugs.md` O23。
 
 ## 5. 剩余问题（未伪装成已完成）
 
@@ -114,7 +114,7 @@ python3 src/parameter_identify/tools/verify_torque.py \
    URDF。若实机确为 4 电机，需要同步改协议、接口与 `arm_real_joint_count_test`；
    这属于安全/硬件相关，未擅自修改。
 2. **辨识精度**：4 轴 joint3 惯量小，高加速度段 `qacc` 与 `τ_act` 的时序/激励带宽
-   需要进一步处理；修好前不要把辨识 URDF 当先验（C7/O15）。
+   需要进一步处理；修好前不要把辨识 URDF 当先验（C7/O23）。
 3. **6 轴遗留的潜伏默认值**：`measure_end_effector_tool_offset: 0.07` 是 link6 实测值，
    当前因 `measure_end_effector_z_lower_limit: -inf` 不生效；若重新启用末端 z 约束，
    需要按 4 轴工具网格重新测量。

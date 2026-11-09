@@ -680,7 +680,7 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
 
             // position-only 的绝对目标可能离起点很远，额外等分采样中间点。采样必须在
             // **投影后**的任务空间做：直接截取 6 维消息的前几个分量不是 4 维映射的
-            // (x, y, z, q4) 投影（docs/bugs.md O13）。
+            // (x, y, z, q4) 投影（docs/bugs.md O21）。
             precheck_count_ = 0;
             if (position_only && precheck_sample_count_ > 0 && traj.size() >= 2) {
                 const Eigen::VectorXd& first = traj.front().pos;
@@ -1117,7 +1117,7 @@ bool ServoState::enter(const std::string& last_state, const rclcpp::Time& time) 
         return false;
     }
 
-    // 4 维任务空间下本状态不可用（docs/bugs.md O13）：它积分的是一条 6 维任务空间速度，
+    // 4 维任务空间下本状态不可用（docs/bugs.md O21）：它积分的是一条 6 维任务空间速度，
     // 而 4 轴臂只有 4 个任务自由度。这里显式拒绝并报 ERROR——工厂会放弃这次切换请求、
     // 保持当前位置并回到 idel，而不是让它在 run() 里以「逆解失败」的形式糊掉。
     if (task_dof_ != 6) {
@@ -1263,7 +1263,7 @@ AdmittanceState::AdmittanceState(const std::string& name, std::any ctx)
         param_stiffness_[i].store(admittance_stiffness_(index));
     }
 
-    // 限速 / 死区 / 滤波（docs/bugs.md O14）。按 C6 的教训，这些参数必须在 on_init 里
+    // 限速 / 死区 / 滤波（docs/bugs.md O22）。按 C6 的教训，这些参数必须在 on_init 里
     // auto_declare，否则 YAML 里写了也读不到；这里把实际生效值打进日志，便于核对。
     if (factory != nullptr && factory->node_ != nullptr) {
         double velocity_limit          = velocity_limit_.load();
@@ -1487,7 +1487,7 @@ bool AdmittanceState::enter(const std::string& last_state, const rclcpp::Time& t
         return false;
     }
 
-    // 4 轴模型下不再拒绝进入（docs/bugs.md O13 的临时限制已解除）：任务空间的全部语义
+    // 4 轴模型下不再拒绝进入（docs/bugs.md O21 的临时限制已解除）：任务空间的全部语义
     // 都由 TaskMapping 给出，M/D 也按 task_dof_ 取值，4 维与 6 维走同一套代码。
     for (std::size_t i = 0; i < joint_count_; ++i) {
         joint_pos_(static_cast<Eigen::Index>(i))      = factory->state_[i].position;
@@ -1690,7 +1690,7 @@ bool AdmittanceState::run(const rclcpp::Time& time) {
     }
     // 外力的广义力矩 = 模型力矩 − 实测力矩。刚体动力学是 M·qdd + C + g = τ_act + τ_ext，
     // 所以 τ_act − RNEA(q, dq, ddq) = **−τ_ext**：符号写反时导纳会朝背离受力的方向让开。
-    // 这一条是 O14 第 1 步「注入已知力、比对力估计」实测出来的（5 N 推力被估成 −4.76 N）。
+    // 这一条是 O22 第 1 步「注入已知力、比对力估计」实测出来的（5 N 推力被估成 −4.76 N）。
     for (std::size_t i = 0; i < joint_count_; ++i) {
         const auto index       = static_cast<Eigen::Index>(i);
         torque_residual_(index) = model_torque_(index) - factory->state_[i].torque;
@@ -1753,7 +1753,7 @@ TeachPendantState::TeachPendantState(const std::string& name, std::any ctx)
     factory->node_->get_parameter("default_kd", default_kd_param_);
 
     // 任务维从工厂取（4 轴模型是 4）：原先这里把姿态缓存与零向量写死成 6，
-    // 4 轴下 inverse_dynamic 直接抛「任务长度不对」，示教状态一进去就失败（O13/O14）。
+    // 4 轴下 inverse_dynamic 直接抛「任务长度不对」，示教状态一进去就失败（O21/O22）。
     task_dof_ = factory->task_dof_;
 
     const std::size_t param_capacity = std::max(joint_count_, default_kd_param_.size());

@@ -5,7 +5,7 @@
 #   /mujoco_ros2_control_node/external_wrench_plugin/apply_wrench
 # 用 `ros2 service list | grep apply_wrench` 可以确认（名字里带子命名空间）。
 #
-# 为什么需要它（docs/bugs.md O14）：导纳/拖动示教要验的是「被外力推着走」，
+# 为什么需要它（docs/bugs.md O22）：导纳/拖动示教要验的是「被外力推着走」，
 # 没有外力就只是在原地保持。ExternalWrenchPlugin 把 wrench 写进 MuJoCo 的
 # data->xfrc_applied，等效于在指定 body 上挂一个持续 duration 的外力；力的方向与
 # 应用点在 **body 局部坐标系**（link4），不是世界系。

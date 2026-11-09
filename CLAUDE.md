@@ -6,19 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 基于 ROS 2 (Jazzy) + `ros2_control` 的机械臂控制系统（当前生效模型为 **4 自由度**，6 自由度版本见 Git 历史），支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
 
-> **现状**：仿真链路已端到端跑通并验证；实机链路已打通到控制器层，
+> **现状**：仿真链路已端到端跑通并验证（含 MuJoCo 深度相机 + 红色目标检测）；实机链路已打通到控制器层，
 > **loopback 冒烟通过，尚未在真机上电验证**。
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 7 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O14 已闭环；
-> O15（4 轴辨识精度）配置侧已修，数据质量仍待办。
+> 里面记了 10 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
+> F 系列与 O1–O23 已记录（O23 的辨识精度待办）。
 
 > **模型切换说明（2026-10-17）**：`src/arm_model/model_4dof/` 是 **4 自由度**机械臂
 > （几何/惯量/限位/网格来自它自己的 SolidWorks 导出）。接口层沿用 6 自由度版本的写法：
 > URDF 带 `<ros2_control>`（effort 命令 + position/velocity/effort/acceleration 状态）
 > 与 xacro `headless` 参数，MJCF 用 `<motor>` 力矩执行器，scene 显式 `timestep=0.002`
 > 且地面参与碰撞。6 自由度模型原样保留在 `src/arm_model/model/`（不参与 4 轴构建，供跨分支同步对照）。
-> **任务空间已按 4 轴降维（2026-10-18，docs/bugs.md O13）**：控制器新增参数
+> **任务空间已按 4 轴降维（2026-10-18，docs/bugs.md O21）**：控制器新增参数
 > `task_space_dof`（默认 4），任务空间 = **(x, y, z, joint4 自转)**。4 轴臂的 6 维几何
 > 雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达（实测 6 维最小二乘"尽力而为"
 > 会把 pick_demo 的位置让出 28.6 mm）。任务层仍然发 6 维位姿，由控制器投影：取位置，
@@ -27,7 +26,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > `cart_move` 在 4 轴下可用：`pick_demo` / `ready_then_cart`（15 cm 行程）与
 > `cart_cycle_large`（4 段 × 15 cm 循环）是正例，仿真实测位置残余 0.3 / 0.7 / 0.2 mm；
 > `servo` 仍按 6 维定义，在 4 维模式下会**显式拒绝进入**并报 ERROR；`admittance` 与
-> `teach_pendant` **在 4 轴下已可用**（docs/bugs.md O14）：导纳没有轨迹时是**自由导纳**
+> `teach_pendant` **在 4 轴下已可用**（docs/bugs.md O22）：导纳没有轨迹时是**自由导纳**
 > （推着走、撤力停，平移限速 0.1 m/s、自转 0.5 rad/s，带死区/滤波/限幅），有轨迹时仍是
 > 「轨迹 + 柔顺」；示教是零力拖动（kp=0，只留 kd 阻尼 + 重力前馈）。文档与 YAML 里其余
 > 按 6 自由度整定的数值（joint5/joint6、link6 工具偏移、z≈1.233 m 的位姿等）只是历史参考。
@@ -60,6 +59,12 @@ colcon build --packages-select arm_controller parameter_identify --symlink-insta
 ```bash
 # MuJoCo 仿真（控制器 + RViz）
 ros2 launch launch_pack arm_controller_test_sim.launch.py
+
+# 视觉链路（三个终端）：带相机与红色目标箱的场景 → 仿真相机 TF + 检测节点 → 数值验收
+ros2 launch launch_pack arm_controller_test_sim.launch.py \
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+ros2 launch view view_sim.launch.py        # 实机仍用 view.launch.py（RealSense 相机）
+ros2 run view check_sim_vision             # 退出码 0 = 通过
 
 # 任务层：跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
 ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
@@ -105,6 +110,24 @@ ArmController (controller_interface, 500 Hz)
 ```
 
 控制配置在 `src/launch_pack/config/ros2_controller.yaml`，默认 500 Hz。
+
+### 视觉链路（MuJoCo → view）
+
+```
+scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
+  └── CameraPlugin（mujoco_ros2_control_plugins）
+        └── /vision_camera/{color, depth, camera_info}   640x480 / fovy 60 / 32FC1 深度
+              └── view/red_quad_detector（HSV → 四边形 → 深度分面 → PnP）
+                    └── /target_face（TargetFace）+ target_face TF（视觉光学系）
+                          └── ros2 run view check_sim_vision（转到 base_link 与真值比对）
+```
+
+- 相机安装位姿只有 `scene_vision.xml` 一个来源：`view_sim.launch.py` 启动时解析
+  `<camera pos/xyaxes>` 发 `base_link → vision_camera_link`，再固定一段绕 X 180° 的
+  `vision_camera_link → vision_camera_optical_frame`。改相机位置只改 MJCF。
+- 仿真场景用主仿真 launch 的 `mujoco_model:=.../scene_vision.xml` 切换；默认仍是
+  `scene.xml`（参数辨识共用，不能加箱子）。
+- 实机检测仍走 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离。
 
 ### 两层控制：控制器侧 FSM + 任务层配置驱动执行器
 
@@ -195,14 +218,14 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 可用**：4 维模式下它的 `enter()` 会打 ERROR 并拒绝进入，工厂放弃这次切换请求、保持当前
 位置并回到 `idel`（不会再像以前那样每个周期重试同一个状态、把切换机制卡死）。
 `admittance` / `teach_pendant` 已解除 4 维限制：任务维从 `TaskMapping` 取，M/D/K 按
-`task_dof` 取值（O13/O14）。导纳的状态语义：
+`task_dof` 取值（O21/O22）。导纳的状态语义：
 - **自由导纳**（进来但没收到 `arm_admittance` 轨迹）：期望位置锁在当前位姿，按
   `M·ẍ + D·ẋ = F_est` 积分，K 不参与；推着走、撤力停在原地；
 - **轨迹 + 柔顺**（收到轨迹）：沿用旧语义，导纳在轨迹点附近叠加柔顺位移；
 - 逆解失败（顶到关节限位/工作空间边界）时回滚到上一拍可行目标并清零速度，**状态保持**
   而不是报错回 `idel`。
 力估计 = `RNEA(q, dq, ddq_实测) − τ_act`（**注意是模型减实测**，符号反了会朝背离受力方向
-让开，O14），再过死区（0.5 N / 0.05 N·m）与 10 Hz 低通，并限幅到 20 N / 3 N·m
+让开，O22），再过死区（0.5 N / 0.05 N·m）与 10 Hz 低通，并限幅到 20 N / 3 N·m
 （近奇异位形下 `Jᵀf = τ` 的解会被 1/σ_min 放大）。`admittance_*` 与限速/死区/滤波/限幅
 都支持**热更新**（`ros2 param set` 立刻生效）。
 
@@ -282,11 +305,17 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   `robot_driver`、`vision`），是旧版本遗留。可用入口：`arm_controller_test_sim.launch.py`、
   `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟）、
   `arm_task_sim.launch.py`（仿真 + 跑 `tasks.yaml` 里的一条序列，`task_sequence` 选序列，
-  默认 `reset_then_joint`）。
+  默认 `reset_then_joint`），以及视觉链路的 `src/view/launch/view_sim.launch.py`（仿真）。
 - `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
-- **没有自动化测试框架**。只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
+- **没有统一的自动化测试框架**：`src/view` 有 55 个 pytest（`cd src/view && python3 -m pytest -q`），
+  其余只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
   （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
   构建后在 `build/arm_controller/` 里，用于排查与离线校验。
+- **视觉链路有三个会静默出错的坑**（详见 `docs/bugs.md` C8–C10、O21、O22）：
+  `mujoco_plugins` 参数只能写在 YAML 的 `/**` 段（写 `controller_manager:` 下插件根本不加载）；
+  仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
+  检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
+  检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
 - **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 11 条序列只用到
   `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `tool` / `wait` 八类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
@@ -295,7 +324,7 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   该 launch 支持 `csv_file_path` / `controller_urdf_path` / `trajectory_period` /
   `trajectory_repeat_cnt` / `move_to_start_duration` / `trajectory_seed` / `step_timeout`
   覆盖（见 O9、O10）。
-  `admittance` / `teach_pendant` 于 2026-10-18 端到端验证可用（O14）：
+  `admittance` / `teach_pendant` 于 2026-10-18 端到端验证可用（O22）：
   `admittance_move` **不给 `offset` = 自由导纳停留**（进导纳、停 duration 秒、回 `idel`），
   给 `offset` = 「轨迹 + 柔顺」；`teach` 只能从 `idel` 进，序列里 `joint_move` 之后要补一个
   `idel` 步骤。两条演示序列 `admittance_demo` / `teach_demo` 在 `tasks.yaml` 里，

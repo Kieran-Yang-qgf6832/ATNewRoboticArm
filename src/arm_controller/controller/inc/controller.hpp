@@ -184,7 +184,7 @@ private:
     void publish_current_state();
 
     /**
-     * @brief 发布导纳状态最近一拍的力估计（docs/bugs.md O14 的第 1 步复核入口）
+     * @brief 发布导纳状态最近一拍的力估计（docs/bugs.md O22 的第 1 步复核入口）
      *
      * 话题 @c ~/admittance_estimate（@c std_msgs::msg::Float64MultiArray）：前 task_dof 个
      * 分量是**死区/滤波之前**的原始估计，后 task_dof 个分量是死区 + 一阶低通之后的估计。

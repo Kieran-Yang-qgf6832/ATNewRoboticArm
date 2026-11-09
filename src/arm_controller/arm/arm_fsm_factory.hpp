@@ -82,7 +82,7 @@ public:
         model_     = std::make_shared<ModelFromURDF>(
             node->get_parameter("urdf_path").as_string(), node->get_parameter("end_effector_frame").as_string());
 
-        // 任务空间维度（docs/bugs.md O13）：4 轴臂的 6 维几何雅可比秩恒为 4，用 6 维
+        // 任务空间维度（docs/bugs.md O21）：4 轴臂的 6 维几何雅可比秩恒为 4，用 6 维
         // 任务空间时笛卡尔目标必然不可达（实测最小二乘「尽力而为」把位置让出 28.6 mm）。
         // 4 = (x, y, z, joint4 自转)；6 = (x, y, z, 旋转向量)。换回 6 轴模型时改参数即可。
         const int64_t task_space_dof = node->get_parameter("task_space_dof").as_int();

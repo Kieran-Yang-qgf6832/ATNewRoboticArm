@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""导纳 / 拖动示教的一条命令验收（docs/bugs.md O14）。
+"""导纳 / 拖动示教的一条命令验收（docs/bugs.md O22）。
 
 这个脚本是「做完」的判据，而不是演示：它会
   1. 起一套 headless 仿真（--no-sim 则连已在跑的仿真）；

@@ -157,7 +157,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<std::vector<double>>("admittance_mass", {1.0, 1.0, 1.0, 0.1, 0.1, 0.1});
     auto_declare<std::vector<double>>("admittance_damping", {20.0, 20.0, 20.0, 2.0, 2.0, 2.0});
     auto_declare<std::vector<double>>("admittance_stiffness", {0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
-    // 导纳的限速 / 死区 / 滤波（docs/bugs.md O14）。4 轴模型下 admittance 已可用：
+    // 导纳的限速 / 死区 / 滤波（docs/bugs.md O22）。4 轴模型下 admittance 已可用：
     //   · admittance_velocity_limit：平移速度模长上限（米/秒），斜推时不会被逐轴截断；
     //   · admittance_rotation_velocity_limit：工具自转速度上限（弧度/秒）；
     //   · admittance_force_deadband / admittance_torque_deadband：力估计死区。K = 0 时
@@ -169,7 +169,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("admittance_force_deadband", 1.5);
     auto_declare<double>("admittance_torque_deadband", 0.2);
     auto_declare<double>("admittance_force_filter_cutoff", 10.0);
-    // 力估计上限（O14）：近奇异位形下「τ = Jᵀ·F」的最小二乘解会被 1/σ_min 放大（实测
+    // 力估计上限（O22）：近奇异位形下「τ = Jᵀ·F」的最小二乘解会被 1/σ_min 放大（实测
     // 零位形进入导纳时被放大到 78 N / 12 N·m）。限幅只作用于进入导纳的那份估计，
     // 对外发布的原始估计保持不变，便于诊断。
     auto_declare<double>("admittance_force_limit", 20.0);
@@ -212,7 +212,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // end-effector frame"。默认值按当前生效的 4 自由度模型取 link4；换回 6 轴模型时
     // 由 ros2_controller.yaml 显式覆盖成 link6。
     auto_declare<std::string>("end_effector_frame", "link4");
-    // 任务空间维度（docs/bugs.md O13）：4 = (x, y, z, joint4 自转)，6 = (x, y, z, 旋转向量)。
+    // 任务空间维度（docs/bugs.md O21）：4 = (x, y, z, joint4 自转)，6 = (x, y, z, 旋转向量)。
     // 4 轴模型的 6 维几何雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达——
     // 实测最小二乘「尽力而为」会把位置让出 28.6 mm。换回 6 轴模型时改回 6。
     // 按 C6 的约定必须在 on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
@@ -270,7 +270,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
     // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。
     state_pub_ = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
-    // 导纳力估计出口（O14 第 1 步的复核入口）：只在 admittance 状态发布，数据来自状态内的原子快照。
+    // 导纳力估计出口（O22 第 1 步的复核入口）：只在 admittance 状态发布，数据来自状态内的原子快照。
     admittance_estimate_pub_ = node->create_publisher<std_msgs::msg::Float64MultiArray>(
         "~/admittance_estimate", rclcpp::QoS(1).transient_local());
     state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() {
@@ -370,7 +370,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
                         return result;
                     }
                 }
-                // 通过校验：暂存，整批成功后再写回状态机（热更新，O14）。
+                // 通过校验：暂存，整批成功后再写回状态机（热更新，O22）。
                 if (name == "admittance_mass") {
                     admittance_mass = values;
                 } else if (name == "admittance_damping") {

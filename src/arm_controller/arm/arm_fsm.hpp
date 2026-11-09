@@ -528,7 +528,7 @@ private:
  * @warning 实时约束：buffer 全部在构造阶段分配；\c run() 只读原子参数快照，不分配、不加锁
  * @see AdmittanceCmd
  * @see TeachPendantState
- * @see docs/bugs.md O13 / O14
+ * @see docs/bugs.md O21 / O22
  */
 class AdmittanceState : public FSM {
 public:
@@ -550,7 +550,7 @@ public:
      * @param last_state 上一个状态名称
      * @param time       进入时刻
      * @return true 进入成功；false 表示工厂/求解器未就绪或正运动学求解失败
-     * @note 4 轴模型下不再拒绝进入（docs/bugs.md O13 的临时限制已解除）
+     * @note 4 轴模型下不再拒绝进入（docs/bugs.md O21 的临时限制已解除）
      */
     bool enter(const std::string& last_state, const rclcpp::Time& time) override;
 
@@ -618,7 +618,7 @@ public:
      * @param filtered 输出：死区/滤波之后的力估计，长度需 >= task_dof()
      * @param capacity 两个输出缓冲的长度
      * @return 写入的分量数（= task_dof()）；capacity 不足时返回 0 且不写
-     * @note 读的是原子快照，可在任意线程调用；用于 O14 第 1 步「力估计复核」与服务端调参
+     * @note 读的是原子快照，可在任意线程调用；用于 O22 第 1 步「力估计复核」与服务端调参
      */
     std::size_t copy_force_estimate(double* raw, double* filtered, std::size_t capacity) const;
 
@@ -660,7 +660,7 @@ private:
                             const Eigen::VectorXd& feedforward_task_acceleration);
 
     /**
-     * @brief 把力估计限幅到物理合理的量级（docs/bugs.md O14）
+     * @brief 把力估计限幅到物理合理的量级（docs/bugs.md O22）
      *
      * 近奇异位形下 static_force() 的任务空间最小二乘解会被 1/σ_min 放大：实测零位形
      * （完全伸直、z 方向不可控）进入导纳时，四阶残差被放大成 78 N / 12 N·m 的假力，
@@ -797,7 +797,7 @@ public:
 private:
     FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
     std::size_t joint_count_{0};            ///< 关节数量
-    std::size_t task_dof_{0};               ///< 任务空间维（4 轴模型是 4，不再写死 6，见 O13）
+    std::size_t task_dof_{0};               ///< 任务空间维（4 轴模型是 4，不再写死 6，见 O21）
     std::vector<float> default_kd_;         ///< 默认速度增益
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
     Eigen::VectorXd joint_pos_;             ///< 关节位置
