@@ -36,6 +36,8 @@
  * 配置在 @ref load_config 中一次性解析并**全部校验**，任何非法配置都会在
  * 机械臂运动之前被拒绝。
  */
+class JointConsoleUi;
+
 class TaskExecutor {
 public:
     /**
@@ -46,6 +48,12 @@ public:
      * @note 不持有 @p ctx 的所有权，其生命周期必须覆盖本对象
      */
     TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx, std::function<void(const std::string&)> status_sink = {});
+
+    /// 析构：Qt UI 窗口必须先于节点销毁
+    ~TaskExecutor();
+
+    /// @return 本次任务是否用过 Qt UI（进程退出时需要绕过 Qt/atexit 清理）
+    bool used_ui() const { return used_ui_; }
 
     /**
      * @brief 加载并校验任务配置
@@ -85,12 +93,15 @@ private:
     bool run_joint_move(const Step& step, std::string* error);
 
     /**
-     * @brief 执行终端交互式关节运动（joint_console）
+     * @brief 执行交互式关节运动（joint_console）
      *
-     * 在步骤内部循环读终端：**逐项**输入，一次一个数——先 6 个关节角（**度**），
+     * 默认在步骤内部循环读终端：**逐项**输入，一次一个数——先 6 个关节角（**度**），
      * 再 1 个执行时间（秒，回车取默认值）。校验通过后以当前实测关节角为起点下发
      * @c JointTrajCmd。输入途中回车取消本组，@c exit 结束步骤；运动过程中输入
      * @c stop 会立刻把控制器切回 @c idel（在当前位置保持）。
+     *
+     * 步骤 @c ui: true 时改用 Qt5 窗口：按钮把同样的输入行写进 @c ConsoleQueue，
+     * 所以校验、起点、状态切换与 stop 语义与终端版完全一致；无 DISPLAY 时失败。
      *
      * @param step  步骤；@c duration 作为缺省执行时间（0 表示用节点参数）
      * @param error 输出：失败原因
@@ -214,4 +225,8 @@ private:
      * @c state_timer_ 周期调整，这里必须同步调整，可通过 @c state_settle 参数覆盖。
      */
     double state_settle_{0.6};
+
+    /// joint_console 的 Qt UI（仅在步骤 ui: true 时创建；销毁顺序见析构函数）
+    std::unique_ptr<JointConsoleUi> console_ui_;
+    bool used_ui_{false}; ///< 本次运行是否创建过 Qt UI
 };

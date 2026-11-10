@@ -19,7 +19,12 @@
 用法：
     ros2 launch launch_pack arm_controller_test_sim.launch.py
     ros2 launch launch_pack arm_controller_test_sim.launch.py show_rviz:=false
-    # 起好之后另开终端跑任务链（task_sequence 是**序列名**，不是步骤列表）
+    # 推荐：仿真 + task_runner 一条龙（默认打开 Qt 版 joint_console）
+    ros2 launch launch_pack arm_task_sim.launch.py
+    ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
+    # 视觉一条龙（抬高场景 + 检测 + box_move_demo）
+    ros2 launch launch_pack arm_task_vision_sim.launch.py
+    # 高级/实机：任务链也可以单独用 ros2 run（task_sequence 是**序列名**，不是步骤列表）
     ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="ready_then_cart"
     # 参数辨识用专门的一份配置（见 arm_measure_sim.launch.py）
     ros2 run tasks task_runner --ros-args -p use_sim_time:=true \
