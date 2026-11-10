@@ -27,6 +27,8 @@ find_package(ament_index_cpp REQUIRED)
 # 本机 vendor 的 ExternalProject 未构建，实际链接到系统 libyaml-cpp-dev (0.8.0)。
 find_package(yaml_cpp_vendor REQUIRED)
 find_package(yaml-cpp REQUIRED)
+# joint_console 的 Qt5 输入窗口（步骤 ui: true）。Ubuntu 24.04 上由 qtbase5-dev 提供。
+find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
 # 任务层核心库：
 #   context/  —— 与 arm_controller 的 ROS 接口封装（参数服务 / 话题 / TF）
@@ -36,6 +38,7 @@ add_library(tasks_core STATIC
   context/task_context.cpp
   executor/step_types.cpp
   executor/task_executor.cpp
+  executor/joint_console_ui.cpp
 )
 
 target_include_directories(tasks_core PUBLIC
@@ -58,11 +61,11 @@ ament_target_dependencies(tasks_core
 
 # 注意：ament_target_dependencies 内部使用 plain 签名调用 target_link_libraries，
 # 因此这里必须同样使用 plain 签名，不能写 PUBLIC/PRIVATE。
-target_link_libraries(tasks_core yaml-cpp::yaml-cpp)
+target_link_libraries(tasks_core yaml-cpp::yaml-cpp Qt5::Widgets)
 
 # 任务层入口
 add_executable(task_runner src/task_runner.cpp)
-target_link_libraries(task_runner tasks_core yaml-cpp::yaml-cpp)
+target_link_libraries(task_runner tasks_core yaml-cpp::yaml-cpp Qt5::Widgets)
 ament_target_dependencies(task_runner
   rclcpp
   rcl_interfaces

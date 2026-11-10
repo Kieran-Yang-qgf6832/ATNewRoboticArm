@@ -39,6 +39,7 @@ struct Step {
     std::string frame;               ///< box_move：视觉目标帧名（空 = 用全局默认）
     double tool_offset{-1.0};        ///< box_move：工具尖端沿 +z 到 link6 原点的距离（米）
     bool has_tool_offset{false};     ///< 步骤是否显式给出 tool_offset（区分 0 与“未写”）
+    bool ui{false};                  ///< joint_console：true = 打开 Qt 输入窗口
     double max_drift_deg{0.0};       ///< pos_move：姿态漂移告警阈值（度）；0 = 用配置默认值
     int yaml_line{0};                ///< 在 YAML 中的行号（1 起），用于报错定位
 };

@@ -26,7 +26,7 @@ const Entry kStepTable[] = {
     {"idel", false, false, "idel"},            // 切回 idel 并锁定当前位置
     {"reset", true, false, "reset"},           // 复位；ResetState::enter 要求 last_state == idel
     {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
-    {"joint_console", true, false, "joint_traj"}, // 终端交互式关节运动；用户接管，要求 idel 进出
+    {"joint_console", true, false, "joint_traj"}, // 终端/Qt UI 交互式关节运动；用户接管，要求 idel 进出
     {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹（严格保持姿态）
     {"pos_move", false, true, "cart_traj"},    // 位置绝对目标；可选 orientation 约束 link6 z 轴
     {"box_move", false, true, "cart_traj"},    // 读取视觉目标面 TF，移动到箱体位姿（5D，不可达回退位置）
@@ -51,7 +51,7 @@ const Entry* find_entry(const std::string& type) {
 bool is_allowed_field(const std::string& key) {
     static const char* kAllowed[] = {
         "type", "duration", "tolerance", "to", "target", "offset", "position", "orientation",
-        "frame", "tool_offset", "max_drift_deg", "action"};
+        "frame", "tool_offset", "max_drift_deg", "action", "ui"};
     for (const char* allowed : kAllowed) {
         if (key == allowed) {
             return true;
@@ -194,6 +194,12 @@ bool parse_step(const YAML::Node& node, Step* step, std::string* error) {
             }
             step->tool_offset     = node["tool_offset"].as<double>();
             step->has_tool_offset = true;
+        }
+        if (node["ui"]) {
+            if (!node["ui"].IsScalar()) {
+                return fail("'ui' must be a boolean");
+            }
+            step->ui = node["ui"].as<bool>();
         }
         if (node["max_drift_deg"]) {
             if (!node["max_drift_deg"].IsScalar()) {

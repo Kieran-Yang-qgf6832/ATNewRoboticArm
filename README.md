@@ -165,7 +165,7 @@ ros2 param set /arm_controller exp_state reset
 | `idel` | 切回 `idel` 并锁定当前位置 |
 | `reset` | 复位；等控制器状态回到 `idel` |
 | `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
-| `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止 |
+| `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止。步骤写 `ui: true` 时改为 Qt5 窗口 |
 | `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维），严格保持姿态 |
 | `pos_move` | 把末端移到基座系绝对位置（`to` / `position`）；可选 `orientation` 约束 link6 z 轴方向 |
 | `box_move` | 读取视觉目标面 TF（默认 `target_face`），工具 z 对齐面 z、工具尖端到面心；5D 预检不可达时自动回退到只到位置 |
@@ -220,10 +220,58 @@ ros2 param set /arm_controller exp_state reset
 | `pos_axis_demo` | 正常 | `pos_move` 的 `orientation`：先保持 ready 方向下移 5 cm，再回到 ready 并把工具 z 抬高 15° |
 | `box_move_demo` | 正常 | **抬高视觉场景**：`joint_move` 到 `box_pregrasp` 粗定位，再由 `box_move` 做最后约 10 cm 的视觉 5D 移动（位置残差 0.0015 m、工具轴误差 0.25°） |
 | `box_move_low` | 正常（回退） | **低处视觉场景**：5D 预检拒绝后自动回退 position-only；实测残差约 1.25 cm（演示容差 2 cm） |
+| `joint_console_ui` | 正常 | `joint_console` 的 Qt5 窗口版：6 个角度输入 + 执行时间 + Execute/Stop/Exit，实时当前角/限位 |
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
 | `unreachable_far` | **反例，预期失败** | 从 `ready` 沿 +X 平移 2 m，远远超出工作空间 |
 | `measure_only` | 正常 | **在 `measure.yaml` 里**（不在 `tasks.yaml`）：`idel → measure → idel`，参数辨识测量 |
+
+### Joint Console Qt UI
+
+`joint_console` 步骤写 `ui: true` 时不再读终端，而是打开 Qt5 窗口：6 个目标角度（度）、
+执行时间、Execute/Stop/Exit/Use current，实时显示当前角度与各关节限位。推荐直接走
+下面的「一条龙 launch」（默认就是 `joint_console_ui`）；已有仿真时也可以只起任务节点：
+
+```bash
+ros2 run tasks task_runner --ros-args -p task_sequence:="joint_console_ui" -p use_sim_time:=true
+```
+
+- 需要 `qtbase5-dev`（Ubuntu 24.04，本机已安装）与图形会话（`DISPLAY` 或
+  `WAYLAND_DISPLAY`）；无显示时步骤失败并提示改用终端版 `joint_console_only`。
+- 窗口输入通过 `ConsoleQueue` 注入，限位、单步、起点实测与 `stop` 语义和终端版
+  **完全共用**；Execute 在运动中禁用，Stop 立即切 `idel` 就地保持，关闭窗口在
+  运动中按 Stop 处理。快捷键：`Alt+E` 执行、`Alt+S` 停止、`Alt+X` 退出、
+  `Alt+C` 取当前角。
+
+### 一条龙 launch（推荐）
+
+```bash
+# 仿真 + 任务：默认打开 Qt joint_console
+ros2 launch launch_pack arm_task_sim.launch.py
+
+# 任意序列，任务结束后整个 launch 自动关闭
+ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
+
+# 视觉一条龙：抬高场景 + 相机 TF/检测 + box_move_demo
+ros2 launch launch_pack arm_task_vision_sim.launch.py
+
+# 低处回退验证
+ros2 launch launch_pack arm_task_vision_sim.launch.py \
+  task_sequence:=box_move_low \
+  mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+```
+
+`arm_task_sim.launch.py` 的 `exit_when_idle` 默认 `true`：任务/UI 退出后仿真一起关闭；
+想常驻换序列传 `exit_when_idle:=false`，之后用
+`ros2 param set /task_runner task_sequence "..."`。
+视觉 launch 会把同一个 `mujoco_model` 同时传给仿真和 `view_sim` 的 `scene_path`，
+避免相机 TF 与渲染场景不一致。
+
+> 用过 Qt UI 的 `task_runner` 在退出时走 `std::_Exit` 硬退出：Qt/xcb 的 atexit
+> 清理会卡住进程，导致 `ros2 launch` 一直等不到它结束。硬退出后 launch 能正常关停；
+> 正常（无 UI）序列仍走 `rclcpp::shutdown()`。
+
+`ros2 run` 仍可用于高级/实机场景，单独起任务链：
 
 ```bash
 # 跑一条序列（退出码反映成败）

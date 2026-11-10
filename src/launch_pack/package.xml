@@ -20,6 +20,8 @@
   <exec_depend>rviz2</exec_depend>
   <!-- arm_measure_sim.launch.py 会拉起 tasks/task_runner 跑 measure_only 序列 -->
   <exec_depend>tasks</exec_depend>
+  <!-- arm_task_vision_sim.launch.py 会拉起 view/view_sim.launch.py 的相机 TF 与检测节点 -->
+  <exec_depend>view</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

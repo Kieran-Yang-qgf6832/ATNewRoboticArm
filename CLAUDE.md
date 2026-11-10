@@ -32,13 +32,19 @@ colcon build --packages-select arm_controller parameter_identify --symlink-insta
 # MuJoCo 仿真（控制器 + RViz）
 ros2 launch launch_pack arm_controller_test_sim.launch.py
 
+# 一条龙（推荐）：仿真 + task_runner；默认打开 Qt joint_console，任务/UI 退出后自动关仿真
+ros2 launch launch_pack arm_task_sim.launch.py
+ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
+# 视觉一条龙：抬高场景 + 相机 TF/检测 + box_move_demo
+ros2 launch launch_pack arm_task_vision_sim.launch.py
+
 # 视觉链路（三个终端）：带相机与红色目标箱的场景 → 仿真相机 TF + 检测节点 → 数值验收
 ros2 launch launch_pack arm_controller_test_sim.launch.py \
     mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
 ros2 launch view view_sim.launch.py        # 实机仍用 view.launch.py（RealSense 相机）
 ros2 run view check_sim_vision             # 退出码 0 = 通过
 
-# 任务层：跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
+# 任务层（高级/实机）：单独跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
 ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
 
 # 任务层：换一份任务配置文件
@@ -143,6 +149,14 @@ z 轴角误差作为硬失败判据。四个 `pos_move_*` 参数必须 `auto_dec
 喂队列、主线程照常自旋，否则等待期间 `/joint_states` 会停在旧值（首点不一致即跳变）。
 `stop` 依赖控制器侧改动：`CartTrajState` / `JointTrajState` 的 `check_switch()` 在运动中也
 响应 `exp_state=idel`（其余目标仍要求轨迹走完），否则 `stop` 只能等轨迹跑完才生效。
+步骤写 `ui: true` 时改用 C++ Qt5 窗口：6 个目标角度 + 执行时间 + Execute/Stop/Exit/
+Use current，实时显示当前角与限位；按钮把输入写进**同一个** `ConsoleQueue`，所以
+限位、单步、起点实测与 `stop` 语义和终端版完全一致。窗口需要 `qtbase5-dev` 与
+`DISPLAY`/`WAYLAND_DISPLAY`，无显示时步骤失败并提示改用终端版；现成入口是
+`joint_console_ui` 序列。用过 UI 的进程在 main 末尾直接 `std::_Exit` 硬退出——Qt/xcb 的
+atexit 清理会卡住进程，`ros2 launch` 收不到退出；硬退出后 `arm_task_sim.launch.py`
+才能正常关停。**不要用 `fflush(nullptr)` 代替**：它会去锁 stdin，而 `ConsoleQueue`
+的读者线程正阻塞在 `getline` 里持有那把锁。
 
 任务层通过 `TaskContext` 与控制器交互：
 - `exp_state` 参数服务 → 切换控制器工作状态
@@ -271,7 +285,7 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
   检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
   检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 14 条序列用到
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 15 条序列用到
   `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `box_move` / `tool` / `wait` 九类步骤。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；

@@ -34,6 +34,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <memory>
 #include <string>
@@ -138,6 +140,9 @@ public:
         status_pub_->publish(message);
     }
 
+    /// @return 本次进程是否创建过 Qt UI；为 true 时 main 需要硬退出绕过 Qt 清理
+    bool used_ui() const { return ui_used_; }
+
     /**
      * @brief 保持 idel 若干秒，让控制器完成状态切换
      * @param ctx     任务上下文
@@ -201,13 +206,25 @@ public:
         }
         RCLCPP_INFO(get_logger(), "available sequences: %s", join(executor.sequence_names()).c_str());
 
-        // 3. 等待控制器与关节反馈就绪；未就绪时持续重试，进程不退出。
+        // 3. 等待控制器、关节反馈与 idel 状态就绪；未就绪时持续重试，进程不退出。
+        //    只等 service 存在还不够：controller_manager 会在控制器真正激活前就暴露
+        //    /arm_controller/set_parameters，此时 current_state 仍是 <unknown>；直接
+        //    跑序列会在 reset/joint_console 的 ensure_idel 里失败。这里显式等 idel。
+        rclcpp::WallRate startup_rate(5.0);
         while (rclcpp::ok()) {
             if (ctx->wait_for_controller(5.0) && ctx->wait_for_joint_states(startup_timeout_)) {
-                break;
+                const std::string state = ctx->controller_state(2.0);
+                if (state == "idel") {
+                    break;
+                }
+                RCLCPP_INFO_THROTTLE(
+                    get_logger(), *get_clock(), 3000, "waiting for arm_controller to become idel (current state '%s')",
+                    state.empty() ? "<unknown>" : state.c_str());
+            } else {
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(), *get_clock(), 5000, "waiting for arm_controller and /joint_states before running tasks");
             }
-            RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 5000, "waiting for arm_controller and /joint_states before running tasks");
+            startup_rate.sleep();
         }
         if (!rclcpp::ok()) {
             return true;
@@ -221,7 +238,8 @@ public:
                 RCLCPP_INFO(get_logger(), "no task_sequence set; set it to one of: %s", join(executor.sequence_names()).c_str());
             } else {
                 publish_status("sequence:pending " + sequence);
-                const bool ok = executor.run_sequence(sequence);
+                const bool ok    = executor.run_sequence(sequence);
+                ui_used_         = executor.used_ui();
                 last_sequence_ok = ok;
                 if (ok) {
                     publish_status("sequence:finished " + sequence);
@@ -271,6 +289,7 @@ private:
     double exit_settle_{0.5};                ///< 结束前保持 idel 的时长（秒）
     double controller_idle_timeout_{0.5};    ///< 切入任务前等待 idel 的最长时间（秒）
     bool exit_when_idle_{false};             ///< 序列跑完后立即退出
+    bool ui_used_{false};                    ///< 是否创建过 Qt UI（决定 main 的退出方式）
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_; ///< 任务状态发布器
 };
 
@@ -293,6 +312,19 @@ int main(int argc, char** argv) {
         exit_code = 1;
     }
 
+    // 用过 Qt UI 时不走正常退出：QApplication 与 xcb 线程在 atexit/静态析构阶段会卡住，
+    // 表现为 rclcpp::shutdown() 之后进程仍不退出（ros2 launch 无法关停）。
+    // 此时节点已无待办，直接硬退出；ROS 清理交给内核。
+    // 注意只 flush stdout/stderr：fflush(nullptr) 会去锁 stdin，而 ConsoleQueue 的
+    // 读者线程正阻塞在 getline 里持有那把锁，会死锁。
+    if (node->used_ui()) {
+        RCLCPP_INFO(node->get_logger(), "Qt UI session finished; hard exit to avoid Qt/atexit hang");
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(exit_code);
+    }
+
+    RCLCPP_INFO(node->get_logger(), "task runner finished; shutting down ROS");
     rclcpp::shutdown();
     return exit_code;
 }

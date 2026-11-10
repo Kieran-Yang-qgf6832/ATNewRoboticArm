@@ -21,6 +21,8 @@
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include "joint_console_ui.hpp"
+
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
@@ -233,10 +235,21 @@ public:
         return *queue;
     }
 
+    /// 把一行放到队尾（Qt UI 的 Execute/Stop/Exit 按钮也走同一条输入队列）
+    void push_back(const std::string& line) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        lines_.push_back(line);
+    }
+
     /// 把一行插回队首（运动中收到的非 stop 输入要按顺序留给下一轮）
     void push_front(const std::string& line) {
         std::lock_guard<std::mutex> lock(mutex_);
         lines_.push_front(line);
+    }
+
+    /// UI 模式下 stdin 可能是 EOF（ros2 launch 没有终端输入），不能因此结束步骤。
+    void set_ui_mode(bool enabled) {
+        ui_mode_.store(enabled);
     }
 
     /**
@@ -256,7 +269,7 @@ public:
 
     /// @return 读者线程是否已因 EOF 结束（终端被关闭或输入被重定向到空文件）
     bool eof() const {
-        return eof_.load();
+        return eof_.load() && !ui_mode_.load();
     }
 
 private:
@@ -276,6 +289,7 @@ private:
     mutable std::mutex mutex_;      ///< 保护 lines_
     std::deque<std::string> lines_; ///< 待消费的整行
     std::atomic<bool> eof_{false};  ///< 读者线程是否已结束
+    std::atomic<bool> ui_mode_{false}; ///< Qt UI 模式：忽略 stdin EOF
 };
 
 /// 去掉首尾空白（含制表符与回车），便于解析与命令比较。
@@ -338,6 +352,8 @@ TaskExecutor::TaskExecutor(const rclcpp::Node::SharedPtr& node, TaskContext* ctx
         tool_pub_                    = node_->create_publisher<std_msgs::msg::Bool>(tool_topic, rclcpp::QoS(10).transient_local());
     }
 }
+
+TaskExecutor::~TaskExecutor() = default;
 
 std::vector<std::string> TaskExecutor::sequence_names() const {
     std::vector<std::string> names;
@@ -630,9 +646,10 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     const bool uses_orientation = !step->orientation.empty();
     const bool uses_frame       = !step->frame.empty();
     const bool uses_tool_offset = step->has_tool_offset;
+    const bool uses_ui          = step->ui;
 
     if (step->type == "joint_move") {
-        if (uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
+        if (uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
             return fail("joint_move accepts only 'to' or 'target'");
         }
         if (uses_to) {
@@ -672,7 +689,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         if (!uses_to && !uses_position) {
             return fail("pos_move requires either 'to' (a position name) or 'position' ([x, y, z])");
         }
-        if (uses_offset || uses_target || uses_action || uses_frame || uses_tool_offset) {
+        if (uses_offset || uses_target || uses_action || uses_frame || uses_tool_offset || uses_ui) {
             return fail("pos_move accepts only 'to' / 'position' / 'orientation' / 'max_drift_deg'");
         }
         if (uses_to) {
@@ -728,7 +745,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     if (step->type == "cart_move" || step->type == "admittance_move") {
-        if (uses_to || uses_target || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
+        if (uses_to || uses_target || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
             return fail(step->type + " accepts only 'offset'");
         }
         if (!uses_offset) {
@@ -749,7 +766,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     if (step->type == "tool") {
-        if (uses_to || uses_target || uses_offset || uses_orientation || uses_frame || uses_tool_offset) {
+        if (uses_to || uses_target || uses_offset || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
             return fail("tool accepts only 'action'");
         }
         if (!uses_action) {
@@ -777,7 +794,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
 
     if (step->type == "box_move") {
         if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || !step->position.empty()
-            || step->max_drift_deg > 0.0) {
+            || step->max_drift_deg > 0.0 || uses_ui) {
             return fail("box_move accepts only 'duration' / 'tolerance' / 'frame' / 'tool_offset'");
         }
         if (step->frame.empty()) {
@@ -797,7 +814,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     // wait / idel / reset / teach / measure 不接受任何额外字段。
-    if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset
+    if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui
         || !step->position.empty() || step->max_drift_deg > 0.0) {
         return fail(step->type + " accepts no fields other than 'duration' and 'tolerance'");
     }
@@ -996,6 +1013,37 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
         return false;
     }
 
+    // ---- Qt UI（步骤 ui: true）----
+    // UI 只负责把目标角度/时间写进 ConsoleQueue；下面的解析、限位、单步、
+    // 起点实测、状态切换与 stop 逻辑与终端版完全共用。
+    JointConsoleUi* ui = nullptr;
+    if (step.ui) {
+        used_ui_ = true;
+        if (!console_ui_) {
+            console_ui_ = std::make_unique<JointConsoleUi>(
+                joints, joint_min_, joint_max_, console_max_step_, default_duration,
+                [](const std::string& line) { ConsoleQueue::instance().push_back(line); });
+        }
+        if (!console_ui_->available()) {
+            return fail("joint_console: Qt UI unavailable: " + console_ui_->error());
+        }
+        ui = console_ui_.get();
+        ConsoleQueue::instance().set_ui_mode(true);
+        ui->set_current_positions(ctx_->joint_positions());
+        ui->sync_targets_to_current();
+        ui->show();
+    }
+
+    struct UiGuard {
+        JointConsoleUi* ui{nullptr};
+        ~UiGuard() {
+            if (ui != nullptr) {
+                ui->hide();
+                ConsoleQueue::instance().set_ui_mode(false);
+            }
+        }
+    } ui_guard{ui};
+
     // 关节顺序与限位先打一遍：用户不必凭记忆确认哪一列对应哪个关节。
     std::string table;
     for (std::size_t i = 0; i < joint_count; ++i) {
@@ -1007,11 +1055,16 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             table += "[" + format_deg(joint_min_[i]) + ", " + format_deg(joint_max_[i]) + "]";
         }
     }
-    RCLCPP_INFO(
-        node_->get_logger(),
-        "joint_console: 逐项输入 %zu 个关节角（度），再输入执行时间（秒，回车取默认 %.2f）；"
-        "输入途中回车取消本组，exit 结束，运动中 stop 立即停止",
-        joint_count, default_duration);
+    if (ui != nullptr) {
+        RCLCPP_INFO(
+            node_->get_logger(), "joint_console: Qt UI 已打开；输入目标后点 Execute，Stop 立即切 idel，Exit 结束步骤");
+    } else {
+        RCLCPP_INFO(
+            node_->get_logger(),
+            "joint_console: 逐项输入 %zu 个关节角（度），再输入执行时间（秒，回车取默认 %.2f）；"
+            "输入途中回车取消本组，exit 结束，运动中 stop 立即停止",
+            joint_count, default_duration);
+    }
     RCLCPP_INFO(node_->get_logger(), "joint_console: 关节顺序与限位（度） %s", table.c_str());
     if (console_max_step_ > 0.0) {
         RCLCPP_INFO(node_->get_logger(), "joint_console: 单步最大变化 %s 度", format_deg(console_max_step_).c_str());
@@ -1021,11 +1074,18 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
     std::deque<std::string> pending;
     rclcpp::WallRate idle_rate(50.0);
 
-    // 取一行：优先进运动期间排队的输入，其次等待新行；等待期间照常自旋。
-    // 返回 false 表示终端已关闭或进程正在退出。
+    // 取一行：优先进运动期间排队的输入，其次等待新行；等待期间照常自旋并泵 Qt 事件。
+    // 返回 false 表示输入源已关闭（终端 EOF 或 UI 已 Exit/关闭）或进程正在退出。
     const auto next_line = [&](std::string* line) {
         while (rclcpp::ok()) {
             rclcpp::spin_some(node_);
+            if (ui != nullptr) {
+                ui->process_events();
+                ui->set_current_positions(ctx_->joint_positions());
+                if (ui->closed()) {
+                    return false;
+                }
+            }
             if (!pending.empty()) {
                 *line = pending.front();
                 pending.pop_front();
@@ -1043,7 +1103,12 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
     };
 
     while (rclcpp::ok()) {
-        RCLCPP_INFO(node_->get_logger(), "joint_console> 开始输入：逐项敲 %zu 个关节角（度），再敲执行时间（秒）", joint_count);
+        if (ui != nullptr) {
+            ui->set_moving(false);
+            RCLCPP_INFO(node_->get_logger(), "joint_console> Qt UI 等待目标（Execute 下发，Stop 停止，Exit 结束）");
+        } else {
+            RCLCPP_INFO(node_->get_logger(), "joint_console> 开始输入：逐项敲 %zu 个关节角（度），再敲执行时间（秒）", joint_count);
+        }
 
         // 1. 逐个关节输入角度：一次只收一个数，避免行内看错第几列，也能逐项校验限位。
         std::vector<double> target(joint_count, 0.0);
@@ -1053,7 +1118,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             RCLCPP_INFO(node_->get_logger(), "  [%zu/%zu] %s 角度 (deg)，回车取消本组: ", i + 1, joint_count, joints[i].c_str());
             std::string line;
             if (!next_line(&line)) {
-                RCLCPP_INFO(node_->get_logger(), "joint_console: 终端输入已关闭，结束步骤");
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 输入源已关闭，结束步骤");
                 return true;
             }
 
@@ -1118,7 +1183,7 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
                 format_number(default_duration, 2).c_str());
             std::string line;
             if (!next_line(&line)) {
-                RCLCPP_INFO(node_->get_logger(), "joint_console: 终端输入已关闭，结束步骤");
+                RCLCPP_INFO(node_->get_logger(), "joint_console: 输入源已关闭，结束步骤");
                 return true;
             }
 
@@ -1205,6 +1270,11 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
         }
         RCLCPP_INFO(node_->get_logger(), "joint_console: 轨迹已下发，运动中可输入 stop");
 
+        if (ui != nullptr) {
+            ui->set_moving(true);
+            ui->set_status("轨迹已下发，运动中可点 Stop", false);
+        }
+
         // 6. 运动中等待：只认 stop（切 idel 就地保持），其余输入排队给下一轮。
         bool stopped = false;
         {
@@ -1212,6 +1282,10 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(duration);
             while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
                 rclcpp::spin_some(node_);
+                if (ui != nullptr) {
+                    ui->process_events();
+                    ui->set_current_positions(ctx_->joint_positions());
+                }
                 std::string queued;
                 while (ConsoleQueue::instance().try_pop(&queued)) {
                     if (to_lower(trim(queued)) == "stop") {
@@ -1235,6 +1309,9 @@ bool TaskExecutor::run_joint_console(const Step& step, std::string* error) {
                 }
                 rate.sleep();
             }
+        }
+        if (ui != nullptr) {
+            ui->set_moving(false);
         }
         if (!rclcpp::ok()) {
             return fail("interrupted while moving");

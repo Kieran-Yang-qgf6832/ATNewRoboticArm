@@ -5,7 +5,7 @@
 #   idel            切回 idel 并锁定当前位置
 #   reset           复位；只等控制器 current_state 回到 idel
 #   joint_move      关节空间轨迹；用 to 引用目标点，或直接给 target
-#   joint_console   终端交互式关节运动；运行时在终端输入角度（度）与可选执行时间
+#   joint_console   交互式关节运动；默认终端逐项输入，步骤写 ui: true 时改用 Qt 窗口
 #   cart_move       笛卡尔轨迹；offset 为相对当前末端位姿的位移（3 维），严格保持姿态
 #   pos_move        把末端移动到基座系绝对位置（to / position）；可选 orientation
 #                   约束 link6 的 z 轴方向，缺省则姿态完全不参与收敛
@@ -47,7 +47,7 @@ points:
   # 由低处 position-only IK 解与 ready 做约 90% 关节插值得到：
   #   末端约 [0.676, -0.103, 0.295]，到最终 [0.617, -0.109, 0.176] 约 12 cm。
   # 直接从 ready 走一条 1.2 m 的长直线会撞关节限位/不可达区；先粗定位再回退。
-  box_low_pregrasp: [-0.0512, -0.412, -1.712, -0.214, -0.4278, 0.0]
+  box_low_pregrasp: [0.0, 0.872665, -2.268928, -0.698132, 0.0, 0.0]
 
 # 基座系绝对目标点（pos_move 专用，单位：米）。只存 [x, y, z]，与上面 points 的
 # 6 维关节角不是一回事。下面两个值由 fk_dump 在 ready 位形实测：
@@ -178,6 +178,9 @@ sequences:
   #
   #   ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="joint_console_only"
   #
+  # 注意：终端版必须用 ros2 run（需要把当前终端 stdin 接到 task_runner）；用 launch 启动时
+  # 节点没有交互 stdin，会立即看到 EOF 并结束步骤。窗口版见下面的 joint_console_ui。
+  #
   # **逐项输入**，一次只敲一个数：先 6 个关节角（度），再 1 个执行时间（秒；
   # 直接回车用本步骤的 duration，本步骤没写则用参数 console_default_duration，默认 3 s）。
   # 输入途中直接回车 = 取消本组重来，exit 结束步骤；运动中输入 stop 立即切回 idel
@@ -188,6 +191,19 @@ sequences:
   joint_console_only:
     steps:
       - {type: joint_console, duration: 3.0}
+      - {type: idel}
+
+  # Qt UI 版：同一套 joint_console 校验/下发逻辑，只是把逐项终端输入换成窗口。
+  # 需要图形会话（DISPLAY 或 WAYLAND_DISPLAY）；无显示时步骤会失败并提示改用终端版。
+  # 推荐用一条龙 launch（默认序列就是它）：
+  #   ros2 launch launch_pack arm_task_sim.launch.py
+  # 也可以单独起 task_runner：
+  #   ros2 run tasks task_runner --ros-args -p use_sim_time:=true -p task_sequence:="joint_console_ui"
+  # 窗口里 6 个目标角度（度）+ 执行时间；Execute 下发，Stop 切 idel 就地保持，
+  # Exit 结束；输入框里按 Enter 等同 Execute。
+  joint_console_ui:
+    steps:
+      - {type: joint_console, ui: true, duration: 3.0}
       - {type: idel}
 
   # pos_move 的正向验收：从 ready 向下 5 cm。仿真实测位置残差 0.0009 m
