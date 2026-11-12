@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 #include <cstdint>
 #include <string>
@@ -27,6 +28,7 @@
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/float64.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
@@ -34,6 +36,7 @@
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
 #include <robot_msgs/msg/joint_traj_cmd.hpp>
 #include <robot_msgs/msg/target_face.hpp>
+#include <robot_msgs/msg/waypoint_traj_cmd.hpp>
 
 /**
  * @brief 任务层共享上下文
@@ -196,6 +199,35 @@ public:
     bool publish_admittance(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds) const;
 
     /**
+     * @brief 发布关节空间多路点轨迹指令（@c arm_joint_waypoints）
+     * @param waypoints       路点列表，每点长度必须等于关节数
+     * @param total_duration  总时长（秒）；<=0 原样写入 0，表示由控制器自动分配
+     * @return true 发布成功；false 参数非法或发布器不可用
+     * @note 调用方应在发布**之前**调用 @ref clear_waypoint_duration()，否则可能读到上一条
+     *       轨迹遗留的时长响应。
+     */
+    bool publish_joint_waypoints(const std::vector<std::vector<double>>& waypoints, double total_duration) const;
+
+    /**
+     * @brief 发布笛卡尔空间多路点轨迹指令（@c arm_cart_waypoints）
+     * @param waypoints       路点列表，每点为 [x, y, z, qx, qy, qz, qw]
+     * @param total_duration  总时长（秒）；<=0 原样写入 0，表示由控制器自动分配
+     * @return true 发布成功；false 参数非法或发布器不可用
+     */
+    bool publish_cart_waypoints(const std::vector<std::vector<double>>& waypoints, double total_duration) const;
+
+    /// 清空「已收到多路点规划时长」标志；必须在发布路点之前调用。
+    void clear_waypoint_duration();
+
+    /**
+     * @brief 自旋等待控制器发布多路点轨迹的规划总时长（@c arm_waypoints_duration）
+     * @param timeout_sec 超时时间（秒）
+     * @param duration    输出：规划总时长（秒）；0 表示控制器拒绝了该轨迹
+     * @return true 在超时前收到消息；false 超时
+     */
+    bool wait_for_waypoint_duration(double timeout_sec, double* duration);
+
+    /**
      * @brief 记录任务链不可恢复错误
      * @param message 错误描述
      */
@@ -224,6 +256,12 @@ private:
      */
     void on_target_face(const robot_msgs::msg::TargetFace::SharedPtr msg);
 
+    /**
+     * @brief /arm_waypoints_duration 回调，缓存控制器规划出的总时长
+     * @param msg 时长消息（std_msgs/Float64）；0 表示控制器拒绝了上一条路点轨迹
+     */
+    void on_waypoint_duration(const std_msgs::msg::Float64::SharedPtr msg);
+
     rclcpp::Node::SharedPtr node_; ///< runner 节点
     Options options_;              ///< 上下文配置
 
@@ -231,12 +269,19 @@ private:
     bool have_joint_states_{false};        ///< 是否已收到有效关节状态
     robot_msgs::msg::TargetFace latest_target_face_; ///< 最近一帧视觉目标面
     bool have_target_face_{false};                   ///< 是否已收到视觉目标面
+    double waypoint_duration_{0.0};                  ///< 最近一次路点轨迹的规划总时长（秒）
+    bool have_waypoint_duration_{false};             ///< 是否已收到规划时长响应
+    std::chrono::steady_clock::time_point waypoint_duration_time_{}; ///< 收到规划时长的墙钟时刻
 
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_; ///< /joint_states 订阅
     rclcpp::Subscription<robot_msgs::msg::TargetFace>::SharedPtr target_face_sub_;  ///< /target_face 订阅
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr waypoint_duration_sub_; ///< /arm_waypoints_duration 订阅
     rclcpp::Publisher<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_pub_;       ///< 笛卡尔轨迹发布
     rclcpp::Publisher<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_traj_pub_;     ///< 关节轨迹发布
     rclcpp::Publisher<robot_msgs::msg::AdmittanceCmd>::SharedPtr admittance_pub_;    ///< 导纳期望轨迹发布
+    /// 多路点轨迹发布（关节空间 / 笛卡尔空间）
+    rclcpp::Publisher<robot_msgs::msg::WaypointTrajCmd>::SharedPtr joint_waypoints_pub_;
+    rclcpp::Publisher<robot_msgs::msg::WaypointTrajCmd>::SharedPtr cart_waypoints_pub_;
     rclcpp::Client<rcl_interfaces::srv::SetParameters>::SharedPtr set_param_cli_;    ///< exp_state 参数服务客户端
     rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedPtr get_param_cli_;   ///< current_state 参数服务客户端
 

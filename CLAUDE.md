@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
 > 里面记了 10 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
 > `auto_declare`、**不要把辨识输出当下一轮先验**、仿真相机参数与 Python 节点时钟 等）。
-> F 系列与 O1–O14 已全部闭环。
+> F 系列与 O1–O15 已全部闭环。
 
 ## 常用命令
 
@@ -49,6 +49,9 @@ ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when
 
 # 任务层：换一份任务配置文件
 ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
+
+# 多路点轨迹验收：必须在轨迹执行前启动（等控制器发布 /arm_waypoints_duration）
+ros2 run tasks waypoint_check --mode joint --expected '[[0,0,0,0,0,0]]'
 
 # 切换控制器工作状态
 ros2 param set /arm_controller exp_state reset
@@ -114,15 +117,25 @@ scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
 | 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
 | 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
 | 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 12 类步骤驱动控制器 |
+| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 14 类步骤驱动控制器 |
 | 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
 
 任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `positions` /
 `position_move` / `box_move` / `joint_limits` / `sequences`。
-步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_console` /
-`cart_move` / `pos_move` / `box_move` / `admittance_move` / `tool` / `teach` / `measure`），类型属性表在
+步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_waypoints` /
+`joint_console` / `cart_move` / `cart_waypoints` / `pos_move` / `box_move` / `admittance_move` /
+`tool` / `teach` / `measure`），类型属性表在
 `src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
 加新**任务**只改 YAML。
+
+`joint_waypoints` / `cart_waypoints` 是多路点版本：`waypoints` 必填（**1..8 个用户路点**），
+任务层自动在最前面补当前位姿作起点（控制器内部实际 2..9 个节点）；`duration` 可选，
+不给则由控制器按速度/加速度/jerk 限位取总时长（各段时间按路点**弦长成比例**，再乘一个
+**全局**时间尺度；七次 Bezier 控制点只由几何决定，见 `docs/bugs.md` O16）；`tolerance`
+可选，按最后一个路点验收。
+`joint_waypoints` 每个路点是 6 个关节角（rad，顺序同 `joints`）；`cart_waypoints` 每个路点是
+**7 值** `[x, y, z, qx, qy, qz, qw]`（基座系位姿，控制器先逐点 IK 再转关节空间规划）。
+一条轨迹**中途不停顿**，需要停顿就拆成两个步骤；失败在下发前拒绝并回 `idel`。
 
 `pos_move` 用 `positions` 段的基座系绝对目标，把末端移到目标位置；默认**不约束姿态**
 （`CartTrajCmd.mode = MODE_POSITION_ONLY`），也可选 `orientation: [x, y, z, w]` 只约束
@@ -161,6 +174,8 @@ atexit 清理会卡住进程，`ros2 launch` 收不到退出；硬退出后 `arm
 任务层通过 `TaskContext` 与控制器交互：
 - `exp_state` 参数服务 → 切换控制器工作状态
 - `/arm_cart_traj`、`/arm_joint_traj`、`/arm_admittance` 话题 → 下发轨迹指令
+- `/arm_joint_waypoints`、`/arm_cart_waypoints` → 下发多路点轨迹（`WaypointTrajCmd`），
+  总时长从 `/arm_waypoints_duration` 读回
 - `/joint_states` 订阅 + TF 查询 → 获取关节角与末端位姿
 
 `task_runner` 的 `task_sequence` 参数是**序列名字符串**（如 `"pick_demo"`），不是步骤列表。
@@ -198,6 +213,26 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
 `idel`（锁定）、`reset`（复位）、`cart_traj`（笛卡尔轨迹）、`joint_traj`（关节轨迹）、`servo`（速度积分伺服）、`admittance`（导纳控制）、`teach_pendant`（示教拖动）、`measure`（参数辨识测量）。
 
 注册在 `arm_fsm_factory.hpp`，通过 `exp_state` 参数切换。
+
+### 多路点轨迹（复用 joint_traj / cart_traj）
+
+多路点轨迹**不新增 FSM 状态**，分别由 `joint_traj` / `cart_traj` 订阅：
+
+- 消息 `robot_msgs/msg/WaypointTrajCmd`：`space`（`SPACE_JOINT=0` / `SPACE_CARTESIAN=1`）、
+  `total_duration`（<=0 自动）、`Vector[] waypoints`。控制器把规划出的总时长发布到
+  `/arm_waypoints_duration`（拒绝时发 0.0）。
+- 话题：`arm_joint_waypoints` / `arm_cart_waypoints`；原有 `JointTrajCmd` / `CartTrajCmd`
+  单目标路径不变。
+- 规划器 `lib/calculate/waypoint_trajectory.{hpp,cpp}`：分段**七次** Hermite/Bezier，
+  起止速度/加速度/jerk 均为 0，中间节点导数对**归一化累计弧长**用非均匀差商估计一次，
+  构造上**三阶导数连续（C³，jerk 连续）**。各段时间按弦长成比例，再乘一个**全局**
+  时间尺度满足关节速度/加速度/jerk 限位；控制点只由几何决定，`total_duration` 只是
+  整条等比放大（不得小于自动总时长）；位置过冲超限直接拒绝。O16 记录了为什么不能
+  逐段独立缩放时长。
+- 笛卡尔路点先**逐点 IK**（首点用实测关节角、后续用前一解作种子），再转关节空间走同一套
+  规划；`real_mode: true` 时 `arm_cart_waypoints` 在下发前拒绝（实机未验证）。
+- 失败原子性：规划失败、IK 失败、real_mode 都在**下发前**拒绝，控制器回 `idel`，
+  不会走到一半停下。
 
 ## 重要约束与注意事项
 
@@ -285,8 +320,12 @@ ArmSolve → IKSolver → ModelBase + TaskMapping
   仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
   检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
   检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 15 条序列用到
-  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `box_move` / `tool` / `wait` 九类步骤。
+- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 31 条序列用到
+  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `box_move` /
+  `tool` / `wait` / `joint_waypoints` / `cart_waypoints` 十一类步骤。
+  其中 16 条多路点序列（`waypoints_joint_1..8` / `waypoints_cart_1..8`）已在仿真端到端验证
+  （2026-11-12：launch 与 `waypoint_check` 全部退出码 0；关节路点误差 ≤ 0.000152 rad，
+  笛卡尔终点残差 0.0002–0.0010 m，平滑后 acc 峰值 ≤ 1.02、jerk 峰值 ≤ 9.24）。
   `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
   **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
   2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。
@@ -337,6 +376,11 @@ headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理�
 控制器只读取已声明的参数，未声明的键会被静默忽略并取默认值，**写错参数名不会有任何提示**。
 关键参数建议在构造阶段打一行 INFO 把实际生效值打出来（`gravity_compensation` 就是这么做的）。
 详见 `docs/bugs.md` C6。
+
+多路点轨迹的三个限位参数同样 `auto_declare`、只在构造期读取：`multi_traj_max_vel`
+（默认 **1.0** rad/s）、`multi_traj_max_acc`（**2.0** rad/s²）、`multi_traj_max_jerk`
+（**10.0** rad/s³）。都是 `vector<double>`，长度 1 时广播到全部关节、长度 6 时逐关节；
+其它长度打 ERROR 并退回内部默认值。速度上限还与 URDF 的 `velocity` **取 min**。
 
 ## 第三方库
 

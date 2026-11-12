@@ -23,6 +23,9 @@ constexpr double kMinSinHalfAngle = 1e-9;
 /// 任务空间自由度：3 位置 + 3 旋转向量。
 constexpr std::size_t kTaskDof = 6;
 
+/// 笛卡尔路点自由度：位置 + 四元数。
+constexpr std::size_t kCartWaypointDof = 7;
+
 /// 控制器空闲状态名；切入任何新任务前要求控制器处于该状态。
 const char kControllerIdleState[] = "idel";
 
@@ -52,6 +55,41 @@ bool fill_trajectory_message(
         robot_msgs::msg::Vector vector;
         vector.pos = point;
         msg->position.push_back(std::move(vector));
+    }
+    return true;
+}
+
+/**
+ * @brief 把路点列表填充为 WaypointTrajCmd 消息
+ * @param space    空间类型（WaypointTrajCmd::SPACE_JOINT / SPACE_CARTESIAN）
+ * @param waypoints 路点，每点长度必须等于 @p dof
+ * @param dof      单点自由度
+ * @param total_duration 总时长（秒）；<=0 原样写入 0，表示由控制器自动分配
+ * @param msg      输出消息
+ * @return true 填充成功；false 参数非法
+ */
+bool fill_waypoint_message(std::uint8_t space, const std::vector<std::vector<double>>& waypoints, std::size_t dof,
+                           double total_duration, robot_msgs::msg::WaypointTrajCmd* msg) {
+    if (msg == nullptr || waypoints.empty()) {
+        return false;
+    }
+
+    msg->space          = space;
+    msg->total_duration = static_cast<float>(total_duration > 0.0 ? total_duration : 0.0);
+    msg->waypoints.reserve(waypoints.size());
+    for (const auto& point : waypoints) {
+        if (point.size() != dof) {
+            return false;
+        }
+        robot_msgs::msg::Vector vector;
+        vector.pos.reserve(point.size());
+        for (const double value : point) {
+            if (!std::isfinite(value)) {
+                return false;
+            }
+            vector.pos.push_back(static_cast<float>(value));
+        }
+        msg->waypoints.push_back(std::move(vector));
     }
     return true;
 }
@@ -111,6 +149,14 @@ TaskContext::TaskContext(const rclcpp::Node::SharedPtr& node, Options options)
     cart_traj_pub_  = node_->create_publisher<robot_msgs::msg::CartTrajCmd>(options_.cart_traj_topic, 10);
     joint_traj_pub_ = node_->create_publisher<robot_msgs::msg::JointTrajCmd>(options_.joint_traj_topic, 10);
     admittance_pub_ = node_->create_publisher<robot_msgs::msg::AdmittanceCmd>(options_.admittance_topic, 10);
+
+    joint_waypoints_pub_ = node_->create_publisher<robot_msgs::msg::WaypointTrajCmd>("arm_joint_waypoints", 10);
+    cart_waypoints_pub_  = node_->create_publisher<robot_msgs::msg::WaypointTrajCmd>("arm_cart_waypoints", 10);
+
+    // 控制器规划成功后发布实际总时长；失败时发布 0.0。
+    waypoint_duration_sub_ = node_->create_subscription<std_msgs::msg::Float64>(
+        "arm_waypoints_duration", rclcpp::QoS(10),
+        [this](const std_msgs::msg::Float64::SharedPtr msg) { on_waypoint_duration(msg); });
 
     set_param_cli_ = node_->create_client<rcl_interfaces::srv::SetParameters>(
         "/" + options_.controller_node + "/set_parameters");
@@ -307,6 +353,57 @@ bool TaskContext::publish_admittance(const std::vector<std::vector<float>>& poin
     return true;
 }
 
+bool TaskContext::publish_joint_waypoints(const std::vector<std::vector<double>>& waypoints, double total_duration) const {
+    if (joint_waypoints_pub_ == nullptr) {
+        return false;
+    }
+
+    robot_msgs::msg::WaypointTrajCmd msg;
+    if (!fill_waypoint_message(
+            robot_msgs::msg::WaypointTrajCmd::SPACE_JOINT, waypoints, options_.joints.size(), total_duration, &msg)) {
+        return false;
+    }
+
+    joint_waypoints_pub_->publish(msg);
+    return true;
+}
+
+bool TaskContext::publish_cart_waypoints(const std::vector<std::vector<double>>& waypoints, double total_duration) const {
+    if (cart_waypoints_pub_ == nullptr) {
+        return false;
+    }
+
+    robot_msgs::msg::WaypointTrajCmd msg;
+    if (!fill_waypoint_message(
+            robot_msgs::msg::WaypointTrajCmd::SPACE_CARTESIAN, waypoints, kCartWaypointDof, total_duration, &msg)) {
+        return false;
+    }
+
+    cart_waypoints_pub_->publish(msg);
+    return true;
+}
+
+void TaskContext::clear_waypoint_duration() {
+    waypoint_duration_      = 0.0;
+    have_waypoint_duration_ = false;
+}
+
+bool TaskContext::wait_for_waypoint_duration(double timeout_sec, double* duration) {
+    rclcpp::WallRate rate(50.0);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_sec);
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+        spin_some();
+        if (have_waypoint_duration_) {
+            if (duration != nullptr) {
+                *duration = waypoint_duration_;
+            }
+            return true;
+        }
+        rate.sleep();
+    }
+    return false;
+}
+
 void TaskContext::fail(const std::string& message) {
     if (!failed_) {
         failure_message_ = message;
@@ -344,4 +441,13 @@ void TaskContext::on_target_face(const robot_msgs::msg::TargetFace::SharedPtr ms
     }
     latest_target_face_ = *msg;
     have_target_face_   = true;
+}
+
+void TaskContext::on_waypoint_duration(const std_msgs::msg::Float64::SharedPtr msg) {
+    if (msg == nullptr) {
+        return;
+    }
+    waypoint_duration_      = msg->data;
+    waypoint_duration_time_ = std::chrono::steady_clock::now();
+    have_waypoint_duration_ = true;
 }

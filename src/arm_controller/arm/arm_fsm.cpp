@@ -17,6 +17,9 @@ namespace {
 
 constexpr int kMaxArmTrajectoryPoints = 8;
 
+/// 笛卡尔多路点每个路点的值个数：[x, y, z, qx, qy, qz, qw]
+constexpr std::size_t kCartesianWaypointDim = 7;
+
 const std::string kIdelStateName = "idel";
 
 /// 角度换算：度 -> 弧度（-std=c++17 下不保证 M_PI 可用）。
@@ -197,6 +200,82 @@ bool load_trajectory_from_message(
         }
     }
     return !traj->empty();
+}
+
+/**
+ * @brief 解析多路点 C3 轨迹的每关节限位（构造阶段调用一次）
+ *
+ * 长度规则与 controller on_init 的日志口径一致：长度 1 = 全部关节广播，长度 = 关节数
+ * = 逐关节，其它长度退回内部默认值（不在此处打日志，真正的生效值由控制器打）。
+ * @param model_upper 非 nullptr 时逐关节取 min（用于速度与 URDF 的 upper_joint_vel 对齐）
+ */
+Eigen::VectorXd resolve_waypoint_limit(
+    FSMArmControlFactory* factory, std::size_t joint_count, const char* name, double fallback, const Eigen::VectorXd* model_upper) {
+    const auto count         = static_cast<Eigen::Index>(joint_count);
+    Eigen::VectorXd result   = Eigen::VectorXd::Constant(count, fallback);
+    if (factory == nullptr || factory->node_ == nullptr || joint_count == 0) {
+        return result;
+    }
+
+    std::vector<double> values;
+    factory->node_->get_parameter(name, values);
+    if (values.size() == 1) {
+        result.setConstant(count, values.front());
+    } else if (values.size() == joint_count) {
+        for (std::size_t i = 0; i < joint_count; ++i) {
+            result(static_cast<Eigen::Index>(i)) = values[i];
+        }
+    } else {
+        return result;
+    }
+
+    if (model_upper != nullptr && model_upper->size() == count) {
+        for (Eigen::Index i = 0; i < count; ++i) {
+            result(i) = std::min(result(i), (*model_upper)(i));
+        }
+    }
+    return result;
+}
+
+/**
+ * @brief 单位四元数 -> 旋转向量，语义与 tasks 包 quaternion_to_rotation_vector 一致
+ *
+ * w 先翻到 >= 0，转角 ∈ [0, π]；模长 < 1e-6 视为非法输入。
+ */
+bool quaternion_to_rotation_vector(double x, double y, double z, double w, Eigen::VectorXd* rotation_vector) {
+    if (rotation_vector == nullptr || rotation_vector->size() != 3) {
+        return false;
+    }
+
+    const double norm = std::sqrt(x * x + y * y + z * z + w * w);
+    if (!std::isfinite(norm) || norm < 1e-6) {
+        return false;
+    }
+    x /= norm;
+    y /= norm;
+    z /= norm;
+    w /= norm;
+
+    if (w < 0.0) {
+        x = -x;
+        y = -y;
+        z = -z;
+        w = -w;
+    }
+    w = std::clamp(w, -1.0, 1.0);
+
+    const double half_angle = std::acos(w);
+    const double sin_half   = std::sin(half_angle);
+    if (std::abs(sin_half) < 1e-12) {
+        rotation_vector->setZero();
+        return true;
+    }
+
+    const double scale = 2.0 * half_angle / sin_half;
+    (*rotation_vector)(0) = scale * x;
+    (*rotation_vector)(1) = scale * y;
+    (*rotation_vector)(2) = scale * z;
+    return true;
 }
 
 } // namespace
@@ -507,6 +586,20 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
         sample.setZero(static_cast<Eigen::Index>(task_dof_));
     }
     posture_reference_.setZero(static_cast<Eigen::Index>(joint_count_));
+
+    // 多路点 C3 轨迹：configure 与限位解析只在构造阶段做一次；订阅回调负责规划，
+    // run() 只采样，不再分配内存。首节点（当前实测关节角）之外最多 kMaxArmTrajectoryPoints 个。
+    waypoint_traj_.configure(static_cast<int>(joint_count_), static_cast<int>(kMaxArmTrajectoryPoints) + 1);
+    const Eigen::VectorXd* urdf_velocity = factory->model_ != nullptr ? &factory->model_->upper_joint_vel() : nullptr;
+    waypoint_max_vel_    = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_vel", 1.0, urdf_velocity);
+    waypoint_max_acc_    = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_acc", 2.0, nullptr);
+    waypoint_max_jerk_   = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_jerk", 10.0, nullptr);
+    waypoint_pos_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_vel_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_acc_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_jerk_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_duration_pub_ = factory->node_->create_publisher<std_msgs::msg::Float64>("arm_waypoints_duration", rclcpp::QoS(10));
+
     RCLCPP_INFO(
         factory->node_->get_logger(),
         "cart constraint: position_tolerance=%.3g m, axis_tolerance=%.3g deg, nullspace_weight=%.3g, "
@@ -568,6 +661,10 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
             traj_start_time_ = now;
             state            = TrajPhase::MOVING;
         });
+
+    waypoint_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::WaypointTrajCmd>(
+        "arm_cart_waypoints", rclcpp::QoS(10),
+        [this](const robot_msgs::msg::WaypointTrajCmd& msg) { on_waypoint_command(msg); });
 }
 
 bool CartTrajState::check_target_reachable(const Eigen::VectorXd& target, double* residual) {
@@ -590,6 +687,224 @@ bool CartTrajState::check_target_reachable(const Eigen::VectorXd& target, double
     return true;
 }
 
+void CartTrajState::on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& msg) {
+    if (factory == nullptr || factory->node_ == nullptr || factory->model_ == nullptr || factory->arm_solve_ == nullptr
+        || state != TrajPhase::STOP) {
+        return;
+    }
+
+    const auto& logger          = factory->node_->get_logger();
+    const auto publish_duration = [this](double seconds) {
+        if (!waypoint_duration_pub_) {
+            return;
+        }
+        std_msgs::msg::Float64 message;
+        message.data = seconds;
+        waypoint_duration_pub_->publish(message);
+    };
+
+    if (msg.space != robot_msgs::msg::WaypointTrajCmd::SPACE_CARTESIAN) {
+        RCLCPP_ERROR(logger, "arm_cart_waypoints expects space=SPACE_CARTESIAN(1), got %u; ignored", static_cast<unsigned>(msg.space));
+        return;
+    }
+
+    // 实机 5 自由度、未验证：与 pos_move / box_move 的位置约束轨迹一致，直接拒绝。
+    if (real_mode_) {
+        waypoint_plan_failed_ = true;
+        RCLCPP_ERROR(logger, "Cartesian waypoint trajectory REJECTED before any motion: real_mode=true (5-DOF hardware, not validated)");
+        publish_duration(0.0);
+        return;
+    }
+
+    const std::size_t user_count = msg.waypoints.size();
+    if (user_count < 1 || user_count > static_cast<std::size_t>(kMaxArmTrajectoryPoints)) {
+        RCLCPP_ERROR(logger, "Cartesian waypoint trajectory expects 1..%d waypoints, got %zu; ignored", kMaxArmTrajectoryPoints, user_count);
+        return;
+    }
+    for (std::size_t i = 0; i < user_count; ++i) {
+        const auto& waypoint = msg.waypoints[i];
+        if (waypoint.pos.size() != kCartesianWaypointDim) {
+            RCLCPP_ERROR(
+                logger, "Cartesian waypoint %zu has %zu values, expected %zu ([x,y,z,qx,qy,qz,qw]); ignored", i + 1, waypoint.pos.size(),
+                kCartesianWaypointDim);
+            return;
+        }
+        for (const float value : waypoint.pos) {
+            if (!std::isfinite(value)) {
+                RCLCPP_ERROR(logger, "Cartesian waypoint %zu contains a non-finite value; ignored", i + 1);
+                return;
+            }
+        }
+    }
+
+    // 6 维完整位姿逆解：清掉可能残留的位置约束模式与零空间偏好。
+    pose_mode_ = PoseMode::kFullPose;
+    factory->task_map_->set_pose_mode(pose_mode_);
+    factory->arm_solve_->set_solve_options(0.0, 0.0, 0.0);
+
+    const auto odo               = static_cast<Eigen::Index>(joint_count_);
+    const Eigen::VectorXd& lower = factory->model_->lower_joint_limit();
+    const Eigen::VectorXd& upper = factory->model_->upper_joint_limit();
+    const bool have_limits       = lower.size() == odo && upper.size() == odo;
+
+    // 起点必须是合法状态：仿真若在控制器激活前跌落/撞限位，实测关节可能已经越界。
+    // 此时逆解种子和首节点都不可信，直接拒绝而不是让规划器带病规划。
+    if (have_limits) {
+        for (Eigen::Index j = 0; j < odo; ++j) {
+            const double measured = factory->state_[static_cast<std::size_t>(j)].position;
+            if (measured < lower(j) - 1e-6 || measured > upper(j) + 1e-6) {
+                waypoint_plan_failed_ = true;
+                RCLCPP_ERROR(
+                    logger,
+                    "Cartesian waypoint trajectory REJECTED: measured joint%ld = %.6f rad is outside the model limit "
+                    "[%.6f, %.6f]; reset the arm before planning",
+                    static_cast<long>(j + 1), measured, lower(j), upper(j));
+                publish_duration(0.0);
+                return;
+            }
+        }
+    }
+
+    std::vector<Eigen::VectorXd> joint_waypoints(user_count, Eigen::VectorXd::Zero(odo));
+    Eigen::VectorXd seed(odo);
+    for (Eigen::Index i = 0; i < odo; ++i) {
+        seed(i) = factory->state_[static_cast<std::size_t>(i)].position;
+    }
+
+    Eigen::VectorXd target = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(task_dof_));
+    Eigen::VectorXd rotation(3);
+    try {
+        for (std::size_t i = 0; i < user_count; ++i) {
+            const auto& values = msg.waypoints[i].pos;
+            target(0)          = values[0];
+            target(1)          = values[1];
+            target(2)          = values[2];
+            if (!quaternion_to_rotation_vector(values[3], values[4], values[5], values[6], &rotation)) {
+                waypoint_plan_failed_ = true;
+                RCLCPP_ERROR(logger, "Cartesian waypoint trajectory: waypoint %zu has an invalid quaternion; rejected", i + 1);
+                publish_duration(0.0);
+                return;
+            }
+            target(3) = rotation(0);
+            target(4) = rotation(1);
+            target(5) = rotation(2);
+
+            Eigen::VectorXd solution = seed;
+            if (!factory->arm_solve_->inverse_kinamic(target, &solution) || solution.size() != odo || !solution.allFinite()) {
+                waypoint_plan_failed_ = true;
+                RCLCPP_ERROR(
+                    logger,
+                    "Cartesian waypoint trajectory: inverse kinematics failed at waypoint %zu (ik_err=%.3e); rejected before any motion",
+                    i + 1, factory->arm_solve_->last_ik_error_norm());
+                publish_duration(0.0);
+                return;
+            }
+            if (have_limits) {
+                for (Eigen::Index j = 0; j < odo; ++j) {
+                    const double q = solution(j);
+                    if (q < lower(j) - 1e-9 || q > upper(j) + 1e-9) {
+                        waypoint_plan_failed_ = true;
+                        RCLCPP_ERROR(
+                            logger,
+                            "Cartesian waypoint trajectory: waypoint %zu solves outside joint limits on joint%ld (%.6f rad, limits "
+                            "[%.6f, %.6f]); rejected",
+                            i + 1, static_cast<long>(j + 1), q, lower(j), upper(j));
+                        publish_duration(0.0);
+                        return;
+                    }
+                }
+            }
+            joint_waypoints[i] = solution;
+            seed               = solution;
+            // 逐点打印逆解，便于排查「路点不一致/分支跳变」导致的规划过冲（O16 的调试入口）。
+            RCLCPP_INFO(
+                logger, "Cartesian waypoint %zu/%zu IK: [%.6f, %.6f, %.6f, %.6f, %.6f, %.6f]", i + 1, user_count, solution(0),
+                solution(1), solution(2), solution(3), solution(4), solution(5));
+        }
+    } catch (const std::exception& error) {
+        waypoint_plan_failed_ = true;
+        RCLCPP_ERROR(logger, "Cartesian waypoint trajectory: inverse kinematics threw: %s; rejected", error.what());
+        publish_duration(0.0);
+        return;
+    }
+
+    // 首节点自动补当前实测关节角，保证轨迹从当前位置起步。
+    std::vector<Eigen::VectorXd> nodes(user_count + 1, Eigen::VectorXd::Zero(odo));
+    for (Eigen::Index i = 0; i < odo; ++i) {
+        nodes[0](i) = factory->state_[static_cast<std::size_t>(i)].position;
+    }
+    for (std::size_t i = 0; i < user_count; ++i) {
+        nodes[i + 1] = joint_waypoints[i];
+    }
+
+    const WaypointTrajectory::Limits limits{waypoint_max_vel_, waypoint_max_acc_, waypoint_max_jerk_};
+    std::string error;
+    if (!waypoint_traj_.plan(nodes, limits, msg.total_duration, lower, upper, &error)) {
+        waypoint_plan_failed_ = true;
+        RCLCPP_ERROR(logger, "Cartesian waypoint trajectory planning failed: %s", error.c_str());
+        publish_duration(0.0);
+        return;
+    }
+
+    publish_duration(waypoint_traj_.duration());
+    traj_start_time_ = factory->node_->get_clock()->now();
+    waypoint_active_ = true;
+    state            = TrajPhase::MOVING;
+}
+
+bool CartTrajState::run_waypoint_motion(const rclcpp::Time& time) {
+    const auto dof       = static_cast<Eigen::Index>(joint_count_);
+    const double elapsed = (time - traj_start_time_).seconds();
+    if (!waypoint_traj_.sample(elapsed, &waypoint_pos_, &waypoint_vel_, &waypoint_acc_, &waypoint_jerk_)
+        || waypoint_pos_.size() != dof || waypoint_vel_.size() != dof || waypoint_acc_.size() != dof || !waypoint_pos_.allFinite()
+        || !waypoint_vel_.allFinite() || !waypoint_acc_.allFinite()) {
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory sampling");
+        return false;
+    }
+
+    try {
+        if (!factory->model_->inverse_dynamic(waypoint_pos_, waypoint_vel_, waypoint_acc_, &torque_) || torque_.size() != dof
+            || !torque_.allFinite()) {
+            waypoint_active_ = false;
+            state            = TrajPhase::STOP;
+            traj.stop();
+            set_fault_stage("waypoint trajectory inverse dynamics");
+            return false;
+        }
+    } catch (const std::exception& error) {
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 1000, "waypoint trajectory inverse dynamics failed: %s",
+            error.what());
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory inverse dynamics");
+        return false;
+    }
+
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const auto index    = static_cast<Eigen::Index>(i);
+        auto& command       = factory->command_[i];
+        command.position    = static_cast<float>(waypoint_pos_(index));
+        command.velocity    = static_cast<float>(waypoint_vel_(index));
+        command.torque      = static_cast<float>(torque_(index));
+        command.kp          = default_kp_[i];
+        command.kd          = default_kd_[i];
+        command.ki          = 0.0f;
+    }
+
+    if (elapsed >= waypoint_traj_.duration()) {
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        // 轨迹结束时锁存终点（理由同普通轨迹路径）。
+        latch_joint_position(factory, joint_count_, &hold_position_);
+    }
+    return true;
+}
+
 bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& time) {
     (void)last_state;
     (void)time;
@@ -601,6 +916,9 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
 
     state = TrajPhase::STOP;
     traj.stop();
+    // 多路点轨迹不跨状态保留：清标志后 waypoint_traj_ 不会被采样。
+    waypoint_active_      = false;
+    waypoint_plan_failed_ = false;
     // 从任何状态切入都恢复 6 维默认模式，避免上一条位置约束轨迹的映射设置
     // 泄露到别的也用 IK 的状态。新轨迹的 mode 会由订阅回调重新设置。
     pose_mode_ = PoseMode::kFullPose;
@@ -617,7 +935,9 @@ bool CartTrajState::enter(const std::string& last_state, const rclcpp::Time& tim
 bool CartTrajState::exit(const std::string& next_state) {
     (void)next_state;
     traj.stop();
-    state = TrajPhase::STOP;
+    state                 = TrajPhase::STOP;
+    waypoint_active_      = false;
+    waypoint_plan_failed_ = false;
     // 清掉未消费的预检请求：否则下一次进入本状态时会拿旧轨迹的途经点做预检。
     precheck_pending_           = false;
     precheck_count_             = 0;
@@ -648,9 +968,22 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         return false;
     }
 
+    if (waypoint_plan_failed_) {
+        // 规划失败由 update() 统一切回 idel；这里只清标志并报告故障阶段。
+        waypoint_plan_failed_ = false;
+        state                 = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory planning");
+        return false;
+    }
+
     if (state == TrajPhase::STOP) {
         write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
         return true;
+    }
+
+    if (waypoint_active_) {
+        return run_waypoint_motion(time);
     }
 
     // 实机模式下的位置约束类轨迹（纯位置 / 位置 + 工具轴）：在下发任何运动指令之前拒绝。
@@ -846,6 +1179,19 @@ JointTrajState::JointTrajState(const std::string& name, std::any ctx)
     hold_position_.resize(joint_count_);
     gravity_.initialize(factory, joint_count_, name.c_str());
 
+    // 多路点 C3 轨迹：configure 与限位解析只在构造阶段做一次；订阅回调负责规划，
+    // run() 只采样，不再分配内存。首节点（当前实测关节角）之外最多 kMaxArmTrajectoryPoints 个。
+    waypoint_traj_.configure(static_cast<int>(joint_count_), static_cast<int>(kMaxArmTrajectoryPoints) + 1);
+    const Eigen::VectorXd* urdf_velocity = factory->model_ != nullptr ? &factory->model_->upper_joint_vel() : nullptr;
+    waypoint_max_vel_                   = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_vel", 1.0, urdf_velocity);
+    waypoint_max_acc_                   = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_acc", 2.0, nullptr);
+    waypoint_max_jerk_                  = resolve_waypoint_limit(factory, joint_count_, "multi_traj_max_jerk", 10.0, nullptr);
+    waypoint_pos_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_vel_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_acc_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_jerk_.setZero(static_cast<Eigen::Index>(joint_count_));
+    waypoint_duration_pub_ = factory->node_->create_publisher<std_msgs::msg::Float64>("arm_waypoints_duration", rclcpp::QoS(10));
+
     joint_trajectory_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::JointTrajCmd>(
         "arm_joint_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::JointTrajCmd& msg) {
             if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, joint_count_, &traj)) {
@@ -856,6 +1202,150 @@ JointTrajState::JointTrajState(const std::string& name, std::any ctx)
             traj_start_time_ = now;
             state            = TrajPhase::MOVING;
         });
+
+    waypoint_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::WaypointTrajCmd>(
+        "arm_joint_waypoints", rclcpp::QoS(10),
+        [this](const robot_msgs::msg::WaypointTrajCmd& msg) { on_waypoint_command(msg); });
+}
+
+void JointTrajState::on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& msg) {
+    if (factory == nullptr || factory->node_ == nullptr || factory->model_ == nullptr || state != TrajPhase::STOP) {
+        return;
+    }
+
+    const auto& logger          = factory->node_->get_logger();
+    const auto publish_duration = [this](double seconds) {
+        if (!waypoint_duration_pub_) {
+            return;
+        }
+        std_msgs::msg::Float64 message;
+        message.data = seconds;
+        waypoint_duration_pub_->publish(message);
+    };
+
+    if (msg.space != robot_msgs::msg::WaypointTrajCmd::SPACE_JOINT) {
+        RCLCPP_ERROR(logger, "arm_joint_waypoints expects space=SPACE_JOINT(0), got %u; ignored", static_cast<unsigned>(msg.space));
+        return;
+    }
+
+    const std::size_t user_count = msg.waypoints.size();
+    if (user_count < 1 || user_count > static_cast<std::size_t>(kMaxArmTrajectoryPoints)) {
+        RCLCPP_ERROR(logger, "Joint waypoint trajectory expects 1..%d waypoints, got %zu; ignored", kMaxArmTrajectoryPoints, user_count);
+        return;
+    }
+    for (std::size_t i = 0; i < user_count; ++i) {
+        const auto& waypoint = msg.waypoints[i];
+        if (waypoint.pos.size() != joint_count_) {
+            RCLCPP_ERROR(
+                logger, "Joint waypoint %zu has %zu values, expected %zu; ignored", i + 1, waypoint.pos.size(), joint_count_);
+            return;
+        }
+        for (const float value : waypoint.pos) {
+            if (!std::isfinite(value)) {
+                RCLCPP_ERROR(logger, "Joint waypoint %zu contains a non-finite value; ignored", i + 1);
+                return;
+            }
+        }
+    }
+
+    // 首节点自动补当前实测关节角，保证轨迹从当前位置起步。
+    const auto dof = static_cast<Eigen::Index>(joint_count_);
+    // 起点必须是合法状态：仿真若在控制器激活前跌落/撞限位，实测关节可能已经越界。
+    const Eigen::VectorXd& lower = factory->model_->lower_joint_limit();
+    const Eigen::VectorXd& upper = factory->model_->upper_joint_limit();
+    if (lower.size() == dof && upper.size() == dof) {
+        for (Eigen::Index i = 0; i < dof; ++i) {
+            const double measured = factory->state_[static_cast<std::size_t>(i)].position;
+            if (measured < lower(i) - 1e-6 || measured > upper(i) + 1e-6) {
+                waypoint_plan_failed_ = true;
+                RCLCPP_ERROR(
+                    logger,
+                    "Joint waypoint trajectory REJECTED: measured joint%ld = %.6f rad is outside the model limit "
+                    "[%.6f, %.6f]; reset the arm before planning",
+                    static_cast<long>(i + 1), measured, lower(i), upper(i));
+                publish_duration(0.0);
+                return;
+            }
+        }
+    }
+    std::vector<Eigen::VectorXd> nodes(user_count + 1, Eigen::VectorXd::Zero(dof));
+    for (Eigen::Index i = 0; i < dof; ++i) {
+        nodes[0](i) = factory->state_[static_cast<std::size_t>(i)].position;
+    }
+    for (std::size_t i = 0; i < user_count; ++i) {
+        const auto& values = msg.waypoints[i].pos;
+        for (Eigen::Index j = 0; j < dof; ++j) {
+            nodes[i + 1](j) = values[static_cast<std::size_t>(j)];
+        }
+    }
+
+    const WaypointTrajectory::Limits limits{waypoint_max_vel_, waypoint_max_acc_, waypoint_max_jerk_};
+    std::string error;
+    if (!waypoint_traj_.plan(
+            nodes, limits, msg.total_duration, factory->model_->lower_joint_limit(), factory->model_->upper_joint_limit(), &error)) {
+        waypoint_plan_failed_ = true;
+        RCLCPP_ERROR(logger, "Joint waypoint trajectory planning failed: %s", error.c_str());
+        publish_duration(0.0);
+        return;
+    }
+
+    publish_duration(waypoint_traj_.duration());
+    traj_start_time_ = factory->node_->get_clock()->now();
+    waypoint_active_ = true;
+    state            = TrajPhase::MOVING;
+}
+
+bool JointTrajState::run_waypoint_motion(const rclcpp::Time& time) {
+    const auto dof       = static_cast<Eigen::Index>(joint_count_);
+    const double elapsed = (time - traj_start_time_).seconds();
+    if (!waypoint_traj_.sample(elapsed, &waypoint_pos_, &waypoint_vel_, &waypoint_acc_, &waypoint_jerk_)
+        || waypoint_pos_.size() != dof || waypoint_vel_.size() != dof || waypoint_acc_.size() != dof || !waypoint_pos_.allFinite()
+        || !waypoint_vel_.allFinite() || !waypoint_acc_.allFinite()) {
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory sampling");
+        return false;
+    }
+
+    try {
+        if (!factory->model_->inverse_dynamic(waypoint_pos_, waypoint_vel_, waypoint_acc_, &torque) || torque.size() != dof
+            || !torque.allFinite()) {
+            waypoint_active_ = false;
+            state            = TrajPhase::STOP;
+            traj.stop();
+            set_fault_stage("waypoint trajectory inverse dynamics");
+            return false;
+        }
+    } catch (const std::exception& error) {
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 1000, "waypoint trajectory inverse dynamics failed: %s",
+            error.what());
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory inverse dynamics");
+        return false;
+    }
+
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const auto index = static_cast<Eigen::Index>(i);
+        auto& command    = factory->command_[i];
+        command.position = static_cast<float>(waypoint_pos_(index));
+        command.velocity = static_cast<float>(waypoint_vel_(index));
+        command.torque   = static_cast<float>(torque(index));
+        command.kp       = default_kp_[i];
+        command.kd       = default_kd_[i];
+        command.ki       = 0.0f;
+    }
+
+    if (elapsed >= waypoint_traj_.duration()) {
+        waypoint_active_ = false;
+        state            = TrajPhase::STOP;
+        // 轨迹结束时锁存终点（理由同普通轨迹路径）。
+        latch_joint_position(factory, joint_count_, &hold_position_);
+    }
+    return true;
 }
 
 bool JointTrajState::enter(const std::string& last_state, const rclcpp::Time& time) {
@@ -869,6 +1359,9 @@ bool JointTrajState::enter(const std::string& last_state, const rclcpp::Time& ti
 
     state = TrajPhase::STOP;
     traj.stop();
+    // 多路点轨迹不跨状态保留：清标志后 waypoint_traj_ 不会被采样。
+    waypoint_active_      = false;
+    waypoint_plan_failed_ = false;
     // 进入时锁存一次当前位置（理由同 CartTrajState::enter）。
     latch_joint_position(factory, joint_count_, &hold_position_);
     write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
@@ -878,7 +1371,9 @@ bool JointTrajState::enter(const std::string& last_state, const rclcpp::Time& ti
 bool JointTrajState::exit(const std::string& next_state) {
     (void)next_state;
     traj.stop();
-    state = TrajPhase::STOP;
+    state                 = TrajPhase::STOP;
+    waypoint_active_      = false;
+    waypoint_plan_failed_ = false;
     return true;
 }
 
@@ -901,9 +1396,20 @@ bool JointTrajState::run(const rclcpp::Time& time) {
         return false;
     }
 
+    if (waypoint_plan_failed_) {
+        // 规划失败由 update() 统一切回 idel；这里只清标志并报告故障阶段。
+        waypoint_plan_failed_ = false;
+        state                 = TrajPhase::STOP;
+        traj.stop();
+        set_fault_stage("waypoint trajectory planning");
+        return false;
+    }
+
     if (state == TrajPhase::STOP) {
         write_hold_command(factory, joint_count_, hold_position_, default_kp_, default_kd_, &gravity_, fsm_name_.c_str());
         return true;
+    } else if (waypoint_active_) {
+        return run_waypoint_motion(time);
     } else if (state == TrajPhase::MOVING) {
         traj.update(time, point);
         if (point.pos.size() != static_cast<Eigen::Index>(joint_count_) || point.vel.size() != static_cast<Eigen::Index>(joint_count_)

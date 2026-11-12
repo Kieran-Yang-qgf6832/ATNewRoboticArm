@@ -35,11 +35,14 @@
 #include "paramter_identify.hpp"
 #include "task.hpp"
 #include "trajectory.hpp"
+#include "waypoint_trajectory.hpp"
 
 #include <robot_msgs/msg/admittance_cmd.hpp>
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
 #include <robot_msgs/msg/joint_traj_cmd.hpp>
 #include <robot_msgs/msg/servo_ctrl_cmd.hpp>
+#include <robot_msgs/msg/waypoint_traj_cmd.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 class FSMArmControlFactory;
 
@@ -345,7 +348,33 @@ private:
      */
     bool check_target_reachable(const Eigen::VectorXd& target, double* residual);
 
+    /**
+     * @brief 多路点轨迹指令回调（非实时线程）
+     *
+     * 仅在 @c state == TrajPhase::STOP 时受理：校验消息后逐点逆解得到关节路点，
+     * 再交给 @ref WaypointTrajectory 规划一次。规划成功才切到 MOVING；
+     * 失败只置 @c waypoint_plan_failed_，由 run() 统一走失效安全路径。
+     */
+    void on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& msg);
+
+    /// 采样已规划的多路点轨迹并写指令；失败/到达终点时返回相应状态
+    bool run_waypoint_motion(const rclcpp::Time& time);
+
     rclcpp::Subscription<robot_msgs::msg::CartTrajCmd>::SharedPtr cart_traj_cmd_sub_; ///< 笛卡尔轨迹指令订阅
+
+    /// 多路点 C3 轨迹（WaypointTrajCmd）。规划只在订阅回调里做一次，run() 只采样。
+    WaypointTrajectory waypoint_traj_;              ///< 规划器（构造期预分配）
+    bool waypoint_active_{false};                   ///< 多路点轨迹正在执行
+    bool waypoint_plan_failed_{false};              ///< 规划失败，等待 run() 统一处置
+    Eigen::VectorXd waypoint_max_vel_;              ///< 关节速度上限（构造期解析）
+    Eigen::VectorXd waypoint_max_acc_;              ///< 关节加速度上限（构造期解析）
+    Eigen::VectorXd waypoint_max_jerk_;             ///< 关节 jerk 上限（构造期解析）
+    Eigen::VectorXd waypoint_pos_;                  ///< 采样位置（构造期分配）
+    Eigen::VectorXd waypoint_vel_;                  ///< 采样速度（构造期分配）
+    Eigen::VectorXd waypoint_acc_;                  ///< 采样加速度（构造期分配）
+    Eigen::VectorXd waypoint_jerk_;                 ///< 采样 jerk（构造期分配）
+    rclcpp::Subscription<robot_msgs::msg::WaypointTrajCmd>::SharedPtr waypoint_cmd_sub_; ///< 多路点指令订阅
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr waypoint_duration_pub_;         ///< 实际规划总时长
 };
 
 /**
@@ -424,6 +453,32 @@ private:
     HoldGravityFeedforward gravity_;
 
     rclcpp::Subscription<robot_msgs::msg::JointTrajCmd>::SharedPtr joint_trajectory_cmd_sub_; ///< 关节轨迹指令订阅
+
+    /**
+     * @brief 多路点轨迹指令回调（非实时线程）
+     *
+     * 仅在 @c state == TrajPhase::STOP 时受理：第一个节点取当前实测关节角，
+     * 其余为用户路点，交给 @ref WaypointTrajectory 规划一次。规划成功才切到 MOVING；
+     * 失败只置 @c waypoint_plan_failed_，由 run() 统一走失效安全路径。
+     */
+    void on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& msg);
+
+    /// 采样已规划的多路点轨迹并写指令；失败/到达终点时返回相应状态
+    bool run_waypoint_motion(const rclcpp::Time& time);
+
+    /// 多路点 C3 轨迹（WaypointTrajCmd）。规划只在订阅回调里做一次，run() 只采样。
+    WaypointTrajectory waypoint_traj_;              ///< 规划器（构造期预分配）
+    bool waypoint_active_{false};                   ///< 多路点轨迹正在执行
+    bool waypoint_plan_failed_{false};              ///< 规划失败，等待 run() 统一处置
+    Eigen::VectorXd waypoint_max_vel_;              ///< 关节速度上限（构造期解析）
+    Eigen::VectorXd waypoint_max_acc_;              ///< 关节加速度上限（构造期解析）
+    Eigen::VectorXd waypoint_max_jerk_;             ///< 关节 jerk 上限（构造期解析）
+    Eigen::VectorXd waypoint_pos_;                  ///< 采样位置（构造期分配）
+    Eigen::VectorXd waypoint_vel_;                  ///< 采样速度（构造期分配）
+    Eigen::VectorXd waypoint_acc_;                  ///< 采样加速度（构造期分配）
+    Eigen::VectorXd waypoint_jerk_;                 ///< 采样 jerk（构造期分配）
+    rclcpp::Subscription<robot_msgs::msg::WaypointTrajCmd>::SharedPtr waypoint_cmd_sub_; ///< 多路点指令订阅
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr waypoint_duration_pub_;         ///< 实际规划总时长
 };
 
 /**

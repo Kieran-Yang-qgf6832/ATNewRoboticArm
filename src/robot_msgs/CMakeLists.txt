@@ -19,6 +19,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/JointTrajCmd.msg"
   "msg/Vector.msg"
   "msg/TargetFace.msg"
+  "msg/WaypointTrajCmd.msg"
   DEPENDENCIES builtin_interfaces std_msgs geometry_msgs sensor_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)

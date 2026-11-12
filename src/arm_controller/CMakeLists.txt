@@ -71,6 +71,7 @@ add_library(arm_controller SHARED
   lib/calculate/arm.cpp
   lib/calculate/kinamic.cpp
   lib/calculate/trajectory.cpp
+  lib/calculate/waypoint_trajectory.cpp
   lib/cdc_trans/cdc_trans.cpp
   lib/paramter_identify/excitation_trajectory.cpp
   lib/paramter_identify/fourier_trajectory.cpp
@@ -144,6 +145,10 @@ ament_target_dependencies(arm_real_joint_count_test rclcpp hardware_interface)
 add_executable(joint_calibrate tools/joint_calibrate.cpp)
 target_link_libraries(joint_calibrate arm_controller)
 ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces)
+
+# 多路点 C3 轨迹规划器的离线自检：只用 Eigen，不涉及 ROS 实时路径。同样不安装。
+add_executable(waypoint_planner_test tools/waypoint_planner_test.cpp)
+target_link_libraries(waypoint_planner_test arm_controller)
 
 install(
   FILES

@@ -31,6 +31,9 @@ struct Step {
     double duration{0.0};            ///< 运动/等待时长（秒）
     double tolerance{0.0};           ///< 到位容差；0 表示由执行器取默认值
     std::vector<double> target;      ///< joint_move：绝对关节角（由 to 解析或直接给出）
+    /// joint_waypoints / cart_waypoints：多路点轨迹。
+    /// 关节空间每点为关节数维；笛卡尔空间每点为 [x, y, z, qx, qy, qz, qw]。
+    std::vector<std::vector<double>> waypoints;
     std::vector<double> offset;      ///< cart_move / admittance_move：相对末端位移（3 维）
     std::vector<double> position;    ///< pos_move：基座系绝对目标 [x, y, z]（由 to 解析或直接给出）
     std::vector<double> orientation; ///< pos_move：目标姿态四元数 [x, y, z, w]（基座系；只约束 link6 z 轴）

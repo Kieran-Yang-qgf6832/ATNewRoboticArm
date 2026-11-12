@@ -93,6 +93,29 @@ private:
     bool run_joint_move(const Step& step, std::string* error);
 
     /**
+     * @brief 执行关节空间多路点轨迹（joint_waypoints）
+     *
+     * 切入 @c joint_traj 后把全部路点一次下发，控制器自动规划时长并回发
+     * @c arm_waypoints_duration；任务层按该时长守候，结束后以最后一个路点验收。
+     *
+     * @param step  步骤；@c duration > 0 时作为期望总时长覆盖自动规划
+     * @param error 输出：失败原因
+     * @return true 轨迹走完且末态残差在容差内
+     */
+    bool run_joint_waypoints(const Step& step, std::string* error);
+
+    /**
+     * @brief 执行笛卡尔空间多路点轨迹（cart_waypoints）
+     *
+     * 路点格式为 [x, y, z, qx, qy, qz, qw]，验收只比较 xyz。
+     *
+     * @param step  步骤；@c duration > 0 时作为期望总时长覆盖自动规划
+     * @param error 输出：失败原因
+     * @return true 轨迹走完且末态位置残差在容差内
+     */
+    bool run_cart_waypoints(const Step& step, std::string* error);
+
+    /**
      * @brief 执行交互式关节运动（joint_console）
      *
      * 默认在步骤内部循环读终端：**逐项**输入，一次一个数——先 6 个关节角（**度**），

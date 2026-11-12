@@ -1,8 +1,10 @@
 #include "step_types.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <exception>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -26,8 +28,10 @@ const Entry kStepTable[] = {
     {"idel", false, false, "idel"},            // 切回 idel 并锁定当前位置
     {"reset", true, false, "reset"},           // 复位；ResetState::enter 要求 last_state == idel
     {"joint_move", false, true, "joint_traj"}, // 关节空间轨迹
+    {"joint_waypoints", false, false, "joint_traj"}, // 关节空间多路点轨迹；时长由控制器自动规划
     {"joint_console", true, false, "joint_traj"}, // 终端/Qt UI 交互式关节运动；用户接管，要求 idel 进出
     {"cart_move", false, true, "cart_traj"},   // 笛卡尔空间轨迹（严格保持姿态）
+    {"cart_waypoints", false, false, "cart_traj"}, // 笛卡尔空间多路点轨迹；时长由控制器自动规划
     {"pos_move", false, true, "cart_traj"},    // 位置绝对目标；可选 orientation 约束 link6 z 轴
     {"box_move", false, true, "cart_traj"},    // 读取视觉目标面 TF，移动到箱体位姿（5D，不可达回退位置）
     {"admittance_move", false, true, "admittance"}, // 导纳控制下的期望轨迹
@@ -50,7 +54,7 @@ const Entry* find_entry(const std::string& type) {
 /// 字段白名单：出现白名单外的键直接拒绝，避免拼错字段被静默忽略。
 bool is_allowed_field(const std::string& key) {
     static const char* kAllowed[] = {
-        "type", "duration", "tolerance", "to", "target", "offset", "position", "orientation",
+        "type", "duration", "tolerance", "to", "target", "waypoints", "offset", "position", "orientation",
         "frame", "tool_offset", "max_drift_deg", "action", "ui"};
     for (const char* allowed : kAllowed) {
         if (key == allowed) {
@@ -163,6 +167,30 @@ bool parse_step(const YAML::Node& node, Step* step, std::string* error) {
                 return fail("'offset' must be a list");
             }
             step->offset = node["offset"].as<std::vector<double>>();
+        }
+        if (node["waypoints"]) {
+            const YAML::Node& waypoints = node["waypoints"];
+            if (!waypoints.IsSequence()) {
+                return fail("'waypoints' must be a list of waypoints (each waypoint is a list of numbers)");
+            }
+            std::vector<std::vector<double>> parsed;
+            parsed.reserve(waypoints.size());
+            for (std::size_t i = 0; i < waypoints.size(); ++i) {
+                const YAML::Node& point = waypoints[i];
+                if (!point.IsSequence()) {
+                    return fail("'waypoints[" + std::to_string(i) + "]' must be a list of numbers");
+                }
+                std::vector<double> values;
+                values.reserve(point.size());
+                for (std::size_t j = 0; j < point.size(); ++j) {
+                    if (!point[j].IsScalar()) {
+                        return fail("'waypoints[" + std::to_string(i) + "][" + std::to_string(j) + "]' must be a number");
+                    }
+                    values.push_back(point[j].as<double>());
+                }
+                parsed.push_back(std::move(values));
+            }
+            step->waypoints = std::move(parsed);
         }
         if (node["action"]) {
             if (!node["action"].IsScalar()) {

@@ -187,6 +187,12 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<double>("pos_move_axis_tolerance_deg", 1.0);
     auto_declare<double>("pos_move_nullspace_weight", 0.005);
     auto_declare<int>("pos_move_precheck_samples", 2);
+    // 多路点 C3 轨迹（WaypointTrajCmd）的每关节速度/加速度/jerk 上限。构造期读取一次，
+    // 改 yaml 必须重启控制器（C6）。长度规则：1 = 全部关节广播，= 关节数 = 逐关节，
+    // 其它长度退回内部默认值 1 / 2 / 10；速度还会与 URDF 的 upper_joint_vel 逐关节取 min。
+    auto_declare<std::vector<double>>("multi_traj_max_vel", {1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
+    auto_declare<std::vector<double>>("multi_traj_max_acc", {2.0, 2.0, 2.0, 2.0, 2.0, 2.0});
+    auto_declare<std::vector<double>>("multi_traj_max_jerk", {10.0, 10.0, 10.0, 10.0, 10.0, 10.0});
     // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态，
     // 以及尚未在真机验证过的位置约束类轨迹（position-only / position-and-axis）。
     auto_declare<bool>("real_mode", false);
@@ -236,6 +242,56 @@ controller_interface::CallbackReturn ArmController::on_init() {
     RCLCPP_INFO(
         node->get_logger(), "task_dim=%d（%s），real_mode=%s", task_dim, task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿",
         real_mode_ ? "true" : "false");
+
+    // 多路点 C3 轨迹的每关节上限：构造期读取一次，改 yaml 必须重启控制器（C6）。
+    // 长度规则：1 = 全部关节广播；= 关节数 = 逐关节；其它长度打 ERROR 并退回内部默认值。
+    // 速度额外与 URDF 的 upper_joint_vel 逐关节取 min。实际生效值在本行 INFO 里打出来。
+    {
+        const Eigen::Index dof = fsm_factory->model_ != nullptr ? fsm_factory->model_->dof() : 0;
+        const auto resolve     = [&](const char* name, double fallback, bool clamp_to_urdf_velocity) {
+            std::vector<double> values;
+            node->get_parameter(name, values);
+            Eigen::VectorXd result = Eigen::VectorXd::Constant(dof, fallback);
+            if (values.size() == 1) {
+                result.setConstant(dof, values.front());
+            } else if (values.size() == static_cast<std::size_t>(dof)) {
+                for (Eigen::Index i = 0; i < dof; ++i) {
+                    result(i) = values[static_cast<std::size_t>(i)];
+                }
+            } else {
+                RCLCPP_ERROR(
+                    node->get_logger(), "%s 长度 %zu 非法（只允许 1 或 %ld），退回内部默认值 %.1f", name, values.size(),
+                    static_cast<long>(dof), fallback);
+                return result;
+            }
+            if (clamp_to_urdf_velocity && fsm_factory->model_ != nullptr) {
+                const Eigen::VectorXd& urdf_velocity = fsm_factory->model_->upper_joint_vel();
+                if (urdf_velocity.size() == dof) {
+                    for (Eigen::Index i = 0; i < dof; ++i) {
+                        result(i) = std::min(result(i), urdf_velocity(i));
+                    }
+                }
+            }
+            return result;
+        };
+
+        const Eigen::VectorXd max_vel  = resolve("multi_traj_max_vel", 1.0, true);
+        const Eigen::VectorXd max_acc  = resolve("multi_traj_max_acc", 2.0, false);
+        const Eigen::VectorXd max_jerk = resolve("multi_traj_max_jerk", 10.0, false);
+
+        std::string vel_text;
+        std::string acc_text;
+        std::string jerk_text;
+        for (Eigen::Index i = 0; i < dof; ++i) {
+            const std::string separator = i == 0 ? "" : ", ";
+            vel_text += separator + std::to_string(max_vel(i));
+            acc_text += separator + std::to_string(max_acc(i));
+            jerk_text += separator + std::to_string(max_jerk(i));
+        }
+        RCLCPP_INFO(
+            node->get_logger(), "multi waypoint limits: max_vel=[%s] rad/s, max_acc=[%s] rad/s^2, max_jerk=[%s] rad/s^3", vel_text.c_str(),
+            acc_text.c_str(), jerk_text.c_str());
+    }
 
     // 状态可观测性：~/state 话题 + current_state 参数，发布状态机「实际」所处的状态。
     // 用 wall timer 而非在 update() 里发布，避免在实时线程做 ROS 通信与参数写入。

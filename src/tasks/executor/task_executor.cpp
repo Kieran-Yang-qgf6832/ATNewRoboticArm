@@ -38,6 +38,9 @@ constexpr double kDefaultJointTolerance = 0.01;
 /// cart_move 默认到位容差（米）。
 constexpr double kDefaultCartTolerance = 0.005;
 
+/// 多路点轨迹允许的最大路点数（与控制器侧约定一致）。
+constexpr std::size_t kMaxWaypoints = 8;
+
 /// 把字符串列表拼成便于日志阅读的形式。
 std::string join(const std::vector<std::string>& values) {
     std::string text;
@@ -640,6 +643,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
 
     // 字段与类型必须匹配：写错字段名比写错值更难发现，这里直接拒绝。
     const bool uses_target      = !step->target.empty();
+    const bool uses_waypoints   = !step->waypoints.empty();
     const bool uses_to          = !step->to.empty();
     const bool uses_offset      = !step->offset.empty();
     const bool uses_action      = !step->action.empty();
@@ -649,7 +653,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     const bool uses_ui          = step->ui;
 
     if (step->type == "joint_move") {
-        if (uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
+        if (uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui || uses_waypoints) {
             return fail("joint_move accepts only 'to' or 'target'");
         }
         if (uses_to) {
@@ -681,6 +685,41 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         return true;
     }
 
+    if (step->type == "joint_waypoints") {
+        // 时长完全由控制器规划，duration 只是可选的覆盖值，因此允许省略。
+        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui
+            || !step->position.empty() || step->max_drift_deg > 0.0) {
+            return fail("joint_waypoints accepts only 'waypoints', 'duration' and 'tolerance'");
+        }
+        if (step->waypoints.empty()) {
+            return fail("joint_waypoints requires a non-empty 'waypoints' list (1.." + std::to_string(kMaxWaypoints)
+                        + " waypoints), got 0");
+        }
+        if (step->waypoints.size() > kMaxWaypoints) {
+            return fail(
+                "joint_waypoints accepts 1.." + std::to_string(kMaxWaypoints) + " waypoints, got "
+                + std::to_string(step->waypoints.size()));
+        }
+        for (std::size_t i = 0; i < step->waypoints.size(); ++i) {
+            const std::vector<double>& point = step->waypoints[i];
+            if (point.size() != joint_count) {
+                return fail(
+                    "joint_waypoints waypoint #" + std::to_string(i) + " needs " + std::to_string(joint_count)
+                    + " joint values, got " + std::to_string(point.size()));
+            }
+            for (std::size_t j = 0; j < point.size(); ++j) {
+                if (!std::isfinite(point[j])) {
+                    return fail(
+                        "joint_waypoints waypoint #" + std::to_string(i) + " value #" + std::to_string(j) + " is not finite");
+                }
+            }
+        }
+        if (!(step->tolerance > 0.0)) {
+            step->tolerance = kDefaultJointTolerance;
+        }
+        return true;
+    }
+
     if (step->type == "pos_move") {
         const bool uses_position = !step->position.empty();
         if (uses_to && uses_position) {
@@ -689,7 +728,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         if (!uses_to && !uses_position) {
             return fail("pos_move requires either 'to' (a position name) or 'position' ([x, y, z])");
         }
-        if (uses_offset || uses_target || uses_action || uses_frame || uses_tool_offset || uses_ui) {
+        if (uses_offset || uses_target || uses_action || uses_frame || uses_tool_offset || uses_ui || uses_waypoints) {
             return fail("pos_move accepts only 'to' / 'position' / 'orientation' / 'max_drift_deg'");
         }
         if (uses_to) {
@@ -745,7 +784,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     if (step->type == "cart_move" || step->type == "admittance_move") {
-        if (uses_to || uses_target || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
+        if (uses_to || uses_target || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui || uses_waypoints) {
             return fail(step->type + " accepts only 'offset'");
         }
         if (!uses_offset) {
@@ -765,8 +804,48 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
         return true;
     }
 
+    if (step->type == "cart_waypoints") {
+        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui
+            || !step->position.empty() || step->max_drift_deg > 0.0) {
+            return fail("cart_waypoints accepts only 'waypoints', 'duration' and 'tolerance'");
+        }
+        if (step->waypoints.empty()) {
+            return fail("cart_waypoints requires a non-empty 'waypoints' list (1.." + std::to_string(kMaxWaypoints)
+                        + " waypoints), got 0");
+        }
+        if (step->waypoints.size() > kMaxWaypoints) {
+            return fail(
+                "cart_waypoints accepts 1.." + std::to_string(kMaxWaypoints) + " waypoints, got "
+                + std::to_string(step->waypoints.size()));
+        }
+        for (std::size_t i = 0; i < step->waypoints.size(); ++i) {
+            const std::vector<double>& point = step->waypoints[i];
+            if (point.size() != 7) {
+                return fail(
+                    "cart_waypoints waypoint #" + std::to_string(i) + " needs 7 values [x, y, z, qx, qy, qz, qw], got "
+                    + std::to_string(point.size()));
+            }
+            for (std::size_t j = 0; j < point.size(); ++j) {
+                if (!std::isfinite(point[j])) {
+                    return fail(
+                        "cart_waypoints waypoint #" + std::to_string(i) + " value #" + std::to_string(j) + " is not finite");
+                }
+            }
+            const double norm_squared = point[3] * point[3] + point[4] * point[4] + point[5] * point[5] + point[6] * point[6];
+            if (!(norm_squared > 1e-12)) {
+                return fail(
+                    "cart_waypoints waypoint #" + std::to_string(i) + " has a degenerate quaternion (norm = "
+                    + format_number(std::sqrt(norm_squared), 9) + ")");
+            }
+        }
+        if (!(step->tolerance > 0.0)) {
+            step->tolerance = kDefaultCartTolerance;
+        }
+        return true;
+    }
+
     if (step->type == "tool") {
-        if (uses_to || uses_target || uses_offset || uses_orientation || uses_frame || uses_tool_offset || uses_ui) {
+        if (uses_to || uses_target || uses_offset || uses_orientation || uses_frame || uses_tool_offset || uses_ui || uses_waypoints) {
             return fail("tool accepts only 'action'");
         }
         if (!uses_action) {
@@ -779,7 +858,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
     }
 
     if (step->type == "joint_console") {
-        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset) {
+        if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_waypoints) {
             return fail("joint_console accepts only 'duration' (the default motion time) and 'tolerance'");
         }
         // duration 是缺省执行时间，可省略；写了就必须为正，0 表示「用节点参数」。
@@ -794,7 +873,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
 
     if (step->type == "box_move") {
         if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || !step->position.empty()
-            || step->max_drift_deg > 0.0 || uses_ui) {
+            || step->max_drift_deg > 0.0 || uses_ui || uses_waypoints) {
             return fail("box_move accepts only 'duration' / 'tolerance' / 'frame' / 'tool_offset'");
         }
         if (step->frame.empty()) {
@@ -815,7 +894,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
 
     // wait / idel / reset / teach / measure 不接受任何额外字段。
     if (uses_to || uses_target || uses_offset || uses_action || uses_orientation || uses_frame || uses_tool_offset || uses_ui
-        || !step->position.empty() || step->max_drift_deg > 0.0) {
+        || uses_waypoints || !step->position.empty() || step->max_drift_deg > 0.0) {
         return fail(step->type + " accepts no fields other than 'duration' and 'tolerance'");
     }
     return true;
@@ -964,6 +1043,186 @@ bool TaskExecutor::run_joint_move(const Step& step, std::string* error) {
                 step.tolerance);
         } else {
             RCLCPP_INFO(node_->get_logger(), "joint trajectory finished, max joint error %.4f rad", residual);
+        }
+    }
+    return true;
+}
+
+bool TaskExecutor::run_joint_waypoints(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    if (!ctx_->set_exp_state("joint_traj")) {
+        return fail("failed to switch arm_controller to joint_traj");
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state("joint_traj", error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+
+    if (!ctx_->have_joint_states()) {
+        return fail("no valid /joint_states before publishing the joint waypoint trajectory");
+    }
+    const std::vector<double> start = ctx_->joint_positions();
+    const std::vector<double>& last = step.waypoints.back();
+    if (start.size() != last.size()) {
+        return fail("joint state size does not match the waypoint size");
+    }
+
+    // total_duration <= 0 表示由控制器按关节限位自动分配。
+    const double total_duration = step.duration > 0.0 ? step.duration : 0.0;
+    ctx_->clear_waypoint_duration();
+    if (!ctx_->publish_joint_waypoints(step.waypoints, total_duration)) {
+        return fail("failed to publish the joint waypoint trajectory");
+    }
+
+    double planned = 0.0;
+    if (!ctx_->wait_for_waypoint_duration(5.0, &planned) || !(planned > 0.0)) {
+        return fail(
+            "arm_controller rejected the joint waypoint trajectory (no planning duration within 5 s); "
+            "see the controller log (inverse kinematics / joint limits / total duration)");
+    }
+    RCLCPP_INFO(
+        node_->get_logger(), "joint_waypoints: %zu waypoint(s) published, controller planned %.2f s (%s)",
+        step.waypoints.size(), planned, total_duration > 0.0 ? "user duration" : "auto");
+
+    sleep_with_spin(node_, planned);
+
+    // 控制器若回退到 idel，说明这次运动没有走完，必须上报。
+    const std::string state = ctx_->controller_state(2.0);
+    if (state != "joint_traj") {
+        return fail(
+            "arm_controller left joint_traj (now '" + (state.empty() ? std::string("<unknown>") : state)
+            + "'); see the controller log for the failing stage (inverse kinematics / inverse dynamics)");
+    }
+
+    // 终点验收：与最后一个路点逐项比较，判据与 joint_move 共用。
+    if (ctx_->have_joint_states() && ctx_->joint_positions().size() == last.size()) {
+        const std::vector<double>& settled = ctx_->joint_positions();
+        double residual                    = 0.0;
+        double commanded                   = 0.0;
+        double moved                       = 0.0;
+        for (std::size_t i = 0; i < settled.size(); ++i) {
+            residual  = std::max(residual, std::abs(settled[i] - last[i]));
+            commanded = std::max(commanded, std::abs(last[i] - start[i]));
+            moved     = std::max(moved, std::abs(settled[i] - start[i]));
+        }
+
+        bool off_target = false;
+        if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            return fail(
+                "joint waypoint trajectory appears to have been ignored: moved " + std::to_string(moved) + " rad of the commanded "
+                + std::to_string(commanded) + " rad");
+        }
+        if (off_target) {
+            if (commanded > step.tolerance) {
+                return fail(
+                    "joint_waypoints finished " + std::to_string(residual) + " rad away from the last waypoint (tolerance "
+                    + std::to_string(step.tolerance) + " rad)");
+            }
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "joint_waypoints: %zu waypoint(s), planned %.2f s, final joint residual %.4f rad (tolerance %.4f rad)",
+                step.waypoints.size(), planned, residual, step.tolerance);
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(), "joint_waypoints: %zu waypoint(s), planned %.2f s, max joint residual %.4f rad",
+                step.waypoints.size(), planned, residual);
+        }
+    }
+    return true;
+}
+
+bool TaskExecutor::run_cart_waypoints(const Step& step, std::string* error) {
+    const auto fail = [error](const std::string& message) {
+        if (error != nullptr) {
+            *error = message;
+        }
+        return false;
+    };
+
+    const std::string state_name = "cart_traj";
+    if (!ctx_->set_exp_state(state_name)) {
+        return fail("failed to switch arm_controller to " + state_name);
+    }
+    sleep_with_spin(node_, state_settle_);
+    if (!wait_for_state(state_name, error)) {
+        return false;
+    }
+    sleep_with_spin(node_, settle_duration_);
+
+    // 起点只用于日志与「是否真的动了」的判断；路点由配置直接给出，不需要拼接起点。
+    std::vector<double> start_pose;
+    if (!ctx_->end_effector_pose(&start_pose)) {
+        return fail("cannot read the end-effector pose before publishing the Cartesian waypoint trajectory (TF unavailable)");
+    }
+    const std::vector<double>& last = step.waypoints.back();
+
+    const double total_duration = step.duration > 0.0 ? step.duration : 0.0;
+    ctx_->clear_waypoint_duration();
+    if (!ctx_->publish_cart_waypoints(step.waypoints, total_duration)) {
+        return fail("failed to publish the Cartesian waypoint trajectory");
+    }
+
+    double planned = 0.0;
+    if (!ctx_->wait_for_waypoint_duration(5.0, &planned) || !(planned > 0.0)) {
+        return fail(
+            "arm_controller rejected the Cartesian waypoint trajectory (no planning duration within 5 s); "
+            "see the controller log (inverse kinematics / joint limits / total duration)");
+    }
+    RCLCPP_INFO(
+        node_->get_logger(),
+        "cart_waypoints: %zu waypoint(s) published, start [%.3f %.3f %.3f], last [%.3f %.3f %.3f], "
+        "controller planned %.2f s (%s)",
+        step.waypoints.size(), start_pose[0], start_pose[1], start_pose[2], last[0], last[1], last[2], planned,
+        total_duration > 0.0 ? "user duration" : "auto");
+
+    sleep_with_spin(node_, planned);
+
+    const std::string state = ctx_->controller_state(2.0);
+    if (state != state_name) {
+        return fail(
+            "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
+            + "'); see the controller log (inverse kinematics / joint limits / total duration)");
+    }
+
+    // 终点验收只看 xyz：四元数由控制器按路点插值，任务层不重复判定姿态。
+    std::vector<double> current_pose;
+    if (ctx_->end_effector_pose(&current_pose)) {
+        double residual  = 0.0;
+        double commanded = 0.0;
+        double moved     = 0.0;
+        for (std::size_t i = 0; i < 3; ++i) {
+            residual  = std::max(residual, std::abs(current_pose[i] - last[i]));
+            commanded = std::max(commanded, std::abs(last[i] - start_pose[i]));
+            moved     = std::max(moved, std::abs(current_pose[i] - start_pose[i]));
+        }
+
+        bool off_target = false;
+        if (!motion_looks_executed(residual, commanded, moved, step.tolerance, &off_target)) {
+            return fail(
+                "Cartesian waypoint trajectory appears to have been ignored: moved " + std::to_string(moved) + " m of the commanded "
+                + std::to_string(commanded) + " m");
+        }
+        if (off_target) {
+            if (commanded > step.tolerance) {
+                return fail(
+                    "cart_waypoints finished " + std::to_string(residual) + " m away from the last waypoint (tolerance "
+                    + std::to_string(step.tolerance) + " m)");
+            }
+            RCLCPP_WARN(
+                node_->get_logger(),
+                "cart_waypoints: %zu waypoint(s), planned %.2f s, final position residual %.4f m (tolerance %.4f m)",
+                step.waypoints.size(), planned, residual, step.tolerance);
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(), "cart_waypoints: %zu waypoint(s), planned %.2f s, position residual %.4f m",
+                step.waypoints.size(), planned, residual);
         }
     }
     return true;
@@ -1814,12 +2073,20 @@ bool TaskExecutor::run_step(const Step& step, std::string* error) {
         return run_joint_move(step, error);
     }
 
+    if (step.type == "joint_waypoints") {
+        return run_joint_waypoints(step, error);
+    }
+
     if (step.type == "joint_console") {
         return run_joint_console(step, error);
     }
 
     if (step.type == "cart_move") {
         return run_task_space_move(step, "cart_traj", error);
+    }
+
+    if (step.type == "cart_waypoints") {
+        return run_cart_waypoints(step, error);
     }
 
     if (step.type == "pos_move") {

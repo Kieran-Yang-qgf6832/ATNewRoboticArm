@@ -93,6 +93,9 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# 多路点轨迹仿真验收工具（纯 Python），安装名去掉 .py 以便 `ros2 run tasks waypoint_check`
+install(PROGRAMS tools/waypoint_check.py DESTINATION lib/${PROJECT_NAME} RENAME waypoint_check)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
