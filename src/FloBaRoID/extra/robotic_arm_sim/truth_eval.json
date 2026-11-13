@@ -1,0 +1,37 @@
+{
+  "identified_urdf": "/home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/src/arm_model/model/robotic_arm.urdf",
+  "identified": {
+    "train": {
+      "relative_percent": 0.0001634255875143869,
+      "rms_nm": 1.893538963930961e-05,
+      "mean_abs_nm": 1.0816751732495213e-05,
+      "max_abs_nm": 8.101484286981986e-05
+    },
+    "val": {
+      "relative_percent": 0.0001596417981526784,
+      "rms_nm": 1.4691203800475367e-05,
+      "mean_abs_nm": 9.194007310854633e-06,
+      "max_abs_nm": 5.226607028419039e-05
+    }
+  },
+  "residual_criterion": {
+    "val_relative_percent_limit": 5.0,
+    "val_to_train_ratio_limit": 2.0,
+    "pass": true
+  },
+  "prior_urdf": "model/robotic_arm/robotic_arm_prior.urdf",
+  "prior": {
+    "train": {
+      "relative_percent": 7.23061322336477,
+      "rms_nm": 0.8377787150589459,
+      "mean_abs_nm": 0.4683267879580711,
+      "max_abs_nm": 3.6363095003192214
+    },
+    "val": {
+      "relative_percent": 7.131878781640788,
+      "rms_nm": 0.6563186200218387,
+      "mean_abs_nm": 0.39223433902443405,
+      "max_abs_nm": 2.1927985903230223
+    }
+  }
+}

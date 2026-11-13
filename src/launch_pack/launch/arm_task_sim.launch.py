@@ -65,6 +65,16 @@ def generate_launch_description():
         default_value=default_mujoco_model,
         description="MuJoCo MJCF 场景；视觉场景可传 scene_vision.xml / scene_vision_raised.xml",
     )
+    controller_overlay_arg = DeclareLaunchArgument(
+        "controller_overlay",
+        default_value=os.path.join(
+            launch_pack_share, "config", "ros2_controller_overlay_none.yaml"
+        ),
+        description=(
+            "控制器参数叠加文件；real-compat 仿真传 "
+            "config/ros2_controller_real_compat.yaml，并配合 scene_real_compat.xml"
+        ),
+    )
     exit_when_idle_arg = DeclareLaunchArgument(
         "exit_when_idle",
         default_value="true",
@@ -77,6 +87,7 @@ def generate_launch_description():
             "headless": LaunchConfiguration("headless"),
             "show_rviz": LaunchConfiguration("show_rviz"),
             "mujoco_model": LaunchConfiguration("mujoco_model"),
+            "controller_overlay": LaunchConfiguration("controller_overlay"),
         }.items(),
     )
 
@@ -106,6 +117,7 @@ def generate_launch_description():
             headless_arg,
             show_rviz_arg,
             mujoco_model_arg,
+            controller_overlay_arg,
             exit_when_idle_arg,
             sim,
             task_runner,

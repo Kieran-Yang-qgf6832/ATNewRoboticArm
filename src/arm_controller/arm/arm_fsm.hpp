@@ -336,9 +336,12 @@ private:
     Eigen::VectorXd posture_reference_;            ///< 位置约束轨迹起点的关节角（构造期分配）
     /// 位置约束类轨迹的预检中间采样点数（构造期按实时预算 clamp）
     int precheck_sample_count_{0};
-    /// 实机模式：位置约束类轨迹未经真机验证，拒绝并回 idel
+    /// 实机模式：teach_pendant / measure 等物理上不成立的状态在切入前被拒绝
     bool real_mode_{false};
-    bool reject_constrained_on_real_{false};
+    /// 位置约束类轨迹（position-only / position-and-axis）与笛卡尔多路点的放行开关。
+    /// 默认 false：在下发任何运动前拒绝并回 idel。与 real_mode 解耦，实机验证后再打开。
+    bool allow_constrained_traj_{false};
+    bool reject_constrained_traj_{false};
 
     /**
      * @brief 对一个 6 维目标做一次逆解，确认可达

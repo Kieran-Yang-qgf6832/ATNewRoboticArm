@@ -1,0 +1,37 @@
+{
+  "identified_urdf": "extra/robotic_arm_sim/identified.urdf",
+  "identified": {
+    "train": {
+      "relative_percent": 23.174084400819012,
+      "rms_nm": 2.6850771922427694,
+      "mean_abs_nm": 1.7885230483647196,
+      "max_abs_nm": 13.51506379857787
+    },
+    "val": {
+      "relative_percent": 23.716281133990417,
+      "rms_nm": 2.182515629118631,
+      "mean_abs_nm": 1.461884399974785,
+      "max_abs_nm": 8.190968324364029
+    }
+  },
+  "residual_criterion": {
+    "val_relative_percent_limit": 5.0,
+    "val_to_train_ratio_limit": 2.0,
+    "pass": false
+  },
+  "prior_urdf": "model/robotic_arm/robotic_arm_prior.urdf",
+  "prior": {
+    "train": {
+      "relative_percent": 7.23061322336477,
+      "rms_nm": 0.8377787150589459,
+      "mean_abs_nm": 0.4683267879580711,
+      "max_abs_nm": 3.6363095003192214
+    },
+    "val": {
+      "relative_percent": 7.131878781640788,
+      "rms_nm": 0.6563186200218387,
+      "mean_abs_nm": 0.39223433902443405,
+      "max_abs_nm": 2.1927985903230223
+    }
+  }
+}

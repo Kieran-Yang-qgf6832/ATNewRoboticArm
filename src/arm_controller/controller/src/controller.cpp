@@ -193,9 +193,13 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<std::vector<double>>("multi_traj_max_vel", {1.0, 1.0, 1.0, 1.0, 1.0, 1.0});
     auto_declare<std::vector<double>>("multi_traj_max_acc", {2.0, 2.0, 2.0, 2.0, 2.0, 2.0});
     auto_declare<std::vector<double>>("multi_traj_max_jerk", {10.0, 10.0, 10.0, 10.0, 10.0, 10.0});
-    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态，
-    // 以及尚未在真机验证过的位置约束类轨迹（position-only / position-and-axis）。
+    // 实机模式：置 true 时拒绝 teach_pendant / measure 这两个物理上不成立的状态
+    // （MCU 不接收阻抗增益、不上报加速度，joint6 无电机）。
     auto_declare<bool>("real_mode", false);
+    // 位置约束类轨迹（position-only / position-and-axis）与笛卡尔多路点的放行开关。
+    // 与 real_mode 解耦：仿真默认 true，实机在 real-compat 仿真验证通过后再显式打开。
+    // 默认 false 时这两类轨迹在下发任何运动之前被拒绝并回 idel。
+    auto_declare<bool>("allow_constrained_traj", false);
     auto_declare<std::vector<std::string>>("joints", {});
     auto_declare<std::string>("urdf_path", "");
     auto_declare<std::string>("exp_state", "idel");
@@ -239,9 +243,11 @@ controller_interface::CallbackReturn ArmController::on_init() {
     fsm_factory->task_map_->set_roll_free(task_dim == 5);
 
     node->get_parameter("real_mode", real_mode_);
+    const bool allow_constrained_traj = node->get_parameter("allow_constrained_traj").as_bool();
     RCLCPP_INFO(
-        node->get_logger(), "task_dim=%d（%s），real_mode=%s", task_dim, task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿",
-        real_mode_ ? "true" : "false");
+        node->get_logger(), "task_dim=%d（%s），real_mode=%s，allow_constrained_traj=%s", task_dim,
+        task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿", real_mode_ ? "true" : "false",
+        allow_constrained_traj ? "true" : "false (position-constrained trajectories disabled)");
 
     // 多路点 C3 轨迹的每关节上限：构造期读取一次，改 yaml 必须重启控制器（C6）。
     // 长度规则：1 = 全部关节广播；= 关节数 = 逐关节；其它长度打 ERROR 并退回内部默认值。
@@ -339,8 +345,9 @@ controller_interface::CallbackReturn ArmController::on_init() {
                     return result;
                 }
                 fsm_factory->exp_state_name = requested;
-            } else if (name == "joints" || name == "command_interface_prefix" || name == "task_dim" || name == "real_mode") {
-                // 接口与任务空间维度在 on_init() 后固定，禁止再修改。
+            } else if (name == "joints" || name == "command_interface_prefix" || name == "task_dim" || name == "real_mode"
+                       || name == "allow_constrained_traj") {
+                // 接口、任务空间维度与轨迹放行开关在 on_init() 后固定，禁止再修改。
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";
                 return result;

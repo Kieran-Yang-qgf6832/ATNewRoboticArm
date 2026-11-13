@@ -20,3 +20,6 @@ __pycache__/
 # 第三轮迭代（O8 + O10 修好后重跑，见 identify_loop3/）
 /identified_r3_*.urdf
 /identify_loop3/
+/.trae/
+# 运行期日志：不属于项目文档
+/docs/log/

@@ -1,0 +1,20 @@
+# real-compat 仿真的控制器参数叠加。
+#
+# 用途：在仿真里复现实机能力——joint6 无电机（由场景里的 equality 约束锁死）、
+# 只有 5 个自由度、位置约束类轨迹与真机一样默认受控。
+#
+# 加载方式（arm_controller_test_sim.launch.py / arm_task_sim.launch.py）：
+#   controller_overlay:=<此文件>
+#   mujoco_model:=<arm_model>/model/scene_real_compat.xml
+#
+# 注意：
+# - real_mode 只负责 teach/measure 这类物理上不成立的状态；
+# - allow_constrained_traj=true 允许 pos_move / box_move / cart_waypoints，
+#   与实机默认关闭的配置区分开；
+# - task_dim=5 让 IK 把绕工具轴的滚转从误差/雅可比里投影掉。
+
+arm_controller:
+  ros__parameters:
+    real_mode: true
+    task_dim: 5
+    allow_constrained_traj: true

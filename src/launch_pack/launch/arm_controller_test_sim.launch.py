@@ -103,6 +103,20 @@ def generate_launch_description():
         ),
     )
 
+    # 可选控制器参数叠加文件：默认是一个空映射，传 real-compat 文件即可覆盖
+    # real_mode / task_dim / allow_constrained_traj。沿用 arm_real.launch.py 的
+    # 「后一个 ParameterFile 覆盖前一个」语义。
+    controller_overlay_arg = DeclareLaunchArgument(
+        "controller_overlay",
+        default_value=os.path.join(
+            launch_pack_share, "config", "ros2_controller_overlay_none.yaml"
+        ),
+        description=(
+            "叠加到 ros2_controller.yaml 之上的控制器参数文件；"
+            "real-compat 仿真传 config/ros2_controller_real_compat.yaml"
+        ),
+    )
+
     show_rviz_arg = DeclareLaunchArgument(
         "show_rviz",
         default_value="true",
@@ -158,6 +172,7 @@ def generate_launch_description():
             robot_description,
             {"use_sim_time": use_sim_time},
             ParameterFile(controller_yaml),
+            ParameterFile(LaunchConfiguration("controller_overlay")),
         ],
         remappings=robot_description_remap,
         on_exit=Shutdown(),
@@ -244,6 +259,7 @@ def generate_launch_description():
         [
             headless_arg,
             mujoco_model_arg,
+            controller_overlay_arg,
             show_rviz_arg,
             use_sim_time_arg,
             controller_manager_timeout_arg,

@@ -1,422 +1,105 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+本文件是 AI 助手在本仓库工作的**规则与导航**。详细操作见 `docs/execute/`，
+设计原因见 `docs/adr/`，问题记录见 `docs/bugs/`。
 
 ## 项目概述
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
+基于 ROS 2（Jazzy）+ `ros2_control` 的 6 自由度机械臂控制系统，支持 MuJoCo 仿真与
+实机（USB CDC → MCU）。核心包：`arm_controller`（控制器 / FSM / 求解器）、`tasks`
+（配置驱动任务层）、`arm_model`（URDF/MJCF）、`launch_pack`（launch/config）、
+`parameter_identify`（离线辨识）、`view`（视觉）。
 
-> **现状**：仿真链路已端到端跑通并验证（含 MuJoCo 深度相机 + 红色目标检测）；实机链路已打通到控制器层，
-> **loopback 冒烟通过，尚未在真机上电验证**。
-> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 10 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> `auto_declare`、**不要把辨识输出当下一轮先验**、仿真相机参数与 Python 节点时钟 等）。
-> F 系列与 O1–O15 已全部闭环。
+**当前状态**：仿真链路端到端验证；实机 loopback 通过、**尚未上电验证**；
+real-compat 5DOF 仿真验收通过；R5 固件看门狗未实现（拔线≠停机）。
+
+## 文档导航
+
+| 需要什么 | 去哪里 |
+| --- | --- |
+| 环境、构建、仿真/实机运行、标定、排错 | `docs/execute/README.md` |
+| 技术选型与设计原因 | `docs/adr/README.md` |
+| 缺陷的发现/分析/修复/验证 | `docs/bugs/README.md` |
+| 版本、功能、兼容性变化 | `docs/changelog/README.md` |
+| 教学材料 | `docs/teach/` |
+
+**维护规则**：新问题写 `docs/bugs/YYYY-MM-DD/HHMM-中文短语.md` 并更新索引；
+新决策写 `docs/adr/YYYY-MM-DD/HHMM-中文短语.md` 并更新 ADR 索引；有意义的变更写
+`docs/changelog/YYYY-MM-DD/HHMM-中文短语.md` 并更新变更索引；运行步骤变更更新 `docs/execute/`。
+README 只保留目标、特性、快速开始和文档地图。
 
 ## 常用命令
 
-### 构建
-
 ```bash
 colcon build --symlink-install
-source install/setup.bash
+colcon build --packages-select arm_controller tasks --symlink-install
 
-# 仅构建核心包（快速验证）
-colcon build --packages-select arm_controller --symlink-install
-colcon build --packages-select arm_controller parameter_identify --symlink-install
-```
-
-### 运行
-
-```bash
-# MuJoCo 仿真（控制器 + RViz）
-ros2 launch launch_pack arm_controller_test_sim.launch.py
-
-# 一条龙（推荐）：仿真 + task_runner；默认打开 Qt joint_console，任务/UI 退出后自动关仿真
-ros2 launch launch_pack arm_task_sim.launch.py
+# 仿真 + 任务
 ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
-# 视觉一条龙：抬高场景 + 相机 TF/检测 + box_move_demo
+
+# 视觉一条龙
 ros2 launch launch_pack arm_task_vision_sim.launch.py
 
-# 视觉链路（三个终端）：带相机与红色目标箱的场景 → 仿真相机 TF + 检测节点 → 数值验收
-ros2 launch launch_pack arm_controller_test_sim.launch.py \
-    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
-ros2 launch view view_sim.launch.py        # 实机仍用 view.launch.py（RealSense 相机）
-ros2 run view check_sim_vision             # 退出码 0 = 通过
+# 实机（先读 docs/execute/04-实机首次运行与标定.md）
+ros2 launch launch_pack arm_real.launch.py loopback:=true
 
-# 任务层（高级/实机）：单独跑一条在 tasks.yaml 里定义的序列（退出码反映成败）
-ros2 run tasks task_runner --ros-args -p task_sequence:="pick_demo" -p exit_when_idle:=true -p use_sim_time:=true
-
-# 任务层：换一份任务配置文件
-ros2 run tasks task_runner --ros-args -p tasks_config:=/path/to/my_tasks.yaml -p task_sequence:="pick_demo"
-
-# 多路点轨迹验收：必须在轨迹执行前启动（等控制器发布 /arm_waypoints_duration）
-ros2 run tasks waypoint_check --mode joint --expected '[[0,0,0,0,0,0]]'
-
-# 切换控制器工作状态
-ros2 param set /arm_controller exp_state reset
-
-# 参数辨识：一条命令起仿真 + 跑 measure_only 序列，结束后 launch 自动退出
-# CSV 默认落在项目根目录：measured_for_identification.csv（不再是 /tmp）
+# 参数辨识
 ros2 launch launch_pack arm_measure_sim.launch.py
-
-# 离线辨识
-ros2 run parameter_identify identify_arm \
-  --csv measured_for_identification.csv \
-  --urdf src/arm_model/model/robotic_arm.urdf \
-  --output /tmp/robotic_arm_identified.urdf \
-  --config src/parameter_identify/config/identify.yaml \
-  --report /tmp/robotic_arm_identify_report.yaml
 ```
-
-### 代码风格
-
-- **clang-format**：LLVM 基础风格，140 列宽，4 空格缩进（见 `.clang-format`）
-- **clang-tidy**：见 `.clang-tidy`（CLion 导出的大量检查规则）
-- **ament_lint**：`ament_lint_auto` 已启用，但 copyright 和 cpplint 检查被跳过
-- C++17 标准（CMake 设置），编译选项 `-Wall -Wextra -Wpedantic`
 
 ## 架构
 
-### 控制链路
-
 ```
-ArmController (controller_interface, 500 Hz)
+ArmController (500 Hz, controller_interface)
   ├── 仿真: ArmController → SimPidController → mujoco_ros2_control/MujocoSystem
-  └── 实机: ArmController → ArmRealInterfaces → USB CDC (libusb) → MCU
+  └── 实机: ArmController → ArmRealInterfaces → USB CDC → MCU
+
+ArmSolve → IKSolver → ModelBase (Pinocchio) + TaskMapping
+tasks/task_runner（普通线程）→ exp_state / 轨迹话题 → ArmController
 ```
 
-控制配置在 `src/launch_pack/config/ros2_controller.yaml`，默认 500 Hz。
+- 控制器侧 FSM：`idel` / `reset` / `cart_traj` / `joint_traj` / `servo` /
+  `admittance` / `teach_pendant` / `measure`。
+- 任务层：`tasks.yaml` + 封闭步骤类型（`step_types.cpp` 的 `step_spec()`）。
+- 插件：`ArmController`、`SimPidController`、`ArmRealInterfaces`。
 
-### 视觉链路（MuJoCo → view）
+## 硬约束（违反会直接出问题）
 
-```
-scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
-  └── CameraPlugin（mujoco_ros2_control_plugins）
-        └── /vision_camera/{color, depth, camera_info}   640x480 / fovy 60 / 32FC1 深度
-              └── view/red_quad_detector（HSV → 四边形 → 深度分面 → PnP）
-                    └── /target_face（TargetFace）+ target_face TF（视觉光学系）
-                          └── ros2 run view check_sim_vision（转到 base_link 与真值比对）
-```
+1. **实时路径**：`ArmController::update()` 与 FSM 的
+   `enter/run/check_switch/exit` 禁止 ROS 参数读写、禁止动态内存。
+2. **参数声明**：新增控制器参数必须在 `ArmController::on_init` 里
+   `auto_declare`，否则 YAML 里的键被静默忽略（C6）。
+3. **零位形不要直接做笛卡尔运动**：零位是工作空间边界，目标会被判不可达（C1）。
+4. **保持命令必须锁存**：每周期重读实测值会让位置误差恒 0，手臂在重力下坠落（F1/C4）。
+5. **保持路径共用重力前馈**：`gravity_compensation` 是唯一主动输出力矩的保持路径；
+   实机先关掉，确认方向后从 `scale=0.1` 起加。
+6. **不要把辨识输出当作下一轮辨识的先验**：零空间误差会逐轮放大（C7）。
+7. **视觉三坑**：`mujoco_plugins` 只能写在 YAML 的 `/**` 段；仿真 Python 节点不要开
+   `use_sim_time`；相机订阅必须 `image_qos: reliable`（C8–C10）。
+8. **实机 5 自由度**：joint6 无电机、机械锁死；`task_dim=5`；joint6 实际锁死角度必须实测。
+9. **位置约束轨迹开关**：`allow_constrained_traj` 与 `real_mode` 已解耦；
+   实机默认 `false`，real-compat 验收通过后再显式打开。
+10. **断链≠停机**：固件无指令看门狗（R5），物理急停是唯一硬停机手段。
 
-- 相机安装位姿只有 `scene_vision.xml` 一个来源：`view_sim.launch.py` 启动时解析
-  `<camera pos/xyaxes>` 发 `base_link → vision_camera_link`，再固定一段绕 X 180° 的
-  `vision_camera_link → vision_camera_optical_frame`。改相机位置只改 MJCF。
-- 仿真场景用主仿真 launch 的 `mujoco_model:=.../scene_vision.xml` 切换；默认仍是
-  `scene.xml`（参数辨识共用，不能加箱子）。
-- 实机检测仍走 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离。
+完整 C1–C10 见 [设计约束](docs/adr/2026-11-13/1928-设计约束C1-C10.md)。
 
-### 两层控制：控制器侧 FSM + 任务层配置驱动执行器
+## 控制器与求解器
 
-两层**不再**是形态相同的状态机。控制器侧是真正的 FSM（实时路径），任务层已重构为
-**配置驱动的步骤执行器**（普通线程）：
+- `ModelFromURDF`（Pinocchio）提供 FK、几何雅可比、RNEA、关节限位；
+- `Default6DofTaskSpaceMapping` 负责任务空间语义；改任务空间时同步检查
+  `position_map()` 与 `jacobian_map()`；
+- `IKSolver` 用信赖域 + LM，返回 `Converged` / `Unreachable` / `Failed`；
+  不可达目标在下发前拒绝，控制器回 `idel`；
+- 多路点用 C³ 七次 Bezier，1..8 个用户路点，全局时间尺度。
 
-| | 控制器侧 FSM | 任务层执行器 |
-|---|---|---|
-| 位置 | `src/arm_controller/arm/` | `src/tasks/` |
-| 基类 | `FSM`（`lib/fsm/fsm.hpp`），接口 `enter/run/check_switch/exit` | 无 FSM 基类；`task_executor` 按步骤表顺序执行 |
-| 运行线程 | `ArmController::update()` 实时路径 | 普通 ROS 节点线程 |
-| 约束 | **禁止** ROS 参数读写、动态内存分配 | 允许阻塞服务调用与内存分配 |
-| 职责 | 单状态控制逻辑（idel/reset/cart_traj/...） | 读 YAML，按 14 类步骤驱动控制器 |
-| 扩展方式 | 新增 C++ 状态类 | **只改 YAML，不写 C++、不重新编译** |
+## 修改接口时同步检查
 
-任务定义在 `src/tasks/config/tasks.yaml`，结构为 `tool` / `points` / `positions` /
-`position_move` / `box_move` / `joint_limits` / `sequences`。
-步骤类型是**封闭集合**（`wait` / `idel` / `reset` / `joint_move` / `joint_waypoints` /
-`joint_console` / `cart_move` / `cart_waypoints` / `pos_move` / `box_move` / `admittance_move` /
-`tool` / `teach` / `measure`），类型属性表在
-`src/tasks/executor/step_types.cpp` 的 `step_spec()`——加新**类型**要改 C++，
-加新**任务**只改 YAML。
+- controller YAML（`src/launch_pack/config/ros2_controller.yaml`）；
+- URDF 的 `<ros2_control>` 接口标签；
+- 插件 XML（`arm_ctrl_plugin.xml` / `sim_pid_plugin.xml` / `arm_real_plugin.xml`）。
 
-`joint_waypoints` / `cart_waypoints` 是多路点版本：`waypoints` 必填（**1..8 个用户路点**），
-任务层自动在最前面补当前位姿作起点（控制器内部实际 2..9 个节点）；`duration` 可选，
-不给则由控制器按速度/加速度/jerk 限位取总时长（各段时间按路点**弦长成比例**，再乘一个
-**全局**时间尺度；七次 Bezier 控制点只由几何决定，见 `docs/bugs.md` O16）；`tolerance`
-可选，按最后一个路点验收。
-`joint_waypoints` 每个路点是 6 个关节角（rad，顺序同 `joints`）；`cart_waypoints` 每个路点是
-**7 值** `[x, y, z, qx, qy, qz, qw]`（基座系位姿，控制器先逐点 IK 再转关节空间规划）。
-一条轨迹**中途不停顿**，需要停顿就拆成两个步骤；失败在下发前拒绝并回 `idel`。
+## 已知命名债务
 
-`pos_move` 用 `positions` 段的基座系绝对目标，把末端移到目标位置；默认**不约束姿态**
-（`CartTrajCmd.mode = MODE_POSITION_ONLY`），也可选 `orientation: [x, y, z, w]` 只约束
-link6 的 z 轴方向（`MODE_POSITION_AND_TOOL_AXIS`，绕 z 的滚转自由）。6 维消息契约不变，
-`TaskMapping` 显式投影掉不约束的旋转分量；`IKSolver` 在 5 维模式下改用**位置/工具轴分离**
-判据（`pos_move_tolerance` + `pos_move_axis_tolerance_deg`）与零空间就近偏好，预检在终点
-之外再查有限等分中间点（受 2 ms 周期约束）。`real_mode: true` 时两类位置约束轨迹都在
-下发前直接拒绝（实机 5 自由度、未验证）。纯位置模式量测姿态漂移只告警；工具轴模式把
-z 轴角误差作为硬失败判据。四个 `pos_move_*` 参数必须 `auto_declare`、只在构造期读取，
-实际生效值看控制器日志 `cart constraint:` 行（C6）。实现细节与仿真实测见 `docs/bugs.md` §9。
-
-`box_move` 读取视觉目标面 TF（默认 `target_face`），同时检查 `/target_face` 的 `valid`、
-`child_frame_id` 以及消息/TF 时间戳新鲜度；拿到一帧后**快照**，整条轨迹用固定目标。
-优先下发 5 维目标：link6 原点 = 面心 − `tool_offset` × 面 z（工具尖端落在面心），
-工具 z 与面 z 同向；若控制器预检在**未运动**时拒绝，自动回退到 position-only
-（同一 link6 位置，姿态不约束），回退成功会打 WARN；运动中途失败不回退。
-全局参数在 `tasks.yaml` 的 `box_move` 段。低处箱体（z≈0.18）5D 会超出关节限位，
-演示用 `scene_vision_raised.xml`（箱体/相机 z=0.6）+ `box_pregrasp` 粗定位。
-
-`joint_console` 是唯一**交互式**步骤：用户**逐项**输入（一次一个数）——6 个关节角（度）→
-1 个执行时间（秒，回车取默认），步骤内部循环；输入途中回车取消本组、`exit` 结束、
-运动中 `stop` 立即切回 `idel`。每个角度先过 `joint_limits`（每关节限位，度）与
-`max_step_deg`（单步最大变化量）校验。它的 stdin 由一条独立读者线程
-喂队列、主线程照常自旋，否则等待期间 `/joint_states` 会停在旧值（首点不一致即跳变）。
-`stop` 依赖控制器侧改动：`CartTrajState` / `JointTrajState` 的 `check_switch()` 在运动中也
-响应 `exp_state=idel`（其余目标仍要求轨迹走完），否则 `stop` 只能等轨迹跑完才生效。
-步骤写 `ui: true` 时改用 C++ Qt5 窗口：6 个目标角度 + 执行时间 + Execute/Stop/Exit/
-Use current，实时显示当前角与限位；按钮把输入写进**同一个** `ConsoleQueue`，所以
-限位、单步、起点实测与 `stop` 语义和终端版完全一致。窗口需要 `qtbase5-dev` 与
-`DISPLAY`/`WAYLAND_DISPLAY`，无显示时步骤失败并提示改用终端版；现成入口是
-`joint_console_ui` 序列。用过 UI 的进程在 main 末尾直接 `std::_Exit` 硬退出——Qt/xcb 的
-atexit 清理会卡住进程，`ros2 launch` 收不到退出；硬退出后 `arm_task_sim.launch.py`
-才能正常关停。**不要用 `fflush(nullptr)` 代替**：它会去锁 stdin，而 `ConsoleQueue`
-的读者线程正阻塞在 `getline` 里持有那把锁。
-
-任务层通过 `TaskContext` 与控制器交互：
-- `exp_state` 参数服务 → 切换控制器工作状态
-- `/arm_cart_traj`、`/arm_joint_traj`、`/arm_admittance` 话题 → 下发轨迹指令
-- `/arm_joint_waypoints`、`/arm_cart_waypoints` → 下发多路点轨迹（`WaypointTrajCmd`），
-  总时长从 `/arm_waypoints_duration` 读回
-- `/joint_states` 订阅 + TF 查询 → 获取关节角与末端位姿
-
-`task_runner` 的 `task_sequence` 参数是**序列名字符串**（如 `"pick_demo"`），不是步骤列表。
-进程默认常驻，改写该参数即可再跑一条；加 `exit_when_idle:=true` 让它在序列结束后退出
-（退出码反映成败）。
-
-> `tasks.yaml` 里有几条**预期失败**的反例序列：`reset_then_cart`（零位形在工作空间边界）、
-> `unreachable_near` / `unreachable_far`（目标不可达）。它们退出码为 1 是正确行为。
-> 注意这几条的失败方式都是「**下发前被拒绝、完全不运动**」，不是「逆解跑到一半失败」。
-
-### 计算库分层
-
-```
-ArmSolve → IKSolver → ModelBase + TaskMapping
-```
-
-- `ModelFromURDF`（Pinocchio 实现 `ModelBase`）：FK、几何雅可比、RNEA、关节限位
-- `Default6DofTaskSpaceMapping`（实现 `TaskMapping`）：任务空间语义与模型数学解耦
-- `Trajectory`：五次 Hermite/Bezier 段插值，保证位置/速度/加速度连续
-
-**约定**：修改任务空间时同步检查 `position_map()` 与 `jacobian_map()`。
-
-### arm_controller 导出的插件
-
-| 插件 | 类型 | 说明 |
-| --- | --- | --- |
-| `arm_controller/ArmController` | `ControllerInterface` | 上层控制器，每周期驱动 FSM |
-| `arm_controller/SimPidController` | `ChainableControllerInterface` | 链式 PID，向仿真输出 effort |
-| `arm_controller/ArmRealInterfaces` | `SystemInterface` | 实机硬件接口，USB CDC 通信 |
-
-插件 XML：`arm_ctrl_plugin.xml`、`sim_pid_plugin.xml`、`arm_real_plugin.xml`。
-
-### 控制器侧 FSM 状态（8 种）
-
-`idel`（锁定）、`reset`（复位）、`cart_traj`（笛卡尔轨迹）、`joint_traj`（关节轨迹）、`servo`（速度积分伺服）、`admittance`（导纳控制）、`teach_pendant`（示教拖动）、`measure`（参数辨识测量）。
-
-注册在 `arm_fsm_factory.hpp`，通过 `exp_state` 参数切换。
-
-### 多路点轨迹（复用 joint_traj / cart_traj）
-
-多路点轨迹**不新增 FSM 状态**，分别由 `joint_traj` / `cart_traj` 订阅：
-
-- 消息 `robot_msgs/msg/WaypointTrajCmd`：`space`（`SPACE_JOINT=0` / `SPACE_CARTESIAN=1`）、
-  `total_duration`（<=0 自动）、`Vector[] waypoints`。控制器把规划出的总时长发布到
-  `/arm_waypoints_duration`（拒绝时发 0.0）。
-- 话题：`arm_joint_waypoints` / `arm_cart_waypoints`；原有 `JointTrajCmd` / `CartTrajCmd`
-  单目标路径不变。
-- 规划器 `lib/calculate/waypoint_trajectory.{hpp,cpp}`：分段**七次** Hermite/Bezier，
-  起止速度/加速度/jerk 均为 0，中间节点导数对**归一化累计弧长**用非均匀差商估计一次，
-  构造上**三阶导数连续（C³，jerk 连续）**。各段时间按弦长成比例，再乘一个**全局**
-  时间尺度满足关节速度/加速度/jerk 限位；控制点只由几何决定，`total_duration` 只是
-  整条等比放大（不得小于自动总时长）；位置过冲超限直接拒绝。O16 记录了为什么不能
-  逐段独立缩放时长。
-- 笛卡尔路点先**逐点 IK**（首点用实测关节角、后续用前一解作种子），再转关节空间走同一套
-  规划；`real_mode: true` 时 `arm_cart_waypoints` 在下发前拒绝（实机未验证）。
-- 失败原子性：规划失败、IK 失败、real_mode 都在**下发前**拒绝，控制器回 `idel`，
-  不会走到一半停下。
-
-## 重要约束与注意事项
-
-### ros2_control 实时约束
-
-`ArmController::update()` 是 500 Hz 实时控制路径，FSM 的 `enter()/run()/check_switch()/exit()` 均可能被其间接调用：
-
-- **禁止**调用 `get_parameter()` 等 ROS 参数读写
-- **禁止**动态内存操作：不能构造临时 `std::vector`，不能 `resize/reserve/assign/push_back`
-- FSM 内需要的内存只能在构造函数或控制器初始化阶段申请
-- `enter()` 只能重置标量状态、拷贝数据到预分配 buffer、切换标志位
-- 运行时可更新的数组参数（`default_kp/default_kd/reset_joint_pos`）长度不得超过初始化时的 `joints` 数量
-
-### 已知问题
-
-- **O8 已修**（`5e59ef5`）：辨识用的加速度原本是对 500 Hz 记录速度二次求导得到的
-  （相对误差 31.5%），把辨识结果推出了物理可行集。现在 measure **直接记录 MuJoCo 的真实
-  `qacc`**（`mujoco_ros2_control` 新导出 `acceleration` 状态接口 → `ArmController` 读进
-  `state_acceleration_` → `ParamterIdentify` 写 `acc_*` 列），时间列也从墙钟换成**仿真时间**。
-  实测：模型残差 31.5% → **0.37%**，参数误差 11.56% → **0.39%**，伪惯量最小特征值
-  −0.151 → −1.1e-10（物理校验通过）。
-  注意 SDP 仍会判不可行——真值模型本身贴在可行集边界上（link5 伪惯量最小特征值 6.4e-6），
-  所以默认 `physical_projection: true`。详见 `docs/bugs.md` O8。
-  收尾还修了一处**采样时刻对齐**（`e08d942`）：MuJoCo 的 `qacc` 对应**步进前**的状态，
-  而 `qpos/qvel` 是步进后的，直接配对让模型残差停在 0.25%；把位置/速度延后一拍配对后
-  降到 **0.0003%**。
-- **C7（做参数辨识前必读）**：**不要把辨识输出当成下一轮辨识的先验。** 可辨识的只有 36 个
-  基参数，剩下 24 维落在零空间、完全由先验填充，所以把输出喂回去等于把误差原样搬运且只增
-  不减。30 轮实测参数误差 **0.29% → 272.7%**、总质量 6.80 → 18.39 kg，而 **rmse 全程都很好**
-  （1e-4 ~ 2.2），光看 rmse 发现不了。同一份数据换成"真值 URDF 当先验"只差 **0.0002%**。
-  详见 `docs/bugs.md` C7。
-- **O9 已修**（`00001b8`）：`arm_measure_sim.launch.py` 的覆盖参数（`csv_file_path` /
-  `trajectory_period` / …）一度**全部静默失效**——launch 把它们写成 node key 为 `/**` 的
-  params 文件，而 controller_manager 只转发 `arm_controller.*` 前缀的项。现在改用
-  `OpaqueFunction` 生成 node key 为 `arm_controller` 的补充文件。**验证参数是否生效要查
-  目标节点（`ros2 param get /arm_controller <name>`）或结果（CSV 行数），不能只看"文件里写了"。**
-- **O10 已修**（`06af06d`）：激励轨迹生成原本不可复现（`CMAParameters` 的 seed 传 0，
-  libcmaes 的语义是"用当前时间"），且 `k_max_fevals = 600` 对 36 维变量严重欠收敛，
-  于是返回的"最优"轨迹**每次都违反软限位**（实测 21/21 次，违例 0.119 ~ 6.675 rad），
-  指令远超行程把关节甩出硬限位（joint6 行程 15.4 rad、速度峰值 1064 rad/s），数据报废。
-  现在：种子做成参数 `measure_trajectory_seed`（0 = 随机，非 0 = 固定可复现）、
-  评估次数提到 1500、sigma 降到 0.25，并加 `find_feasible_scale()` 用二分把系数整体
-  缩放到**保证可行**。详见 `docs/bugs.md` O10。
-- **O11 已修**（`340e002`）：激励轨迹**没避开地面**——link6 的工具网格会钻进地面 4.6 mm
-  （1.0% 的样本），MuJoCo 的地面接触冲量让模型残差出现 **81.9 N·m** 的尖峰（每 10 s 一次），
-  参数误差从 0.001% 恶化到 **9.56%**。约束原本只卡末端 **frame 原点**，而 link6 的网格比
-  原点低 **0.0569 m**。现在：
-  - `measure_end_effector_tool_offset`（新，默认 0.07 m）——地面净空卡在**工具最低点**上；
-  - `measure_traj_torque_limit_rate`（新，默认 0.6）——RNEA 算指令轨迹需要的关节力矩，
-    超过 `rate × effortLimit(50 N·m)` 就惩罚（原轨迹有 10.3% 的样本 >30 N·m）；
-  - `measure_end_effector_z_lower_limit` 0.1 → 0.20。
-  实测 seed=1：残差 1.53% → **0.30%**（最大 81.9 → **0.26 N·m**），参数误差
-  **9.5565% → 0.0011%**，激励得分只降 2%。**这两个参数的实际生效值会由控制器日志的
-  `激励约束：` 那一行打出来**，改完记得去看（C6 的教训）。详见 `docs/bugs.md` O11。
-  > 验证辨识结果**不要看报告里的 `rmse`**——它量的是最小二乘基参数，而写进 URDF 的是
-  > 投影之后的参数，实测可以差几十倍。用 `src/parameter_identify/tools/verify_torque.py`
-  > 拿最终 URDF 正演一遍（训练集 + 另一条轨迹 + 与真值模型对比 + 残差与 |dq| 的相关性）。
-- **O12 已修**（本次，未提交）：激励轨迹**没有自碰撞与连杆-地面碰撞约束**——1000 个均匀
-  随机位形里有 **11 个自碰撞**（link1↔link4/5/6、link2↔link4、base_link↔link3/4），
-  且 link4/link5/link6 的网格在部分位形下可低于 z=0。现在：
-  - `measure_traj_collision_safe_distance`（新，默认 0.02 m）——非相邻连杆网格之间的距离
-    不得小于它；相邻连杆对（joint 相差 1）不检查，与 MuJoCo `contact <exclude>` 一致；
-  - `measure_traj_ground_clearance`（新，默认 0.01 m）——每个连杆网格的最低点必须高于它；
-    **base_link 除外**（它本来就埋在地面下 9.5 mm，仿真里是静态体、不产生接触）；
-  - 旧 `measure_end_effector_z_lower_limit` 默认改回 `-.inf`（O11 的回归开关保留）；
-  - 两个参数 `0 = 关闭`，实际生效值会打在 `激励约束：` 日志行上。
-  **实现要点（别走回头路）**：完整距离查询 79 ms/次（1000 点 × 1500 次 = 33 h，不可用），
-  实际用「世界 AABB 预筛 + coal 带 security_margin 的碰撞查询」（约 0.94 ms/点）。
-  代价是**激励轨迹生成从 ~20 s 变成 ~54 s**，`arm_measure_sim.launch.py` 的
-  `step_timeout` 默认已从 30 s 提到 240 s。验证工具：
-  `src/parameter_identify/tools/check_collision.py`（拿 csv 里的实际关节角复算精确距离）。
-  详见 `docs/bugs.md` O12。
-- `src/launch_pack/launch/` 下 `arm_static_display.launch.py` 与
-  `arm_mujoco_sim.launch.py` 仍引用不存在的包、当前不可用（`arm`、`arm_calc`、`arm_task`、
-  `robot_driver`、`vision`），是旧版本遗留。可用入口：`arm_controller_test_sim.launch.py`、
-  `arm_measure_sim.launch.py`、`arm_real.launch.py`（实机，`loopback:=true` 可无硬件冒烟），
-  以及视觉链路的 `src/view/launch/view_sim.launch.py`（仿真，见上）。
-- `src/arm_controller/lib/executer/` 是 DAG 组件执行器实验代码，未接入主库
-- **没有统一的自动化测试框架**：`src/view` 有 55 个 pytest（`cd src/view && python3 -m pytest -q`），
-  其余只有 `src/arm_controller/tools/` 下 4 个不安装的离线工具
-  （`fk_dump` / `ik_solve` / `ik_benchmark` / `arm_real_joint_count_test`），
-  构建后在 `build/arm_controller/` 里，用于排查与离线校验。
-- **视觉链路有三个会静默出错的坑**（详见 `docs/bugs.md` C8–C10、O13、O14）：
-  `mujoco_plugins` 参数只能写在 YAML 的 `/**` 段（写 `controller_manager:` 下插件根本不加载）；
-  仿真里的 **Python 节点不要开 `use_sim_time`**（500 Hz `/clock` 会让 rclpy 吃掉一个核，
-  检测循环从 30 Hz 掉到 1 Hz 量级）；相机插件是 `depth=1` 的 reliable 发布，
-  检测端必须 `image_qos: reliable`，否则深度经常超时、分面退化为单面。
-- **控制器状态的序列覆盖不全**：`tasks.yaml` 现有 31 条序列用到
-  `reset` / `idel` / `joint_move` / `joint_console` / `cart_move` / `pos_move` / `box_move` /
-  `tool` / `wait` / `joint_waypoints` / `cart_waypoints` 十一类步骤。
-  其中 16 条多路点序列（`waypoints_joint_1..8` / `waypoints_cart_1..8`）已在仿真端到端验证
-  （2026-11-12：launch 与 `waypoint_check` 全部退出码 0；关节路点误差 ≤ 0.000152 rad，
-  笛卡尔终点残差 0.0002–0.0010 m，平滑后 acc 峰值 ≤ 1.02、jerk 峰值 ≤ 9.24）。
-  `measure` 另有专用配置 `tasks/config/measure.yaml` + `launch_pack/arm_measure_sim.launch.py`，
-  **已端到端验证**（2026-10-10：5000 样本、无 WARN/ERROR，CSV 落在项目根目录；
-  2026-10-12 追加验证 120 s 长测量：59948 行、141 s）。
-  该 launch 支持 `csv_file_path` / `controller_urdf_path` / `trajectory_period` /
-  `trajectory_repeat_cnt` / `move_to_start_duration` / `trajectory_seed` / `step_timeout`
-  覆盖（见 O9、O10）。
-  仍未验证的是 `admittance`（对应 `admittance_move` 步骤）与 `teach_pendant`（`teach`）；
-  `servo` 连步骤类型都没有，只能手动设 `exp_state` 进入。
-
-### 无界面运行（headless）
-
-MuJoCo 自带的 UI 窗口可以关掉，纯命令行跑：`headless` 是 **mujoco_ros2_control 的硬件参数**，
-写在 URDF 的 `<ros2_control><hardware>` 块里（`<param name="headless">`），不是控制器参数。
-URDF 用 xacro 声明了同名 arg（默认 `false`），两个 launch 都把它透传出去：
-
-- `arm_measure_sim.launch.py`：`headless` **默认 true**（测量不需要界面）；
-- `arm_controller_test_sim.launch.py`：默认 false，想要无界面加 `headless:=true`。
-
-headless 时走 `HeadlessAdapter`，不开窗口、不起渲染线程，物理线程照常 500 Hz 推进；
-日志里是 `Running in HEADLESS mode.`（不再有 `Starting the MuJoCo rendering thread...`）。
-实测同一 seed 下 headless 与带界面生成**完全相同**的激励轨迹，数据链路不受影响。
-
-> `sim_speed_factor`（同一处的硬件参数，2.0 = 2 倍速）可以跑得比实时快。O8 修好之后
-> CSV 的 `time` 列已经是**仿真时间**、加速度也是直接记录的，所以它不再会污染辨识数据——
-> 但**尚未实测**（控制周期会从 2 ms 墙钟压到 1 ms，本来就偶发的丢拍可能变多）。
-
-### 两个容易踩的运维细节
-
-- **`robot_description` 话题被改名了。** `controller_manager` 是从**话题**（不是参数）
-  取 URDF 的，同 ROS domain 内任何其他 `robot_state_publisher` 都会让它静默加载错模型。
-  因此发布端与订阅端一起重映射到了 **`/arm_robot_description`**（RViz 配置已同步）。
-  用 `ros2 topic echo /robot_description` 看不到东西是正常的。
-- **`gravity_compensation` 参数**（`ros2_controller.yaml`，默认 `true`）是**所有保持
-  路径**的重力前馈开关：`reset` / `idel` 与 `write_hold_command()`（`cart_traj` /
-  `joint_traj` / `admittance` 的保持阶段）共用 `HoldGravityFeedforward`（`arm_fsm.hpp`）。
-  这是实机上唯一一处**主动输出力矩**的保持路径，怀疑模型质量或力矩符号时先关掉它
-  （关掉后复位会有约 0.124 rad 静差并触发 WARN）。
-  `gravity_compensation_scale`（0~1，默认 1.0）按比例缩放前馈：实机首启取 0.1，
-  确认方向后再逐档加到 1.0。
-
-### 修改控制器接口时
-
-同步检查三处：controller YAML（`ros2_controller.yaml`）、URDF `ros2_control` 接口标签、插件 XML。
-
-### 新增控制器参数时
-
-**必须在 `ArmController::on_init` 里 `auto_declare`**，否则 YAML 里写了也读不到——
-控制器只读取已声明的参数，未声明的键会被静默忽略并取默认值，**写错参数名不会有任何提示**。
-关键参数建议在构造阶段打一行 INFO 把实际生效值打出来（`gravity_compensation` 就是这么做的）。
-详见 `docs/bugs.md` C6。
-
-多路点轨迹的三个限位参数同样 `auto_declare`、只在构造期读取：`multi_traj_max_vel`
-（默认 **1.0** rad/s）、`multi_traj_max_acc`（**2.0** rad/s²）、`multi_traj_max_jerk`
-（**10.0** rad/s³）。都是 `vector<double>`，长度 1 时广播到全部关节、长度 6 时逐关节；
-其它长度打 ERROR 并退回内部默认值。速度上限还与 URDF 的 `velocity` **取 min**。
-
-## 第三方库
-
-- `third_party/libcmaes/`：CMA-ES 优化库（已就位，CMake 自动构建）
-- `third_party/figaroh-plus/`：FIGAROH 动力学参数辨识（已就位，有完整内容）
-- `src/mujoco_ros2_control/`：MuJoCo 的 ros2_control 插件（独立 git 仓库）
-
-### `third_party/` 的两个坑（都会让 `git status` 显示"已修改"，但成因不同）
-
-两个目录都是以 **gitlink（嵌入 git 仓库）**方式记录的，项目里**没有 `.gitmodules`**，
-所以它们不是标准 submodule。两处"已修改"**都不是我改的**，也都不该在无关提交里带上。
-
-**1. `figaroh-plus` —— 悬空 gitlink**
-
-| | 提交 |
-| --- | --- |
-| 父仓库索引记录 | `8899853f80720d27e9656d658a6e2851d3f856dd` |
-| 工作区实际 HEAD | `96b586f` |
-
-关键是：**索引里记的那个提交在本地根本不存在**（`git cat-file -e 8899853` 失败；
-该仓库不是浅克隆，也不是任何本地 ref 的后代）。所以「把工作区切回索引记录的状态」
-这条常规做法**在这里做不到**，除非能从远端取回那个提交（也可能已被 force-push 掉了）。
-
-现实的选择只有一个方向：**把 gitlink 更新到 `96b586f` 并提交**（即承认当前工作区状态），
-或者维持现状不提交。
-
-**2. `libcmaes` —— 构建依赖的未提交补丁**
-
-gitlink 本身是**一致**的（索引与工作区都是 `6a53cd5`），但仓库**内部**有一处未提交改动：
-
-```diff
--if (Boost_FOUND AND Python3_NumPy_FOUND)
-+if (LIBCMAES_BUILD_PYTHON AND Boost_FOUND AND Python3_NumPy_FOUND)
-```
-
-这处补丁**构建依赖它**：`arm_controller/CMakeLists.txt` 在 `add_subdirectory(libcmaes)` 之前
-设了 `LIBCMAES_BUILD_PYTHON OFF`，没有这个补丁那个开关就不生效，Python 绑定仍会被构建。
-**它随时可能因为重新 clone / 重置而丢失，丢失后构建行为会变。** 要么把它固化下来
-（提交进 libcmaes 或改用别的方式传参），要么明确记录它是有意为之。
+- `Paramter` 是 `Parameter` 的历史拼写（`lib/paramter_identify/`、`ParamterIdentify`）；
+- `idel` 是 `idle` 的历史拼写，且是外部参数契约（`exp_state=idel`），改名会破坏命令。
+  不要在其他改动里顺手重命名。

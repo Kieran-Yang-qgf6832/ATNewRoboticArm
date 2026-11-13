@@ -143,8 +143,8 @@ ament_target_dependencies(arm_real_joint_count_test rclcpp hardware_interface)
 
 # 实机单关节点动标定：确认 joint_calibration.yaml 里的 dir/zero。同样不安装。
 add_executable(joint_calibrate tools/joint_calibrate.cpp)
-target_link_libraries(joint_calibrate arm_controller)
-ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces)
+target_link_libraries(joint_calibrate arm_controller yaml-cpp::yaml-cpp)
+ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces ament_index_cpp)
 
 # 多路点 C3 轨迹规划器的离线自检：只用 Eigen，不涉及 ROS 实时路径。同样不安装。
 add_executable(waypoint_planner_test tools/waypoint_planner_test.cpp)

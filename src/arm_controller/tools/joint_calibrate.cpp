@@ -15,10 +15,11 @@
  *    - 实物转动的方向与 URDF 里该关节正向一致 → dir = +1；
  *    - 相反 → dir = -1（记下来，Ctrl-C 结束）。
  * 2. 逐关节重复 1，得到 5 个 dir。
- * 3. 手动把机械臂摆到 URDF 零位，读 /joint_states 里各关节的 q（就是 q_urdf）。
- *    zero = dir * q_raw_zero，而 q_raw_zero = dir * q_urdf_zero（dir = ±1），
- *    所以 **zero = q_urdf_zero**。工具每次打印的就是这个量，直接抄进
- *    arm_controller/config/joint_calibration.yaml。
+ * 3. 手动把机械臂摆到 URDF 零位，然后用 `-p print_zero:=true` 再跑一次：
+ *    工具读取当前 /joint_states（q_urdf）和已有 dir/zero，按
+ *      q_raw = zero_old + dir * q_urdf
+ *    算出新的 zero，直接打印可粘贴的 YAML 片段。**不会自动改文件**。
+ *    不要直接把 q_urdf 当 zero 抄：只有 zero_old=0 且 dir=+1 时两者才相同。
  *
  * 安全约束：
  * - 单步默认 0.05 rad、2 s 走完，速度很低，肉眼可判；
@@ -30,11 +31,13 @@
 #include <robot_msgs/msg/vector.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <rcl_interfaces/msg/parameter.hpp>
 #include <rcl_interfaces/msg/parameter_type.hpp>
 #include <rcl_interfaces/msg/parameter_value.hpp>
 #include <rcl_interfaces/srv/set_parameters.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <algorithm>
 #include <atomic>
@@ -42,6 +45,7 @@
 #include <cmath>
 #include <csignal>
 #include <cstdio>
+#include <exception>
 #include <string>
 #include <thread>
 #include <vector>
@@ -69,6 +73,10 @@ int main(int argc, char** argv) {
     const double dwell     = node->declare_parameter<double>("dwell", 1.0);       // s
     const int steps        = node->declare_parameter<int>("steps", 1);            // 连续走几步
     const std::string ctrl = node->declare_parameter<std::string>("controller", "arm_controller");
+    // 只打印标定片段，不切换状态、不运动。要求机械臂已人工摆到 URDF 零位。
+    const bool print_zero = node->declare_parameter<bool>("print_zero", false);
+    // 当前标定文件；为空时用 arm_controller share 下的 config/joint_calibration.yaml。
+    const std::string calibration_file_param = node->declare_parameter<std::string>("calibration_file", "");
 
     if (joint_index < 1 || joint_index > 5) {
         RCLCPP_ERROR(node->get_logger(), "joint 必须在 1..5 之间（joint6 没有电机）。");
@@ -148,6 +156,46 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
+    // print_zero：不运动，只根据当前 /joint_states 与已有 dir/zero 生成可粘贴片段。
+    // 关键公式（q_urdf = dir * (q_raw - zero)，dir = ±1）：
+    //   q_raw = zero_old + dir * q_urdf
+    // 只有 zero_old = 0 且 dir = +1 时，zero 才等于 q_urdf。
+    if (print_zero) {
+        std::string path = calibration_file_param;
+        if (path.empty()) {
+            path = ament_index_cpp::get_package_share_directory("arm_controller") + "/config/joint_calibration.yaml";
+        }
+        try {
+            const YAML::Node root        = YAML::LoadFile(path);
+            const std::string joint_name = "joint" + std::to_string(joint_index);
+            const YAML::Node entry       = root["joints"][joint_name];
+            if (!entry) {
+                RCLCPP_ERROR(
+                    node->get_logger(), "标定文件 %s 里没有 joints.%s，无法生成片段。", path.c_str(), joint_name.c_str());
+                rclcpp::shutdown();
+                return 1;
+            }
+            const double dir      = entry["dir"].as<double>(1.0);
+            const double zero_old = entry["zero"].as<double>(0.0);
+            const double q_urdf   = measured[static_cast<std::size_t>(joint_index - 1)];
+            const double q_raw    = zero_old + dir * q_urdf;
+
+            RCLCPP_INFO(
+                node->get_logger(),
+                "print_zero：请确认机械臂**已人工摆到 URDF 零位**。\n"
+                "  当前 q_urdf = %+.9f, zero_old = %+.9f, dir = %+.1f\n"
+                "  可粘贴片段（未写文件）：\n"
+                "    %s: {dir: %+.1f, zero: %+.9f}",
+                q_urdf, zero_old, dir, joint_name.c_str(), dir, q_raw);
+        } catch (const std::exception& error) {
+            RCLCPP_ERROR(node->get_logger(), "读取标定文件 %s 失败：%s", path.c_str(), error.what());
+            rclcpp::shutdown();
+            return 1;
+        }
+        rclcpp::shutdown();
+        return 0;
+    }
+
     RCLCPP_INFO(
         node->get_logger(), "标定预览（不动作）：joint%d 当前 q_urdf=%+.6f，本步将走到 %+.6f",
         joint_index, measured[static_cast<std::size_t>(joint_index - 1)],
@@ -201,7 +249,8 @@ int main(int argc, char** argv) {
         node->get_logger(),
         "已切回 idel。把观察到的结果记进 joint_calibration.yaml：\n"
         "  dir  = 实物转动方向与 URDF 正向一致 ? +1 : -1\n"
-        "  zero = 机械臂摆到 URDF 零位时读到的 q_urdf（同号）");
+        "  zero = zero_old + dir * q_urdf（在 URDF 零位用 -p print_zero:=true 生成片段）\n"
+        "  注意：只有 zero_old=0 且 dir=+1 时 zero 才等于 q_urdf。");
 
     rclcpp::shutdown();
     return 0;

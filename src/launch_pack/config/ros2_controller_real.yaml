@@ -19,7 +19,13 @@ arm_controller:
 
     # 实机标志：teach_pendant / measure 在实机上物理不成立（MCU 不接收阻抗增益、
     # 不上报加速度，joint6 无电机），这两个状态会被拒绝切入。
+    # 注意它不再负责位置约束轨迹；那由下面的 allow_constrained_traj 单独控制。
     real_mode: true
+
+    # 位置约束类轨迹（pos_move / box_move / cart_waypoints）默认关闭：
+    # 先跑 real-compat 仿真（task_dim=5 + joint6 锁死）验证，再在真机小步确认后
+    # 改为 true。关闭时这些轨迹在下发任何运动之前被拒绝并回 idel。
+    allow_constrained_traj: false
 
     # 实机只有 5 个自由度：joint6 无电机、机械锁死。
     # 5 维任务 = 位置 3 + 工具指向 2，绕工具轴的滚转不参与求解。

@@ -1,0 +1,411 @@
+<?xml version='1.0' encoding='us-ascii'?>
+<robot xmlns:ns0="http://www.ros.org/wiki/xacro" name="robotic_arm">
+
+  <!-- headless&#65306;&#26159;&#21542;&#20851;&#25481; MuJoCo &#33258;&#24102;&#30340; UI &#31383;&#21475;&#65292;&#32431;&#21629;&#20196;&#34892;&#36305;&#20223;&#30495;&#65288;&#27979;&#37327;/&#25209;&#22788;&#29702;&#29992;&#65289;&#12290;
+       &#40664;&#35748; false = &#20445;&#30041; UI&#12290;launch &#29992; xacro &#20256; headless:=true &#25171;&#24320;&#12290;
+       &#27880;&#24847;&#65306;&#26412;&#25991;&#20214;&#21516;&#26102;&#34987; pinocchio &#24403;**&#32431; URDF** &#35299;&#26512;&#65288;identify_arm / &#28608;&#21169;&#36712;&#36857;&#29983;&#25104;&#65289;&#65292;
+       pinocchio &#20250;&#24573;&#30053; <ros2_control> &#25972;&#22359;&#21644; xacro &#20803;&#32032;&#65292;&#25152;&#20197;&#36825;&#37324;&#21152; xacro &#26159;&#23433;&#20840;&#30340;&#65307;
+       &#20294;&#19981;&#35201;&#22312;&#36825;&#37324;&#20889;&#20250;&#24433;&#21709;&#36816;&#21160;&#23398;&#30340; $(arg ...)&#12290; -->
+  <ns0:arg name="headless" default="false" />
+  <!-- hardware&#65306;&#36873;&#25321; ros2_control &#30828;&#20214;&#25554;&#20214;&#12290;mujoco&#65288;&#40664;&#35748;&#65289;= MuJoCo &#20223;&#30495;&#65292;
+       real = &#23454;&#26426; USB CDC &#25509;&#21475;&#12290;&#21482;&#20999;&#25442; <ros2_control> &#22359;&#65292;&#36816;&#21160;&#23398;&#23436;&#20840;&#20849;&#29992;&#65307;
+       pinocchio &#35299;&#26512;&#26102;&#25972;&#22359;&#34987;&#24573;&#30053;&#65292;&#22240;&#27492;&#19981;&#24433;&#21709;&#25511;&#21046;&#22120;&#20869;&#37096;&#30340;&#27169;&#22411;&#12290; -->
+  <ns0:arg name="hardware" default="mujoco" />
+  <!-- loopback&#65306;&#23454;&#26426;&#25509;&#21475;&#30340;&#26412;&#22320;&#22238;&#29615;&#65292;&#19981;&#25171;&#24320; USB &#35774;&#22791;&#65292;&#21482;&#29992;&#20110;&#26080;&#30828;&#20214;&#20882;&#28895;&#12290;
+       &#40664;&#35748; false&#65307;&#25509;&#30495;&#26426;&#26102;&#24517;&#39035;&#20445;&#25345; false&#12290; -->
+  <ns0:arg name="loopback" default="false" />
+
+  <ns0:if value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+      <param name="mujoco_model">$(find arm_model)/model/scene.xml</param>
+      <!-- mujoco_ros2_control &#30340;&#30828;&#20214;&#21442;&#25968;&#65306;headless=true &#26102;&#29992; HeadlessAdapter &#20195;&#26367; GLFW&#65292;
+           &#19981;&#24320;&#31383;&#21475;&#12289;&#19981;&#36305;&#28210;&#26579;&#32447;&#31243;&#65292;&#29289;&#29702;&#32447;&#31243;&#29031;&#24120;&#25512;&#36827;&#12290; -->
+      <param name="headless">$(arg headless)</param>
+    </hardware>
+
+    <joint name="joint1">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint2">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint3">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint4">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint5">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint6">
+      <command_interface name="effort" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- &#30495;&#23454;&#20851;&#33410;&#21152;&#36895;&#24230;&#65306;mujoco_ros2_control &#20174; qacc &#23548;&#20986;&#65292;&#21442;&#25968;&#36776;&#35782;&#29992;&#23427;&#26367;&#20195;
+           "&#23545;&#35760;&#24405;&#36895;&#24230;&#20108;&#27425;&#27714;&#23548;"&#65288;docs/bugs.md O8&#65289;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+  </ros2_control>
+  </ns0:if>
+
+  <ns0:unless value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>arm_controller/ArmRealInterfaces</plugin>
+      <!-- loopback=true &#26102;&#36339;&#36807; USB &#25171;&#24320;&#12289;&#25226;&#25351;&#20196;&#35835;&#22238;&#29366;&#24577;&#65292;&#21482;&#29992;&#20110;&#26080;&#30828;&#20214;&#20882;&#28895;&#12290; -->
+      <param name="loopback">$(arg loopback)</param>
+      <!-- &#36229;&#36807;&#35813;&#26102;&#38271;&#27809;&#25910;&#21040; MCU &#29366;&#24577;&#21253;&#23601;&#36820;&#22238; ERROR&#65292;&#35753; controller_manager &#20572;&#25511;&#21046;&#22120;&#12290; -->
+      <param name="state_timeout_ms">100</param>
+      <!-- &#20851;&#33410;&#26631;&#23450;&#34920;&#65306;q_urdf = dir * (q_raw - zero)&#12290;&#22266;&#20214;&#38646;&#20301;&#19982; URDF &#30340; SolidWorks
+           &#38646;&#20301;&#27809;&#26377;&#20849;&#21516;&#22522;&#20934;&#65292;&#24517;&#39035;&#29616;&#22330;&#26631;&#23450;&#65307;&#26410;&#26631;&#23450;&#26102;&#25991;&#20214;&#37324;&#26159; dir=1/zero=0 &#30340;&#21344;&#20301;&#20540;&#12290; -->
+      <param name="joint_calibration_file">$(find arm_controller)/config/joint_calibration.yaml</param>
+    </hardware>
+
+    <joint name="joint1">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint2">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint3">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint4">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint5">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+    <joint name="joint6">
+      <!-- &#19979;&#20301;&#26426;&#22266;&#20214;&#21482;&#25509;&#25910;&#20301;&#32622;/&#36895;&#24230;/&#21147;&#30697;&#21069;&#39304;&#65292;kp/kd/ki **&#19981;&#20250;**&#19978;&#24635;&#32447;
+           &#65288;&#22266;&#20214;&#36305;&#33258;&#24049;&#30340;&#20301;&#32622;/&#36895;&#24230;&#21452;&#29615; PID&#65289;&#12290;&#20445;&#30041;&#36825;&#19977;&#20010;&#25509;&#21475;&#21482;&#26159;&#20026;&#20102;&#28385;&#36275;
+           ArmController &#30340;&#21629;&#20196;&#25509;&#21475;&#22768;&#26126;&#65292;&#20540;&#22312; ArmRealInterfaces::write &#37324;&#34987;&#20002;&#24323;&#12290; -->
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <command_interface name="effort" />
+      <command_interface name="kp" />
+      <command_interface name="kd" />
+      <command_interface name="ki" />
+      <state_interface name="position" />
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+      <!-- MCU &#19981;&#19978;&#25253;&#21152;&#36895;&#24230;&#65307;&#25509;&#21475;&#23548;&#20986;&#24658; 0&#65292;&#28385;&#36275;&#25511;&#21046;&#22120;&#23545; acceleration &#30340;&#35831;&#27714;&#12290; -->
+      <state_interface name="acceleration" />
+    </joint>
+
+  </ros2_control>
+  </ns0:unless>
+  <!-- &#34394;&#25311;&#26681;&#38142;&#25509;&#65292;&#35299;&#20915;KDL&#26681;&#38142;&#25509;&#24815;&#37327;&#38382;&#39064; -->
+  <link name="world" />
+  <joint name="world_to_base" type="fixed">
+    <parent link="world" />
+    <child link="base_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-0.0091691 0.00025382 0.018962" rpy="0 0 0" />
+      <mass value="1.0998" />
+      <inertia ixx="0.0018714" ixy="5.0546e-06" ixz="8.499199999993374e-08" iyy="0.0021258000000000006" iyz="1.3828000000000116e-07" izz="0.0039568" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/base_link.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.29412 0.29412 0.29412 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <link name="link1">
+    <inertial>
+      <origin xyz="-0.01178040219231157 0.014030556673329048 0.09370053668566193" rpy="0 0 0" />
+      <mass value="2.9375967251863804" />
+      <inertia ixx="0.11493243587854204" ixy="0.01629700710303537" ixz="0.042782612332506326" iyy="0.01308123187511228" iyz="0.006387587515650074" izz="0.015935024011063885" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link1.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link1.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint1" type="revolute">
+    <origin xyz="0 0 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="link1" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.8" upper="1.8" effort="50" velocity="10" />
+  </joint>
+  <link name="link2">
+    <inertial>
+      <origin xyz="0.15146890921958814 0.03894288704406942 0.04425829194535566" rpy="0 0 0" />
+      <mass value="1.1411417522921476" />
+      <inertia ixx="0.07040218666001694" ixy="-0.13334931767255442" ixz="0.004483267549645856" iyy="0.25257795300318664" iyz="-0.008491841910283975" izz="0.00028553564993977903" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link2.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link2.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint2" type="revolute">
+    <origin xyz="0 0.03675 0.153" rpy="1.5708 -1.5708 0" />
+    <parent link="link1" />
+    <child link="link2" />
+    <axis xyz="0 0 1" />
+    <limit lower="-1.570796327" upper="1.570796327" effort="50" velocity="10" />
+  </joint>
+  <link name="link3">
+    <inertial>
+      <origin xyz="-0.011139733960050037 -0.039982657248694466 0.015984385995128178" rpy="0 0 0" />
+      <mass value="0.35088766430162743" />
+      <inertia ixx="0.19525349699648556" ixy="0.030137475388902924" ixz="-0.03206911305640487" iyy="0.033154695687000836" iyz="0.031576347842003874" izz="0.05207501744909957" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link3.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link3.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint3" type="revolute">
+    <origin xyz="0.52 0 0.08565" rpy="0 0 0" />
+    <parent link="link2" />
+    <child link="link3" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.9" upper="2.9" effort="50" velocity="10" />
+  </joint>
+  <link name="link4">
+    <inertial>
+      <origin xyz="0.12155000636968695 -0.05000000489359069 0.01459716546102265" rpy="0 0 0" />
+      <mass value="1.3544507593690762" />
+      <inertia ixx="0.03480866057273725" ixy="0.011342742802473677" ixz="-0.013521848117926035" iyy="0.0525191249761259" iyz="0.04403954020995326" izz="0.05332429550078674" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link4.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link4.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint4" type="revolute">
+    <origin xyz="0.436 0 0.0225" rpy="0 0 0" />
+    <parent link="link3" />
+    <child link="link4" />
+    <axis xyz="0 0 1" />
+    <limit lower="-2.0" upper="1.8" effort="50" velocity="10" />
+  </joint>
+  <link name="link5">
+    <inertial>
+      <origin xyz="0.0749455735963629 0.030319667135954447 -0.030111155081179387" rpy="0 0 0" />
+      <mass value="0.07603766427609075" />
+      <inertia ixx="0.041629242562850256" ixy="0.00974373404237911" ixz="0.0005715200374989535" iyy="0.0056659230835297645" iyz="-0.0032951668678641677" izz="0.0034810781564939483" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link5.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="0.294117647058824 0.294117647058824 0.294117647058824 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link5.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint5" type="revolute">
+    <origin xyz="0.07761 -0.0058889 -0.03035" rpy="-1.5708 0 0" />
+    <parent link="link4" />
+    <child link="link5" />
+    <axis xyz="0 0 1" />
+    <limit lower="-0.610865238" upper="0.610865238" effort="50" velocity="10" />
+  </joint>
+  <link name="link6">
+    <inertial>
+      <origin xyz="-0.04170760136341131 0.041730085340269556 0.03900003246685491" rpy="0 0 0" />
+      <mass value="0.1537189693091341" />
+      <inertia ixx="0.005187805376459003" ixy="0.01901646634887539" ixz="0.002301560661122522" iyy="0.06970844078302982" iyz="0.008435048747074896" izz="0.0010231234254857722" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link6.STL" />
+      </geometry>
+      <material name="">
+        <color rgba="1 1 1 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://arm_model/model/link6.STL" />
+      </geometry>
+    </collision>
+  </link>
+  <joint name="joint6" type="revolute">
+    <origin xyz="0.073796 0.0036822 8.8922E-05" rpy="0 -1.5708 3.14" />
+    <parent link="link5" />
+    <child link="link6" />
+    <axis xyz="0 0 1" />
+    <limit lower="-3.14159" upper="3.14159" effort="50" velocity="10" />
+  </joint>
+</robot>

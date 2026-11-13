@@ -1,0 +1,4 @@
+# 空叠加文件：launch 的 controller_overlay 默认指向它，表示不覆盖任何控制器参数。
+# 保持一个合法的空参数映射，避免 ParameterFile 收到空路径。
+/**:
+  ros__parameters: {}

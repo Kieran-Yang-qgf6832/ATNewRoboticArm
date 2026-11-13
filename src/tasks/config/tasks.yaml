@@ -43,6 +43,14 @@ points:
   # 先用关节空间粗定位、再由 box_move 做最后 10 cm 的视觉修正，路径才可行。
   # 换箱体位置/相机后必须重算这个点（或用 joint_console 手动找）。
   box_pregrasp: [-0.035035025, 0.032012081, -1.580386931, 0.126714924, 0.560780707, 0.790765396]
+  # 5 自由度（joint6 锁死）版本：位置与工具轴和 box_pregrasp 完全相同，只把 joint6
+  # 置 0。joint6 绕工具轴旋转，不改变 5 维位姿，所以这也是该位姿在 task_dim=5 下的
+  # 自然解。real-compat 仿真与实机只能用这个点，原来的 0.7908 rad 在真机上到不了。
+  box_pregrasp_5dof: [-0.035035025, 0.032012081, -1.580386931, 0.126714924, 0.560780707, 0.0]
+  # 更高的 5DOF 粗定位点：同样的工具轴，link6 原点抬高 0.15 m。
+  # 用途：joint6 锁死时，原 box_pregrasp 的夹爪朝向会挡住相机看到的目标面，
+  # 检测会切到另一面；从箱体上方接近可以避开遮挡。5D 直线约 25 cm，需预检验证。
+  box_pregrasp_5dof_high: [-0.035004687, -0.026084921, -1.169398899, -0.227237066, 0.560505502, 0.0]
   # 低处视觉场景（scene_vision.xml，箱体/相机 z≈0.175）的回退验证粗定位点。
   # 由低处 position-only IK 解与 ready 做约 90% 关节插值得到：
   #   末端约 [0.676, -0.103, 0.295]，到最终 [0.617, -0.109, 0.176] 约 12 cm。
@@ -269,6 +277,47 @@ sequences:
       - {type: reset}
       - {type: joint_move, to: box_low_pregrasp, duration: 6.0}
       - {type: box_move, duration: 4.0, tolerance: 0.02}
+      - {type: idel}
+
+  # ==========================================================================
+  # real-compat 仿真验收（task_dim=5 + joint6 锁死 + allow_constrained_traj=true）
+  #
+  # 启动方式见 docs/real_first_run.md：
+  #   ros2 launch launch_pack arm_task_sim.launch.py \
+  #     task_sequence:=real_compat_joint \
+  #     mujoco_model:=<arm_model>/model/scene_real_compat.xml \
+  #     controller_overlay:=<launch_pack>/config/ros2_controller_real_compat.yaml
+  #
+  # 三条分别覆盖：关节空间、纯位置、位置 + 工具轴 + 视觉。
+  # 所有目标点的 joint6 必须为 0，否则在锁死的 joint6 上会一直判不到位。
+  # ==========================================================================
+  real_compat_joint:
+    steps:
+      - {type: joint_move, to: box_pregrasp_5dof, duration: 4.0}
+      - {type: idel}
+
+  real_compat_pos:
+    steps:
+      - {type: joint_move, to: ready, duration: 3.0}
+      - {type: pos_move, to: below_ready_5cm, duration: 2.0}
+      - {type: idel}
+
+  real_compat_box:
+    steps:
+      - {type: joint_move, to: box_pregrasp_5dof_high, duration: 4.0}
+      - {type: box_move, duration: 4.0}
+      - {type: idel}
+
+  # **反例，预期失败**：joint6 目标 0.5 rad，但 real-compat 场景把 joint6 锁死在 0。
+  # 用来确认锁死生效：任务应退出码 1；若这条意外通过，说明场景的约束没有生效。
+  # 注意任务层的 "moved" 是**六轴最大值**，失败消息里的 0.04 rad 来自其他关节的
+  # 重力沉降，不是 joint6；joint6 本身在 /joint_states 里始终接近 0（实测 1e-11）。
+  real_compat_joint6_lock:
+    steps:
+      - type: joint_move
+        target: [0.0, 0.0, 0.0, 0.0, 0.0, 0.5]
+        duration: 2.0
+        tolerance: 0.01
       - {type: idel}
 
   # ==========================================================================

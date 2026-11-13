@@ -571,6 +571,7 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     nullspace_weight_      = factory->node_->get_parameter("pos_move_nullspace_weight").as_double();
     precheck_sample_count_ = factory->node_->get_parameter("pos_move_precheck_samples").as_int();
     real_mode_             = factory->node_->get_parameter("real_mode").as_bool();
+    allow_constrained_traj_ = factory->node_->get_parameter("allow_constrained_traj").as_bool();
     if (!(position_tolerance_ > 0.0)) {
         position_tolerance_ = 1e-3;
     }
@@ -603,9 +604,10 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     RCLCPP_INFO(
         factory->node_->get_logger(),
         "cart constraint: position_tolerance=%.3g m, axis_tolerance=%.3g deg, nullspace_weight=%.3g, "
-        "precheck_samples=%d (max %d), real_mode=%s",
+        "precheck_samples=%d (max %d), real_mode=%s, allow_constrained_traj=%s",
         position_tolerance_, axis_tolerance_ / kDegToRad, nullspace_weight_, precheck_sample_count_, kMaxPrecheckSamples,
-        real_mode_ ? "true (constrained trajectories disabled)" : "false");
+        real_mode_ ? "true" : "false",
+        allow_constrained_traj_ ? "true" : "false (position-constrained trajectories disabled)");
 
     cart_traj_cmd_sub_ = factory->node_->create_subscription<robot_msgs::msg::CartTrajCmd>(
         "arm_cart_traj", rclcpp::QoS(10), [this](const robot_msgs::msg::CartTrajCmd& msg) {
@@ -616,10 +618,10 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
             const bool tool_axis_only = msg.mode == robot_msgs::msg::CartTrajCmd::MODE_POSITION_AND_TOOL_AXIS;
             const bool constrained    = position_only || tool_axis_only;
 
-            // 实机从未上电验证、且只有 5 自由度：位置约束类轨迹（纯位置 3 维与
-            // 位置 + 工具轴 5 维）的零空间行为与仿真不同，明确拒绝而不是悄悄执行。
+            // 位置约束类轨迹（纯位置 3 维与位置 + 工具轴 5 维）的零空间行为与实机不同，
+            // 由 allow_constrained_traj 显式控制；默认关闭时在下发前拒绝，而不是悄悄执行。
             // 交给 run() 返回 false，由 update() 统一裁决回 idel。
-            reject_constrained_on_real_ = constrained && real_mode_;
+            reject_constrained_traj_ = constrained && !allow_constrained_traj_;
 
             if (position_only) {
                 pose_mode_ = PoseMode::kPositionOnly;
@@ -708,10 +710,12 @@ void CartTrajState::on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& 
         return;
     }
 
-    // 实机 5 自由度、未验证：与 pos_move / box_move 的位置约束轨迹一致，直接拒绝。
-    if (real_mode_) {
+    // 实机 5 自由度、位置约束类轨迹未在真机验证：由 allow_constrained_traj 显式控制。
+    if (!allow_constrained_traj_) {
         waypoint_plan_failed_ = true;
-        RCLCPP_ERROR(logger, "Cartesian waypoint trajectory REJECTED before any motion: real_mode=true (5-DOF hardware, not validated)");
+        RCLCPP_ERROR(
+            logger, "Cartesian waypoint trajectory REJECTED before any motion: allow_constrained_traj=false "
+                    "(5-DOF hardware, not validated)");
         publish_duration(0.0);
         return;
     }
@@ -939,10 +943,10 @@ bool CartTrajState::exit(const std::string& next_state) {
     waypoint_active_      = false;
     waypoint_plan_failed_ = false;
     // 清掉未消费的预检请求：否则下一次进入本状态时会拿旧轨迹的途经点做预检。
-    precheck_pending_           = false;
-    precheck_count_             = 0;
-    reject_constrained_on_real_ = false;
-    pose_mode_                  = PoseMode::kFullPose;
+    precheck_pending_        = false;
+    precheck_count_          = 0;
+    reject_constrained_traj_ = false;
+    pose_mode_               = PoseMode::kFullPose;
     factory->task_map_->set_pose_mode(pose_mode_);
     factory->arm_solve_->set_solve_options(0.0, 0.0, 0.0);
     factory->arm_solve_->clear_posture_reference();
@@ -986,17 +990,17 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         return run_waypoint_motion(time);
     }
 
-    // 实机模式下的位置约束类轨迹（纯位置 / 位置 + 工具轴）：在下发任何运动指令之前拒绝。
+    // 位置约束类轨迹（纯位置 / 位置 + 工具轴）：在下发任何运动指令之前拒绝。
     // 返回 false 交给 ArmController::update() 统一裁决（写保持命令 + 切回 idel），
     // 与逆解失败走同一条失效安全路径。
-    if (reject_constrained_on_real_) {
-        reject_constrained_on_real_ = false;
-        state                       = TrajPhase::STOP;
+    if (reject_constrained_traj_) {
+        reject_constrained_traj_ = false;
+        state                    = TrajPhase::STOP;
         traj.stop();
-        set_fault_stage("position-constrained trajectory rejected on real hardware");
+        set_fault_stage("position-constrained trajectory rejected (allow_constrained_traj=false)");
         RCLCPP_ERROR(
-            factory->node_->get_logger(), "position-constrained trajectory REJECTED before any motion: real_mode=true "
-                                          "(5-DOF hardware, not validated)");
+            factory->node_->get_logger(), "position-constrained trajectory REJECTED before any motion: "
+                                          "allow_constrained_traj=false (5-DOF hardware, not validated)");
         return false;
     }
 

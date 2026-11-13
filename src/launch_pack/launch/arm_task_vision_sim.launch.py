@@ -66,6 +66,17 @@ def generate_launch_description():
         default_value=default_scene,
         description="含 vision_camera 与红色箱体的 MJCF；同时作为 view_sim 的 scene_path",
     )
+    controller_overlay_arg = DeclareLaunchArgument(
+        "controller_overlay",
+        default_value=os.path.join(
+            launch_pack_share, "config", "ros2_controller_overlay_none.yaml"
+        ),
+        description=(
+            "控制器参数叠加文件；real-compat 视觉验收传 "
+            "config/ros2_controller_real_compat.yaml，并把 mujoco_model 指向 "
+            "scene_vision_raised_real_compat.xml"
+        ),
+    )
     vision_display_arg = DeclareLaunchArgument(
         "vision_display",
         default_value="false",
@@ -85,6 +96,7 @@ def generate_launch_description():
             "headless": LaunchConfiguration("headless"),
             "show_rviz": LaunchConfiguration("show_rviz"),
             "mujoco_model": LaunchConfiguration("mujoco_model"),
+            "controller_overlay": LaunchConfiguration("controller_overlay"),
             "exit_when_idle": LaunchConfiguration("exit_when_idle"),
         }.items(),
     )
@@ -105,6 +117,7 @@ def generate_launch_description():
             headless_arg,
             show_rviz_arg,
             mujoco_model_arg,
+            controller_overlay_arg,
             vision_display_arg,
             exit_when_idle_arg,
             task_sim,

@@ -1,0 +1,9 @@
+{
+  "csv": "extra/robotic_arm_sim/measure.csv",
+  "frequency_hz": 499.99999999938893,
+  "samples": 4999,
+  "train_samples": 3499,
+  "val_samples": 1500,
+  "train_ratio": 0.7,
+  "preprocess": "none (recorded velocities/accelerations kept verbatim)"
+}

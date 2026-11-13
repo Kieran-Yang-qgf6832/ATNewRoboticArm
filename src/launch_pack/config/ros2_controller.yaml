@@ -39,6 +39,11 @@ arm_controller:
     # 正好把它拉回零位）；复位时长/目标/容差由下面的 reset_duration / reset_joint_pos /
     # reset_tolerance 决定。若不想自动复位，改回 idel 即可。
     exp_state: reset
+    # 位置约束类轨迹（pos_move / box_move / cart_waypoints）的放行开关。
+    # 与 real_mode 解耦：仿真默认打开；实机默认关闭，等 real-compat 仿真与上机
+    # 小步验证都通过后再在 ros2_controller_real.yaml 里显式打开。
+    # 控制器只在构造阶段读取，改这里必须重启控制器（docs/bugs.md C6）。
+    allow_constrained_traj: true
     default_kp: [200.0, 200.0, 200.0, 10.0, 10.0, 1.0]
     default_kd: [8.0, 8.0, 8.0, 0.4, 0.2, 0.05]
     # 所有保持路径的重力前馈补偿（docs/bugs.md O6 / O7）：reset / idel 与
