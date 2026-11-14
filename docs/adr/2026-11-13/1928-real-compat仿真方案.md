@@ -53,7 +53,7 @@
 ## 相关链接
 
 - [位置约束轨迹开关拆分](1928-位置约束轨迹开关拆分.md)
-- [实机首次运行 Phase 3.5](../../execute/04-实机首次运行与标定.md)
+- [real-compat 验收序列](../../execute/05-任务层与序列.md#real-compat-验收序列)
 - `src/arm_model/model/robotic_arm_real_compat.xml`
 - `src/launch_pack/config/ros2_controller_real_compat.yaml`
 - `src/tasks/config/tasks.yaml`

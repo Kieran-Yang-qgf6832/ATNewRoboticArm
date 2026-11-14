@@ -15,17 +15,10 @@
 | [06 参数辨识](06-参数辨识.md) | 激励轨迹、测量 CSV、离线辨识、结果验证 |
 | [07 离线工具与排错](07-离线工具与排错.md) | `fk_dump` / `ik_solve` / 验收工具 / 常见报错 |
 | [08 开发约定](08-开发约定.md) | 分层、实时约束、参数声明、文档维护 |
+| [09 手眼标定](09-手眼标定.md) | ChArUco 标靶、easy_handeye2 采样、外参发布与复测 |
 
 ## 最短路径
 
-```bash
-# 构建
-colcon build --symlink-install
-source install/setup.bash
-
-# 仿真（推荐入口）
-ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
-
-# 实机前先读
-# docs/execute/04-实机首次运行与标定.md
-```
+构建与依赖见 [01](01-环境依赖与构建.md)；仿真入口见 [02](02-仿真运行.md)
+（一条龙：`ros2 launch launch_pack arm_task_sim.launch.py`）；
+实机首次上电前必读 [04](04-实机首次运行与标定.md)。
