@@ -483,6 +483,18 @@ ros2 run parameter_identify identify_arm \
 
 ## 开发约定
 
+| 入口 | 内容 |
+| --- | --- |
+| [docs/README.md](docs/README.md) | 职责矩阵、单一事实源与维护规则 |
+| [docs/execute/](docs/execute/README.md) | 环境、构建、仿真/实机运行、标定、任务层、参数辨识、排错 |
+| [docs/adr/](docs/adr/README.md) | 技术选型、设计原因、备选方案与决策 |
+| [docs/bugs/](docs/bugs/README.md) | 缺陷的完整生命周期（发现、分析、修复、验证） |
+| [docs/changelog/](docs/changelog/README.md) | 有意义的版本/功能/兼容性变化 |
+| [CLAUDE.md](CLAUDE.md) | AI 助手的工作规则与导航 |
+
+> `docs/teach/` 是本地教学材料，被 `.git/info/exclude` 排除，不随仓库分发。
+
+## 软件包
 - 优先保持 `TaskMapping` 承担任务空间语义，`ModelBase` 承担机器人模型数学。
 - 修改任务空间时，同步检查 `position_map()` 与 `jacobian_map()`。
 - 修改控制器接口时，同步检查 controller YAML、URDF `ros2_control` 接口与插件 XML。

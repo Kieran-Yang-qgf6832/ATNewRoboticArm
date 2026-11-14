@@ -25,6 +25,8 @@ setup(
         'console_scripts': [
             'red_quad_detector = view.detector:main',
             'check_sim_vision = view.check_sim_vision:main',
+            'calib_board_detector = view.calib_board:main',
+            'check_handeye = view.check_handeye:main',
         ],
     },
 )

@@ -1,16 +1,19 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+AI 助手的工作规则。项目概况与快速开始见 [README.md](README.md)，文档职责见
+[docs/README.md](docs/README.md)，设计原因见 [docs/adr/](docs/adr/README.md)，
+缺陷记录见 [docs/bugs/](docs/bugs/README.md)。
 
-## 项目概述
+## 导航
 
-基于 ROS 2 (Jazzy) + `ros2_control` 的机械臂控制系统（当前生效模型为 **4 自由度**，6 自由度版本见 Git 历史），支持 MuJoCo 仿真与实机（USB CDC → MCU）两种运行模式。内置 Pinocchio 运动学/动力学计算、控制器侧状态机、配置驱动的任务层，以及动力学参数辨识（FIGAROH + CMA-ES）工作流。
+| 需要什么 | 去哪里 |
+| --- | --- |
+| 构建、仿真/实机运行、标定、任务层、辨识、排错 | [docs/execute/README.md](docs/execute/README.md)（按 01–09 顺序） |
+| 开发约定（分层 / 实时 / 参数 / 引用规则） | [08-开发约定](docs/execute/08-开发约定.md) |
+| 设计约束 C1–C10 | [ADR](docs/adr/2026-11-13/1928-设计约束C1-C10.md) |
+| 缺陷的发现/分析/修复/验证 | [缺陷索引](docs/bugs/README.md) |
 
-> **现状**：仿真链路已端到端跑通并验证（含 MuJoCo 深度相机 + 红色目标检测）；实机链路已打通到控制器层，
-> **loopback 冒烟通过，尚未在真机上电验证**。
-> 缺陷台账、设计约束与排查记录见 [`docs/bugs.md`](docs/bugs.md)——**动手前先看它**，
-> 里面记了 10 条必须遵守的设计约束（零位形在工作空间边界、保持命令必须锁存、参数必须
-> F 系列与 O1–O23 已记录（O23 的辨识精度待办）。
+## 六条硬规则（改了会出事）
 
 > **模型切换说明（2026-10-17）**：`src/arm_model/model_4dof/` 是 **4 自由度**机械臂
 > （几何/惯量/限位/网格来自它自己的 SolidWorks 导出）。接口层沿用 6 自由度版本的写法：
@@ -41,7 +44,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > `fk_dump` / `ik_solve` / `ik_benchmark` 也已参数化：frame 与 task_dof 都从命令行给
 > （4 轴：`link4 4`；6 轴：`link6 6`）。
 
-## 常用命令
+1. **实时路径**：`ArmController::update()` 与 FSM 的 `enter/run/check_switch/exit`
+   禁止 ROS 参数读写、禁止动态内存分配。
+2. **参数与接口同步**：新增控制器参数必须 `auto_declare`，否则 YAML 里的键被静默忽略（C6）；
+   改控制器接口时同步检查 YAML、URDF 的 `<ros2_control>` 接口标签、插件 XML。
+3. **保持命令必须锁存**：每周期重读实测值会让位置误差恒 0，手臂在重力下坠落（F1/C4）。
+4. **零位形不要直接做笛卡尔运动**：那是工作空间边界，目标会被判不可达（C1）。
+5. **`idel` / `Paramter` 不要顺手重命名**：前者是外部参数契约（`exp_state=idel`），
+   后者是历史拼写（`lib/paramter_identify/`、`ParamterIdentify`）。
+6. **实机是 5DOF，且断链≠停机**：`task_dim=5`、joint6 锁死；固件无指令看门狗（R5），
+   物理急停是唯一的硬停机手段。
 
 ### 构建
 
