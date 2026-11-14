@@ -8,20 +8,28 @@
   2. ros2_control_node      ：controller_manager + ArmRealInterfaces 硬件插件
   3. joint_state_broadcaster：发布 /joint_states
   4. arm_controller         ：状态机控制器，命令直接写 MCU（MIT 阻抗模式）
-  5. rviz2                  ：show_rviz:=true 时启动
+  5. rosbag2                ：录制关节命令与关节状态（record_bag:=false 关闭），
+                              见 arm_bag_record.launch.py
+  6. rviz2                  ：show_rviz:=true 时启动
 
 参数：
-  loopback:=true  不打开 USB 设备，把指令读回状态，用于无硬件冒烟（默认 false）
-  show_rviz:=true 启动 RViz（默认 false）
+  loopback:=true     不打开 USB 设备，把指令读回状态，用于无硬件冒烟（默认 false）
+  show_rviz:=true    启动 RViz（默认 false）
+  record_bag:=false  不录 rosbag（默认 true，目录见 bag_dir）
+  bag_dir:=...       rosbag 输出根目录（默认 <项目根>/.ros/ros2bags）
 
 用法：
   # 无硬件冒烟
   ros2 launch launch_pack arm_real.launch.py loopback:=true
   # 接真机
   ros2 launch launch_pack arm_real.launch.py
+  # 真机但不录 bag
+  ros2 launch launch_pack arm_real.launch.py record_bag:=false
 
 @note 任务层不在这里启动。task_runner 需要 TF 与 /joint_states，确认控制器激活后
       再单独启动。
+@note 默认录制 /joint_states（下位机回报）与 /arm_controller/joint_command（上位机下发的
+     每周期命令）。实机上 bag 的时间戳是系统时间，与消息 header.stamp 一致。
 @warning 实机不支持 measure：MCU 不上报加速度，acc_* 列恒 0，辨识结果不可用。
 """
 
@@ -29,9 +37,16 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+    Shutdown,
+)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit, OnProcessStart
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
@@ -89,6 +104,16 @@ def generate_launch_description():
         default_value="30",
         description="Seconds to wait for controller manager service responses",
     )
+    record_bag_arg = DeclareLaunchArgument(
+        "record_bag",
+        default_value="true",
+        description="是否用 rosbag2 录制关节命令与关节状态（实现见 arm_bag_record.launch.py）",
+    )
+    bag_dir_arg = DeclareLaunchArgument(
+        "bag_dir",
+        default_value="",
+        description="rosbag 输出根目录；空 = <项目根>/.ros/ros2bags（目录名再拼 arm_real_<时间戳>）",
+    )
 
     robot_state_pub = Node(
         package="robot_state_publisher",
@@ -110,6 +135,17 @@ def generate_launch_description():
         ],
         remappings=robot_description_remap,
         on_exit=Shutdown(),
+    )
+
+    # 关节命令/状态录制：与 controller_manager 同时启动。rosbag2 对指定话题先订阅再等数据，
+    # 话题暂时不存在不会报错，因此控制器激活后的自动复位运动也能录到。
+    bag_record = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(launch_pack_share, "launch", "arm_bag_record.launch.py")),
+        launch_arguments={
+            "record_bag": LaunchConfiguration("record_bag"),
+            "bag_dir": LaunchConfiguration("bag_dir"),
+            "bag_name": "arm_real",
+        }.items(),
     )
 
     joint_state_broadcaster = Node(
@@ -186,9 +222,12 @@ def generate_launch_description():
             controller_manager_timeout_arg,
             switch_timeout_arg,
             service_call_timeout_arg,
+            record_bag_arg,
+            bag_dir_arg,
             loopback_hint,
             robot_state_pub,
             ros2_control_node,
+            bag_record,
             load_joint_state_broadcaster,
             load_arm_controller,
             rviz2,

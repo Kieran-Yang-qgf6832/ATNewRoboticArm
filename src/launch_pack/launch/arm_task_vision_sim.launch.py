@@ -76,6 +76,16 @@ def generate_launch_description():
         default_value="true",
         description="序列结束后 task_runner 是否退出；true 会连带关闭整个 launch",
     )
+    record_bag_arg = DeclareLaunchArgument(
+        "record_bag",
+        default_value="true",
+        description="是否用 rosbag2 录制关节命令与关节状态（见 arm_bag_record.launch.py）",
+    )
+    bag_dir_arg = DeclareLaunchArgument(
+        "bag_dir",
+        default_value="",
+        description="rosbag 输出根目录；空 = <项目根>/.ros/ros2bags（目录名再拼 arm_sim_<时间戳>）",
+    )
 
     task_sim = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(task_sim_launch),
@@ -86,6 +96,8 @@ def generate_launch_description():
             "show_rviz": LaunchConfiguration("show_rviz"),
             "mujoco_model": LaunchConfiguration("mujoco_model"),
             "exit_when_idle": LaunchConfiguration("exit_when_idle"),
+            "record_bag": LaunchConfiguration("record_bag"),
+            "bag_dir": LaunchConfiguration("bag_dir"),
         }.items(),
     )
 
@@ -107,6 +119,8 @@ def generate_launch_description():
             mujoco_model_arg,
             vision_display_arg,
             exit_when_idle_arg,
+            record_bag_arg,
+            bag_dir_arg,
             task_sim,
             vision,
         ]
