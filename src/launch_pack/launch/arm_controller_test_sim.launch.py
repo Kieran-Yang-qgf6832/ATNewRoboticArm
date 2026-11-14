@@ -14,7 +14,9 @@
   5. arm_controller         ：机械臂状态机控制器（idel/reset/cart_traj/joint_traj/servo/
                               admittance/teach_pendant/measure）；tasks 通过 exp_state 参数
                               与各轨迹话题驱动它
-  6. rviz2                  ：由 show_rviz 控制是否启动
+  6. rosbag2                ：录制关节命令与关节状态（record_bag:=false 关闭），
+                              实现见 arm_bag_record.launch.py
+  7. rviz2                  ：由 show_rviz 控制是否启动
 
 用法：
     ros2 launch launch_pack arm_controller_test_sim.launch.py
@@ -32,6 +34,9 @@
 
 @note 状态：可用。依赖（arm_model / arm_controller / mujoco_ros2_control / launch_pack）
       均在本工作区；控制器参数取自 config/ros2_controller.yaml。
+@note 默认录制 /joint_states（仿真回报）与 /arm_controller/joint_command（下发的每周期命令），
+      目录 <项目根>/.ros/ros2bags/arm_sim_<时间戳>；bag 的接收时间戳是墙钟（C9 不给 Python
+      节点开仿真时间），对齐命令与状态请用消息的 header.stamp（两者都取自控制周期）。
 @warning mujoco 进程退出会触发整条 launch 关闭（on_exit=Shutdown），RViz 也会一起退。
 """
 
@@ -39,9 +44,16 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, RegisterEventHandler, Shutdown
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+    Shutdown,
+)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit, OnProcessStart
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue, ParameterFile
@@ -129,6 +141,17 @@ def generate_launch_description():
         description="Whether nodes should use simulation time",
     )
 
+    record_bag_arg = DeclareLaunchArgument(
+        "record_bag",
+        default_value="true",
+        description="是否用 rosbag2 录制关节命令与关节状态（实现见 arm_bag_record.launch.py）",
+    )
+    bag_dir_arg = DeclareLaunchArgument(
+        "bag_dir",
+        default_value="",
+        description="rosbag 输出根目录；空 = <项目根>/.ros/ros2bags（目录名再拼 arm_sim_<时间戳>）",
+    )
+
     controller_manager_timeout_arg = DeclareLaunchArgument(
         "controller_manager_timeout",
         default_value="60",
@@ -176,6 +199,17 @@ def generate_launch_description():
         ],
         remappings=robot_description_remap,
         on_exit=Shutdown(),
+    )
+
+    # 关节命令/状态录制：与 controller_manager 同时启动。rosbag2 对指定话题先订阅再等数据，
+    # 话题暂时不存在不会报错，因此控制器激活后的自动复位运动也能录到。
+    bag_record = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(os.path.join(launch_pack_share, "launch", "arm_bag_record.launch.py")),
+        launch_arguments={
+            "record_bag": LaunchConfiguration("record_bag"),
+            "bag_dir": LaunchConfiguration("bag_dir"),
+            "bag_name": "arm_sim",
+        }.items(),
     )
 
     # spawner 依赖 controller_manager 就绪，因此按「上一个 spawner 退出后再起下一个」串成链：
@@ -262,12 +296,15 @@ def generate_launch_description():
             controller_overlay_arg,
             show_rviz_arg,
             use_sim_time_arg,
+            record_bag_arg,
+            bag_dir_arg,
             controller_manager_timeout_arg,
             switch_timeout_arg,
             service_call_timeout_arg,
             double_sim_hint,
             robot_state_pub,
             mujoco,
+            bag_record,
             load_joint_state_broadcaster,
             load_controller_chain,
             rviz2,

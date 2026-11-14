@@ -27,5 +27,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+# rosbag 出图工具：读 .ros/ros2bags 下的 bag，把关节命令/状态画成逐关节 PNG。
+# RENAME 去掉 .py，ros2 run 在 Linux 下要求文件名与命令名一致（同 tasks/waypoint_check）。
+install(PROGRAMS tools/plot_rosbag.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME plot_rosbag
+)
 
 ament_package()

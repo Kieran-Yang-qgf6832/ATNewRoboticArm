@@ -28,11 +28,15 @@
 #include <rclcpp/subscription.hpp>
 #include <rclcpp/time.hpp>
 #include <rclcpp/timer.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <../arm/arm_fsm_factory.hpp>
 #include <../arm/arm_fsm.hpp>
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include <controller_interface/controller_interface_base.hpp>
 
 /**
@@ -183,6 +187,35 @@ private:
     void publish_current_state();
 
     /**
+     * @brief 把本周期最终写入命令接口的关节命令拷进快照（实时线程调用）
+     *
+     * 上位机下发给下位机的关节命令只存在于 ros2_control 的 command interface 里，
+     * 没有任何 ROS 话题可以录；为了让 rosbag 能与 @c /joint_states 一起录到命令侧，
+     * 这里把写进接口的 position/velocity/effort 拷进 @ref joint_command_snapshot_，
+     * 再由非实时定时器发布成 @c ~/joint_command。
+     *
+     * @param time 本控制周期的时间戳，作为快照的时间基准（与 @c /joint_states 同一时钟）。
+     *
+     * @note 只在拿到快照锁时写入，拿不到就丢弃本周期（定时器正在读旧快照），
+     *       因此实时线程既不阻塞也不等待。
+     * @warning 运行于实时控制线程，只做定长拷贝，禁止分配与阻塞。
+     */
+    void cache_joint_command_snapshot(const rclcpp::Time& time);
+
+    /**
+     * @brief 把快照发布成 @c ~/joint_command（@c sensor_msgs::msg::JointState）
+     *
+     * 由 @ref joint_command_timer_ 以 100 Hz（实机 MCU 下行帧同频）调用：
+     * @c position / @c velocity / @c effort 分别是本周期下发的关节位置、速度与力矩前馈，
+     * @c name 与 @c /joint_states 完全一致，便于两路数据按关节名直接对比。
+     *
+     * @note 运行在 wall timer 回调（非实时线程）中，可以加锁与做 ROS 通信。
+     * @note kp/kd/ki 不在 @c JointState 里，命令增益需要看 YAML；
+     *       实机固件本来也不接收阻抗增益。
+     */
+    void publish_joint_command();
+
+    /**
      * @brief 故障兜底：锁定当前实测位置并请求切回 idel
      *
      * 当出现关节越限、或状态机报告可恢复故障（@c RunResult::Recoverable）/
@@ -241,6 +274,32 @@ private:
     rclcpp::TimerBase::SharedPtr state_timer_;
     /// 上一次已发布的状态名，用于只在状态变化时发布
     std::string published_state_name_;
+
+    /**
+     * @brief 关节命令快照：update() 写、wall timer 读
+     *
+     * 三组向量在 @ref ArmController::on_configure() 里按关节数一次性分配，之后只做逐元素
+     * 赋值，保证实时路径零分配。@c stamp_ns 取控制周期的时间戳（ns），使
+     * @c ~/joint_command 与 @c /joint_states 用同一时钟对齐。
+     */
+    struct JointCommandSnapshot {
+        std::vector<double> position;  ///< 各关节位置命令（rad）
+        std::vector<double> velocity;  ///< 各关节速度命令（rad/s）
+        std::vector<double> effort;    ///< 各关节力矩前馈（N·m）
+        int64_t stamp_ns{0};           ///< 快照所属控制周期的时间戳（ns）
+        bool valid{false};             ///< 至少成功写入过一次
+    };
+
+    /// 命令快照本体；写侧实时线程 try_lock，读侧定时器 lock_guard
+    JointCommandSnapshot joint_command_snapshot_;
+    /// 保护 @ref joint_command_snapshot_ 的互斥量（实时线程只 try_lock，永不等待）
+    std::mutex joint_command_mutex_;
+    /// 预分配的发布消息，定时器回调里不再分配内存
+    sensor_msgs::msg::JointState joint_command_msg_;
+    /// 关节命令话题发布器（~/joint_command）
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_command_pub_;
+    /// 关节命令发布用的 wall timer，运行在非实时线程
+    rclcpp::TimerBase::SharedPtr joint_command_timer_;
 };
 
 }  // namespace arm_controller

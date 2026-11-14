@@ -25,6 +25,8 @@ find_package(orocos_kdl REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(robot_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+# ~/joint_command 用 sensor_msgs/JointState 发布下发的关节命令（供 rosbag 与 /joint_states 对齐）
+find_package(sensor_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(arm_model REQUIRED)
 # 关节标定文件解析（joint_calibration.yaml）。与 tasks 包同样的写法：
@@ -97,6 +99,7 @@ ament_target_dependencies(
   hardware_interface
   robot_msgs
   std_msgs
+  sensor_msgs
   ament_index_cpp
   kdl_parser
   orocos_kdl

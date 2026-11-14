@@ -304,6 +304,15 @@ controller_interface::CallbackReturn ArmController::on_init() {
     state_pub_   = node->create_publisher<std_msgs::msg::String>("~/state", rclcpp::QoS(1).transient_local());
     state_timer_ = node->create_wall_timer(std::chrono::milliseconds(500), [this]() { publish_current_state(); });
 
+    // 命令可观测性：~/joint_command 发布上位机每周期下发的关节命令。
+    // 命令只存在于 command interface，不在任何话题上；把最终写入接口的值拷成快照，
+    // 再由 wall timer 以 100 Hz（实机 MCU 下行帧同频，约为 500 Hz 控制周期的 5 倍降采样）
+    // 发布，rosbag 即可与 /joint_states 一起录下来做跟踪误差 / 延迟分析。
+    // 快照缓冲在 on_configure 里按关节数分配。
+    joint_command_pub_ = node->create_publisher<sensor_msgs::msg::JointState>("~/joint_command", rclcpp::QoS(10));
+    joint_command_timer_ =
+        node->create_wall_timer(std::chrono::milliseconds(10), [this]() { publish_joint_command(); });
+
     /**
      * @brief 参数在线更新校验回调
      *
@@ -541,6 +550,75 @@ void ArmController::publish_current_state() {
     }
 }
 
+/**
+ * @brief 把本周期最终写入命令接口的关节命令拷进快照（实时线程）
+ *
+ * 读的是 @c command_interfaces_（而不是状态机的 @c command_ 缓存），
+ * 因此故障兜底 @ref ArmController::apply_safe_hold_and_idel() 写下的保持命令也会被录到，
+ * 「录到的命令 == 真正下发给硬件/仿真的命令」这一条始终成立。
+ *
+ * @param time 本控制周期的时间戳；转成纳秒存进快照，供定时器填进 header.stamp。
+ *
+ * @note 用 @c std::try_to_lock：定时器正在读旧快照时直接跳过本周期，
+ *       实时线程绝不等待（丢一帧快照不影响分析结论）。
+ * @warning 运行于实时控制线程，只做定长拷贝，禁止分配与阻塞。
+ */
+void ArmController::cache_joint_command_snapshot(const rclcpp::Time& time) {
+    const std::size_t joint_count = joints_name.size();
+    if (joint_count == 0 || command_interfaces_.size() < joint_count * 6 ||
+        joint_command_snapshot_.position.size() != joint_count) {
+        return; // on_configure 尚未完成或接口数量不符
+    }
+
+    std::unique_lock<std::mutex> lock(joint_command_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return; // 定时器正在发布，跳过本周期
+    }
+
+    // 命令接口布局与 update() 里的写入顺序一致：position/velocity/effort/kp/kd/ki。
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        joint_command_snapshot_.position[i] = command_interfaces_[i * 6 + 0].get_value();
+        joint_command_snapshot_.velocity[i] = command_interfaces_[i * 6 + 1].get_value();
+        joint_command_snapshot_.effort[i]   = command_interfaces_[i * 6 + 2].get_value();
+    }
+    joint_command_snapshot_.stamp_ns = time.nanoseconds();
+    joint_command_snapshot_.valid    = true;
+}
+
+/**
+ * @brief 把快照发布成 @c ~/joint_command（@c sensor_msgs::msg::JointState）
+ *
+ * 消息字段语义（与 @c /joint_states 同名同义，方便直接对比）：
+ * - @c name    ：关节名，与 @c /joint_states 完全一致；
+ * - @c position：下发的关节位置命令（rad）；
+ * - @c velocity：下发的关节速度命令（rad/s）；
+ * - @c effort  ：下发的力矩前馈（N·m）。
+ *
+ * @note 快照里的 @c stamp_ns 来自控制周期，因此本话题与 @c /joint_states 同一时钟；
+ *       两者按 header.stamp 直接对齐，不需要 bag 的接收时间戳。
+ * @note kp/kd/ki 不在 JointState 里，命令增益以 YAML 为准（实机固件也不接收增益）。
+ */
+void ArmController::publish_joint_command() {
+    std::lock_guard<std::mutex> lock(joint_command_mutex_);
+    const std::size_t joint_count = joint_command_snapshot_.position.size();
+    if (!joint_command_snapshot_.valid || joint_count == 0 || joint_command_msg_.position.size() != joint_count) {
+        return; // 尚未开始控制（未 configure）或缓冲未就绪
+    }
+
+    // 纳秒拆成 sec/nanosec：time.nanoseconds() 是同一时钟下的累计值。
+    joint_command_msg_.header.stamp.sec     = static_cast<int32_t>(joint_command_snapshot_.stamp_ns / 1000000000LL);
+    joint_command_msg_.header.stamp.nanosec = static_cast<uint32_t>(joint_command_snapshot_.stamp_ns % 1000000000LL);
+    std::copy(
+        joint_command_snapshot_.position.begin(), joint_command_snapshot_.position.end(),
+        joint_command_msg_.position.begin());
+    std::copy(
+        joint_command_snapshot_.velocity.begin(), joint_command_snapshot_.velocity.end(),
+        joint_command_msg_.velocity.begin());
+    std::copy(
+        joint_command_snapshot_.effort.begin(), joint_command_snapshot_.effort.end(), joint_command_msg_.effort.begin());
+    joint_command_pub_->publish(joint_command_msg_);
+}
+
 
 
 
@@ -568,6 +646,18 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     fsm_factory->command_.resize(joints_name.size());
     // 关节加速度缓存（docs/bugs.md O8）：从 state interface 读，供 measure 记录。
     fsm_factory->state_acceleration_.assign(joints_name.size(), 0.0);
+
+    // 关节命令快照（~/joint_command）同样在这里定容：update() 只做逐元素赋值，
+    // 定时器发布时直接复用预分配消息，两处都不再申请内存。
+    joint_command_snapshot_.position.assign(joints_name.size(), 0.0);
+    joint_command_snapshot_.velocity.assign(joints_name.size(), 0.0);
+    joint_command_snapshot_.effort.assign(joints_name.size(), 0.0);
+    joint_command_snapshot_.stamp_ns = 0;
+    joint_command_snapshot_.valid    = false;
+    joint_command_msg_.name          = joints_name;
+    joint_command_msg_.position.assign(joints_name.size(), 0.0);
+    joint_command_msg_.velocity.assign(joints_name.size(), 0.0);
+    joint_command_msg_.effort.assign(joints_name.size(), 0.0);
     return controller_interface::ControllerInterface::CallbackReturn::SUCCESS;
 }
 
@@ -772,6 +862,7 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
         // 状态机结构损坏（状态名不存在、指针为空）：属于代码缺陷。
         // 停用链条前也先保持一拍，尽量避免机械臂在停用瞬间失去力矩。
         apply_safe_hold_and_idel("state machine structure fault");
+        cache_joint_command_snapshot(time);
         return controller_interface::return_type::ERROR;
     }
 
@@ -779,6 +870,7 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
         // 可恢复故障：锁定当前位置并切回 idel，但**不停用控制器链**。
         // 返回 ERROR 会让 controller_manager 停用整条链，力矩消失导致坠落。
         apply_safe_hold_and_idel("state machine reported a failure");
+        cache_joint_command_snapshot(time);
         return controller_interface::return_type::OK;
     }
 
@@ -791,6 +883,9 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
         command_interfaces_[i * 6 + 4].set_value(static_cast<double>(fsm_factory->command_[i].kd));
         command_interfaces_[i * 6 + 5].set_value(static_cast<double>(fsm_factory->command_[i].ki));
     }
+
+    // 录下真正写进接口的命令（含故障保持路径），供 rosbag 与 /joint_states 一起录制。
+    cache_joint_command_snapshot(time);
 
     return controller_interface::return_type::OK;
 }

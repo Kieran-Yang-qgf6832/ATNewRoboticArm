@@ -23,3 +23,6 @@ __pycache__/
 /.trae/
 # 运行期日志：不属于项目文档
 /docs/log/
+# rosbag 出图产物（docs/rosbags 由 launch_pack/tools/plot_rosbag.py 生成，不属于文档）
+/docs/rosbags/
+/.codebuddy/

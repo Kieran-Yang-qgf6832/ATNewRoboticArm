@@ -18,6 +18,15 @@
   <exec_depend>mujoco_ros2_control</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <!-- arm_bag_record.launch.py 用 ros2 bag record 录制关节命令/状态；默认存储是 mcap -->
+  <exec_depend>rosbag2</exec_depend>
+  <exec_depend>rosbag2_storage_mcap</exec_depend>
+  <!-- tools/plot_rosbag.py：读 bag 出图（rosbag2_py + rclpy 反序列化，matplotlib 画图） -->
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
   <!-- arm_measure_sim.launch.py 会拉起 tasks/task_runner 跑 measure_only 序列 -->
   <exec_depend>tasks</exec_depend>
   <!-- arm_task_vision_sim.launch.py 会拉起 view/view_sim.launch.py 的相机 TF 与检测节点 -->

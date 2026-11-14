@@ -77,6 +77,10 @@ ros2 launch launch_pack arm_real.launch.py loopback:=true
 ros2 launch launch_pack arm_real.launch.py
 ```
 
+> 仿真与实机启动控制器时都自动录 rosbag（`/joint_states` + `/arm_controller/joint_command`），
+> 默认落在项目根的 `.ros/ros2bags/`；`record_bag:=false` 关闭。话题清单与回放见
+> [02 仿真运行](docs/execute/02-仿真运行.md#关节命令状态录制rosbag)。
+
 ### 参数辨识
 
 ```bash
