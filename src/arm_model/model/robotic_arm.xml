@@ -1,108 +1,124 @@
 <mujoco model="robotic_arm">
-  <!--
+    <!--
     关节限位必须与 robotic_arm.urdf 的 <limit> 完全一致。
     控制器用 URDF 建立模型：IKSolver 会把逆解种子按 URDF 限位截断，并把迭代步长
     限制在限位之内。若 MJCF 允许超出 URDF 限位，仿真中机械臂会停在控制器认为
     非法的位形上，此时任何目标位姿都会变成「数学上不可达」——逆解迭代 200 次后
     失败，控制器回退 idel，任务层看到一次莫名其妙的求解失败。
-    当前一致性（URDF 为准）：
-      joint1 ±1.8          joint2 ±1.570796327   joint3 ±2.9
-      joint4 -2.0 ~ 1.8    joint5 ±0.610865238   joint6 ±3.14159
+    当前一致性（URDF 为准，2026-11-14 换代后）：
+      joint1 ±3.14   joint2 ±1.57   joint3 ±2.8
+      joint4 -1.82 ~ 1.92            joint5 ±0.4   joint6 ±3.14
+    注意：joint2/joint3/joint4 的轴是 0 0 -1，joint5 的轴相对工具 z 倾斜 3.28°
+    （-0.05715 0 -0.99837），都是新一代 CAD 原值，未做正交化。
   -->
-  <compiler angle="radian"/>
-
+  <compiler angle="radian" eulerseq="zyx" autolimits="true"/>
   <asset>
-    <mesh name="base_link" file="base_link.STL"/>
-    <mesh name="link1" file="link1.STL"/>
-    <mesh name="link2" file="link2.STL"/>
-    <mesh name="link3" file="link3.STL"/>
-    <mesh name="link4" file="link4.STL"/>
-    <mesh name="link5" file="link5.STL"/>
-    <mesh name="link6" file="link6.STL"/>
+    <mesh name="base_link" file="base_link.STL" />
+    <mesh name="link1" file="link1.STL" />
+    <mesh name="link2" file="link2.STL" />
+    <mesh name="link3" file="link3.STL" />
+    <mesh name="link4" file="link4.STL" />
+    <mesh name="link5" file="link5.STL" />
+    <mesh name="link6" file="link6.STL" />
   </asset>
-
-  <contact>
-    <exclude body1="base_link" body2="link1"/>
-    <exclude body1="link1" body2="link2"/>
-    <exclude body1="link2" body2="link3"/>
-    <exclude body1="link3" body2="link4"/>
-    <exclude body1="link4" body2="link5"/>
-    <exclude body1="link5" body2="link6"/>
-  </contact>
-
   <worldbody>
     <body name="base_link">
-      <inertial pos="-0.0091691 0.00025382 0.018962" quat="0.0107444 0.707025 0.0108662 0.70694" mass="1.0998" diaginertia="0.00395683 0.00212577 0.0018714"/>
-      <geom type="mesh" rgba="0.29412 0.29412 0.29412 1" mesh="base_link"/>
-      <site name="tool_site" pos="0 0 0" size="0.01"/>
-
-      <body name="link1">
-      <inertial pos="7.43359e-06 0.0238891 0.0983534" quat="0.0318288 0.706527 0.031903 0.70625" mass="2.34957" diaginertia="0.00841203 0.00814379 0.00573875"/>
-      <joint name="joint1" pos="0 0 0" axis="0 0 1" range="-1.8 1.8" actuatorfrcrange="-50 50"/>
-      <geom type="mesh" rgba="0.294118 0.294118 0.294118 1" mesh="link1"/>
-      <body name="link2" pos="0 0.03675 0.153" quat="0.499998 0.5 -0.5 0.500002">
-        <inertial pos="0.313246 -0.000831742 0.0364273" quat="0.00238238 0.708793 0.0023583 0.705408" mass="1.23727" diaginertia="0.0142116 0.0139531 0.000574386"/>
-        <joint name="joint2" pos="0 0 0" axis="0 0 1" range="-1.570796327 1.570796327" actuatorfrcrange="-50 50"/>
-        <geom type="mesh" rgba="0.898039 0.917647 0.929412 1" mesh="link2"/>
-        <body name="link3" pos="0.52 0 0.08565">
-          <inertial pos="0.271921 -0.000176719 -0.0120139" quat="-0.000497952 0.706846 -0.000688822 0.707367" mass="0.370266" diaginertia="0.00278033 0.00267675 0.000130366"/>
-          <joint name="joint3" pos="0 0 0" axis="0 0 1" range="-2.9 2.9" actuatorfrcrange="-50 50"/>
-          <geom type="mesh" rgba="0.898039 0.917647 0.929412 1" mesh="link3"/>
-          <body name="link4" pos="0.436 0 0.0225">
-            <inertial pos="0.101739 0.0561669 -0.0293842" quat="0.654144 -0.0069542 -0.00609798 0.756314" mass="1.54177" diaginertia="0.000903046 0.000888962 0.000269788"/>
-            <joint name="joint4" pos="0 0 0" axis="0 0 1" range="-2.0 1.8" actuatorfrcrange="-50 50"/>
-            <geom type="mesh" rgba="0.294118 0.294118 0.294118 1" mesh="link4"/>
-            <!-- <camera name="overview" pos="0.1 0.09 -0.03" xyaxes="0 0 1 0 1 0"/> -->
-            <body name="link5" pos="0.07761 -0.0058889 -0.03035" quat="0.707105 -0.707108 0 0">
-              <inertial pos="0.0486577 0.00239487 0.000127055" quat="-0.018087 0.706875 0.018087 0.706875" mass="0.0698722" diaginertia="2.26008e-05 1.97895e-05 1.56269e-05"/>
-              <joint name="joint5" pos="0 0 0" axis="0 0 1" range="-0.610865238 0.610865238" actuatorfrcrange="-50 50"/>
-              <geom type="mesh" rgba="0.294118 0.294118 0.294118 1" mesh="link5"/>
-              <body name="link6" pos="0.073796 0.0036822 8.8922e-05" quat="0.000563087 0.707108 -0.000563089 0.707105">
-                <inertial pos="0 0 0.0193009" quat="0.5 0.5 -0.5 0.5" mass="0.128099" diaginertia="9.58412e-05 6.47697e-05 6.47697e-05"/>
-                <joint name="joint6" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" actuatorfrcrange="-50 50"/>
-                <geom type="mesh" rgba="1 1 1 1" mesh="link6"/>
-                <site name="ee_site" pos="0 0 0.02" size="0.01"/>
+      <inertial pos="-0.00360621702328832 5.13965852572684e-05 -0.00437548460570378" mass="0.905716018714615" fullinertia="0.00107148927922179 0.00144104333999584 0.00244792600293045 2.76094582641941e-06 -5.48596189361244e-07 2.22549999381976e-07" />
+      <geom type="mesh" rgba="0.650980392156863 0.619607843137255 0.588235294117647 1" mesh="base_link" />
+      <site name="tool_site" pos="0 0 0" size="0.01" />
+      <body name="link1" pos="6.34132927793407e-05 -0.00167405073291106 0.0278500000000087" euler="0 0 0">
+        <inertial pos="-0.000108374983294121 -0.0224173657123978 0.0295694936286941" mass="1.91180538368796" fullinertia="0.00130826953517784 0.00190867031535885 0.00177080127699075 1.3668660920291e-06 1.38971343647627e-05 1.26824657951645e-06" />
+        <joint name="joint1" pos="0 0 0" axis="0 0 1" range="-3.14 3.14" actuatorfrcrange="-100 100" />
+        <geom type="mesh" rgba="0.650980392156863 0.619607843137255 0.588235294117647 1" mesh="link1" />
+        <body name="link2" pos="0.00565491862295636 0.0185517283813911 0.0710733482199691" euler="0 -1.5708 -1.5707963267949">
+          <inertial pos="0.375032807584103 -0.00767142856848219 -0.0148750517361231" mass="1.09233144358037" fullinertia="0.000562645054167591 0.00825256907491947 0.00858584566040506 4.6355173743639e-07 -5.41332728898313e-05 -1.2040814647427e-06" />
+          <joint name="joint2" pos="0 0 0" axis="0 0 -1" range="-1.57 1.57" actuatorfrcrange="-100 100" />
+          <geom type="mesh" rgba="0.701960784313725 0.670588235294118 0.933333333333333 1" mesh="link2" />
+          <body name="link3" pos="0.500001547205985 -0.00750000000003981 0.0418960557056171" euler="0 0 3.14159265358979">
+            <inertial pos="0.396708620293581 -0.0009580050394698 0.0146574939500043" mass="0.750870225721497" fullinertia="0.000311759468382739 0.00280789973164969 0.00305821466409237 -4.43262109210123e-06 2.95134858752333e-06 -6.86575257856084e-07" />
+            <joint name="joint3" pos="0 0 0" axis="0 0 -1" range="-2.8 2.8" actuatorfrcrange="-100 100" />
+            <geom type="mesh" rgba="0.647058823529412 0.854901960784314 0.533333333333333 1" mesh="link3" />
+            <body name="link4" pos="0.493372719987381 -0.000717203264851807 -0.0115" euler="1.5708 0 3.14159265358979">
+              <inertial pos="0.0388635088998436 0.0683350036809159 -0.0302743627631186" mass="0.328855136025888" fullinertia="0.000130515381077466 8.67316206395657e-05 0.000124148178178434 -1.58524988603632e-07 2.47556859422373e-07 -5.55843117742173e-08" />
+              <joint name="joint4" pos="0 0 0" axis="0 0 -1" range="-1.82 1.92" actuatorfrcrange="-100 100" />
+              <geom type="mesh" rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" mesh="link4" />
+              <body name="link5" pos="0.0420000017681742 0.0760000060786439 -0.0298499999999999" euler="1.5708 0 1.5707963267949">
+                <inertial pos="0.0409963218118283 -0.000737375741447381 -0.0449408930326747" mass="0.107863966418761" fullinertia="2.27221737578051e-05 2.42204415320291e-05 3.18656466025932e-05 2.69721515117386e-08 5.25283476817911e-07 5.16755491617417e-09" />
+                <joint name="joint5" pos="0 0 0" axis="-0.0571545044239792 0 -0.998365345263972" range="-0.4 0.4" actuatorfrcrange="-100 100" />
+                <geom type="mesh" rgba="0.698039215686274 0.698039215686274 0.698039215686274 1" mesh="link5" />
+                <body name="link6" pos="0.109242825291171 -0.00191951430536242 -0.0510772149208419" euler="3.14159265358978 1.51361065936655 0.0171393597075962">
+                  <inertial pos="3.46944695195361e-18 -1.17961196366423e-16 0.0196990985019004" mass="0.150213928644987" fullinertia="7.59512548879523e-05 7.59512548879523e-05 0.00011238690149753 6.71670657393058e-21 -1.05879118406788e-20 -2.26088313745444e-19" />
+                  <joint name="joint6" pos="0 0 0" axis="0 0 1" range="-3.14 3.14" damping="2.0" actuatorfrcrange="-100 100" />
+                  <geom type="mesh" rgba="0.113725490196078 0.113725490196078 0.113725490196078 1" mesh="link6" />
+                  <site name="ee_site" pos="0 0 0.05" size="0.01" />
+                  <!-- 末端挂载立方体：有质量参与动力学，但不参与碰撞
+                  <body name="ee_box" pos="0 0 -0.175">
+                    <inertial pos="0 0 0" mass="0.63" diaginertia="0.000167 0.000167 0.000167"/>
+                    <geom type="box" size="0.175 0.175 0.175" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+                  </body> -->
+                </body>
               </body>
             </body>
           </body>
         </body>
       </body>
     </body>
-    </body>
   </worldbody>
-
+  <!-- 自碰撞全部屏蔽：STL 网格之间存在固有重叠（link3 与 link5 最多穿插 2.6 mm，
+       其余非相邻连杆在折叠姿态下也会互相穿插），会在 joint4 上产生 0.2~0.8 N·m 的
+       虚假约束力矩，导致静止保持时出现固定偏差。规划层（KDL）本来也不做碰撞检测，
+       因此这里按“不考虑自碰撞”处理。 -->
+  <contact>
+    <exclude body1="base_link" body2="link1" />
+    <exclude body1="link1" body2="link2" />
+    <exclude body1="link2" body2="link3" />
+    <exclude body1="link3" body2="link4" />
+    <exclude body1="link4" body2="link5" />
+    <exclude body1="link5" body2="link6" />
+    <exclude body1="base_link" body2="link2" />
+    <exclude body1="base_link" body2="link3" />
+    <exclude body1="base_link" body2="link4" />
+    <exclude body1="base_link" body2="link5" />
+    <exclude body1="base_link" body2="link6" />
+    <exclude body1="link1" body2="link3" />
+    <exclude body1="link1" body2="link4" />
+    <exclude body1="link1" body2="link5" />
+    <exclude body1="link1" body2="link6" />
+    <exclude body1="link2" body2="link4" />
+    <exclude body1="link2" body2="link5" />
+    <exclude body1="link2" body2="link6" />
+    <exclude body1="link3" body2="link5" />
+    <exclude body1="link3" body2="link6" />
+    <exclude body1="link4" body2="link6" />
+  </contact>
   <actuator>
-    <motor name="motor1" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-20 20"/>
-    <motor name="motor2" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-60 60"/>
-    <motor name="motor3" joint="joint3" gear="1" ctrllimited="true" ctrlrange="-60 60"/>
-    <motor name="motor4" joint="joint4" gear="1" ctrllimited="true" ctrlrange="-20 20"/>
-    <motor name="motor5" joint="joint5" gear="1" ctrllimited="true" ctrlrange="-8 8"/>
-    <motor name="motor6" joint="joint6" gear="1" ctrllimited="true" ctrlrange="-8 8"/>
+    <motor name="motor1" joint="joint1" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="motor2" joint="joint2" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="motor3" joint="joint3" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="motor4" joint="joint4" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="motor5" joint="joint5" gear="1" ctrllimited="true" ctrlrange="-100 100" />
+    <motor name="motor6" joint="joint6" gear="1" ctrllimited="true" ctrlrange="-100 100" />
   </actuator>
-
   <sensor>
-    <actuatorpos name="motor1_p" actuator="motor1"/>
-    <actuatorpos name="motor2_p" actuator="motor2"/>
-    <actuatorpos name="motor3_p" actuator="motor3"/>
-    <actuatorpos name="motor4_p" actuator="motor4"/>
-    <actuatorpos name="motor5_p" actuator="motor5"/>
-    <actuatorpos name="motor6_p" actuator="motor6"/>
-
-    <actuatorvel name="motor1_v" actuator="motor1"/>
-    <actuatorvel name="motor2_v" actuator="motor2"/>
-    <actuatorvel name="motor3_v" actuator="motor3"/>
-    <actuatorvel name="motor4_v" actuator="motor4"/>
-    <actuatorvel name="motor5_v" actuator="motor5"/>
-    <actuatorvel name="motor6_v" actuator="motor6"/>
-
-    <actuatorfrc name="motor1_f" actuator="motor1" noise="1e-3"/>
-    <actuatorfrc name="motor2_f" actuator="motor2" noise="1e-3"/>
-    <actuatorfrc name="motor3_f" actuator="motor3" noise="1e-3"/>
-    <actuatorfrc name="motor4_f" actuator="motor4" noise="1e-3"/>
-    <actuatorfrc name="motor5_f" actuator="motor5" noise="1e-3"/>
-    <actuatorfrc name="motor6_f" actuator="motor6" noise="1e-3"/>
-
-    <framepos name="ee_pos" objtype="site" objname="ee_site"/>
-    <framequat name="ee_quat" objtype="site" objname="ee_site"/>
+    <actuatorpos name="motor1_p" actuator="motor1" />
+    <actuatorpos name="motor2_p" actuator="motor2" />
+    <actuatorpos name="motor3_p" actuator="motor3" />
+    <actuatorpos name="motor4_p" actuator="motor4" />
+    <actuatorpos name="motor5_p" actuator="motor5" />
+    <actuatorpos name="motor6_p" actuator="motor6" />
+    <actuatorvel name="motor1_v" actuator="motor1" />
+    <actuatorvel name="motor2_v" actuator="motor2" />
+    <actuatorvel name="motor3_v" actuator="motor3" />
+    <actuatorvel name="motor4_v" actuator="motor4" />
+    <actuatorvel name="motor5_v" actuator="motor5" />
+    <actuatorvel name="motor6_v" actuator="motor6" />
+    <actuatorfrc name="motor1_f" actuator="motor1" noise="1e-3" />
+    <actuatorfrc name="motor2_f" actuator="motor2" noise="1e-3" />
+    <actuatorfrc name="motor3_f" actuator="motor3" noise="1e-3" />
+    <actuatorfrc name="motor4_f" actuator="motor4" noise="1e-3" />
+    <actuatorfrc name="motor5_f" actuator="motor5" noise="1e-3" />
+    <actuatorfrc name="motor6_f" actuator="motor6" noise="1e-3" />
+    <framepos name="ee_pos" objtype="site" objname="ee_site" />
+    <framequat name="ee_quat" objtype="site" objname="ee_site" />
   </sensor>
 </mujoco>

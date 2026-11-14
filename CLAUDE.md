@@ -35,3 +35,9 @@ AI 助手的工作规则。项目概况与快速开始见 [README.md](README.md)
 - 新问题写 `docs/bugs/YYYY-MM-DD/`，新决策写 `docs/adr/YYYY-MM-DD/`，有意义的变更写
   `docs/changelog/YYYY-MM-DD/`，三者都要更新各自索引；
 - 操作步骤变更只改 `docs/execute/`；同一事实不要在两处写完整描述。
+
+## 任务收尾
+
+一次改动准备交付/验收前，对照 [文档职责](docs/README.md) 同步一次：修 bug → `docs/bugs/`；
+技术决策 → `docs/adr/`；对外变化 → `docs/changelog/`；改 FSM / 参数 / launch / URDF →
+`docs/execute/` 对应篇。更新后跑 `python3 docs/tools/check_docs.py`，并在回复里说明改了哪些文档。
