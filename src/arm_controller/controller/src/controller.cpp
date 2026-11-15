@@ -176,15 +176,19 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
     // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
     auto_declare<int>("task_dim", 6);
-    // pos_move 的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
+    // pos_move / box_move 的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
     //   tolerance：position-only / position-and-axis 的位置收敛判据（米），
     //              与 6 维「米+弧度」混合范数分开；
-    //   axis_tolerance_deg：position-and-axis 模式下工具 z 轴的角容差（度）；
-    //              与位置判据分别检查，避免混合范数把两者绑死；
+    //   axis_tolerance_deg：position-and-axis 模式下工具 z 轴的**通过**角容差（度），
+    //              与位置判据分别检查，避免混合范数把两者绑死；任务层最终验收用同一个值；
+    //   axis_converge_tolerance_deg：工具 z 轴的**收敛**角容差（度）。迭代一进入该值就停，
+    //              精度优先；跑完仍未达标时再用 axis_tolerance_deg 裁决是否通过。
+    //              两档并存是为了让「能对齐的目标精确对齐，只有确实对不齐才落到放宽区间」；
     //   nullspace_weight：零空间「就近」偏好权重，0 = 关闭；
     //   precheck_samples：终点之外再等分采样的中间点数，受实时预算限制（见 arm_fsm.cpp）。
     auto_declare<double>("pos_move_tolerance", 1e-3);
-    auto_declare<double>("pos_move_axis_tolerance_deg", 1.0);
+    auto_declare<double>("pos_move_axis_tolerance_deg", 10.0);
+    auto_declare<double>("pos_move_axis_converge_tolerance_deg", 1.0);
     auto_declare<double>("pos_move_nullspace_weight", 0.005);
     auto_declare<int>("pos_move_precheck_samples", 2);
     // 多路点 C3 轨迹（WaypointTrajCmd）的每关节速度/加速度/jerk 上限。构造期读取一次，

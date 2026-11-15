@@ -18,7 +18,10 @@ public:
     /// @param tolerance >0 时替代 IKSolver::Tuning::tolerance（米）；<=0 用默认值
     /// @param axis_tolerance >0 时启用位置/工具轴分离判据（弧度）；<=0 用单一误差范数
     /// @param nullspace_weight 0 = 关闭偏好
-    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight);
+    /// @param axis_accept_tolerance >0 时工具轴的通过容差（弧度，应 >= axis_tolerance）；
+    ///        <=0 表示与收敛容差相同（严格行为）
+    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight,
+                           double axis_accept_tolerance = 0.0);
 
     /// 设置/清除零空间偏好的参考位形（轨迹起点关节角）
     void set_posture_reference(const Eigen::VectorXd& reference);
@@ -46,6 +49,9 @@ public:
 
     /// @return 上一次 inverse_kinamic() 的误差姿态分量范数（弧度），用于诊断
     double last_ik_axis_error_norm() const;
+
+    /// @return 上一次 inverse_kinamic() 是否只在放宽的通过容差下才判为成功
+    bool last_ik_used_relaxed_axis() const;
 
     /// @return 上一次 inverse_kinamic() 实际使用的迭代次数，用于诊断
     int last_ik_iterations() const;

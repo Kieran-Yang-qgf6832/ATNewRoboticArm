@@ -1863,9 +1863,21 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool*
                 step.type + " tool-axis error " + format_number(error_deg, 2) + " deg exceeds "
                 + format_number(default_axis_tolerance_deg_, 2) + " deg");
         }
-        RCLCPP_INFO(
-            node_->get_logger(), "%s finished, tool-axis error %.2f deg (tolerance %.2f deg; roll about z is free)",
-            step.type.c_str(), error_deg, default_axis_tolerance_deg_);
+        if (step.type == "box_move") {
+            // 尖端偏移只读：位置判据看 link6 原点，而工具尖端随轴角倾斜偏移
+            // 2·tool_offset·sin(θ/2)。默认容差下 10° / 0.039 m 约 6.8 mm，已大于 5 mm
+            // 的位置容差，所以必须打出来，避免「位置达标就等于贴面」的误读。
+            const double tip_offset_mm = 2.0 * step.tool_offset * std::sin(0.5 * error_deg * kDegToRad) * 1000.0;
+            RCLCPP_INFO(
+                node_->get_logger(),
+                "%s finished, tool-axis error %.2f deg (tolerance %.2f deg; roll about z is free), "
+                "tool-tip offset %.2f mm (read-only, not a criterion)",
+                step.type.c_str(), error_deg, default_axis_tolerance_deg_, tip_offset_mm);
+        } else {
+            RCLCPP_INFO(
+                node_->get_logger(), "%s finished, tool-axis error %.2f deg (tolerance %.2f deg; roll about z is free)",
+                step.type.c_str(), error_deg, default_axis_tolerance_deg_);
+        }
         return true;
     }
 

@@ -56,6 +56,9 @@ points:
   #   末端约 [0.676, -0.103, 0.295]，到最终 [0.617, -0.109, 0.176] 约 12 cm。
   # 直接从 ready 走一条 1.2 m 的长直线会撞关节限位/不可达区；先粗定位再回退。
   box_low_pregrasp: [0.0, 0.872665, -2.268928, -0.698132, 0.0, 0.0]
+  # joint5 压到 URDF 上限（±0.4 rad）的探针位形，与 axis_limit_pos 配合，
+  # 用来验证「收敛 1° / 通过 10°」的放宽分支（见 pos_axis_relaxed）。
+  axis_limit_ready: [0.0, 0.3, -0.3, 0.0, 0.4, 0.0]
 
 # 基座系绝对目标点（pos_move 专用，单位：米）。只存 [x, y, z]，与上面 points 的
 # 6 维关节角不是一回事。下面两个值由 fk_dump 在 ready 位形实测：
@@ -65,16 +68,23 @@ positions:
   ready_pos:       [-0.147874, -0.015725, 1.232796]
   above_ready_5cm: [-0.147874, -0.015725, 1.282796]
   below_ready_5cm: [-0.147874, -0.015725, 1.182796]
+  # 5D 放宽分支的验收目标：axis_limit_ready（joint5=0.4 rad）实测 link6 位置。
+  # 配合一条比限位允许方向多 4° 的工具轴目标使用：IK 只能对齐到约 3.5°，
+  # 位置残余约 0.7 mm，正好落在「收敛 1° / 通过 10°」之间。
+  axis_limit_pos: [-0.519350, -0.004953, 1.131781]
 
-# pos_move 的默认参数。
+# pos_move / box_move 的默认参数。
 # max_drift_deg：纯位置模式（没写 orientation）的全姿态漂移告警阈值（度）。
 #   只告警、不判失败：姿态本来就不约束，量测是为了让漂移可观测、可回归。
-# axis_tolerance_deg：写了 orientation 时工具 z 轴角误差的**硬判据**（度）。
-#   必须与控制器 ros2_controller.yaml 的 pos_move_axis_tolerance_deg 保持一致：
-#   控制器用它做 IK 收敛，任务层用它做最终验收。
+# axis_tolerance_deg：写了 orientation 时工具 z 轴角误差的**通过判据**（度）。
+#   必须与控制器 ros2_controller.yaml 的 pos_move_axis_tolerance_deg 保持一致。
+#   控制器是两档的：pos_move_axis_converge_tolerance_deg（默认 1°）控制迭代在哪停，
+#   本值（10°）只决定「跑完仍未对齐时算不算通过」；能对齐的目标仍会精确对齐。
+#   注意工具尖端会随倾斜偏移 2·tool_offset·sin(θ/2)（10° 约 6.8 mm），
+#   位置判据看的是 link6 原点，尖端偏移只在 box_move 的日志里打印、不参与判据。
 position_move:
   max_drift_deg: 10.0
-  axis_tolerance_deg: 1.0
+  axis_tolerance_deg: 10.0
 
 # box_move 的全局默认。
 # frame：视觉目标帧名，必须与 /target_face 消息的 child_frame_id 一致；
@@ -256,6 +266,22 @@ sequences:
       - {type: joint_move, to: ready, duration: 3.0}
       - {type: pos_move, to: below_ready_5cm, orientation: [0.0, 0.148650700, 0.988889766, 0.000000546], duration: 2.0}
       - {type: pos_move, to: ready_pos, orientation: [-0.018302957, 0.0, 0.0, 0.999832487], duration: 2.0}
+      - {type: idel}
+
+  # 5D 阈值的观测用例（**不覆盖放宽分支**）：joint5 压到上限后，目标工具轴比该
+  # 位形能给出的方向再多 4°。仿真实测最终 tool-axis error 0.11°、位置残余 2.3 mm——
+  # 6 自由度下这个位形其实可达（离线只有「joint5 恰好 = 0.400」这一个初值会停在
+  # 3.5° 的局部极小）。因此它只用来观测两件事：
+  #   1) 控制器启动日志里的两档阈值确实生效：
+  #      cart constraint: ... axis_tolerance=10 deg (converge 1 deg)
+  #   2) 5D 目标能正常下发、预检不报错、任务层验收通过。
+  # 放宽分支本身的确定性证明用 ik_solve 的 A/B（同一目标、同一初值：
+  # --accept-axis 1 → Unreachable，默认 10 → Converged），见 docs/execute/07。
+  pos_axis_limit_probe:
+    steps:
+      - {type: reset}
+      - {type: joint_move, to: axis_limit_ready, duration: 3.0}
+      - {type: pos_move, to: axis_limit_pos, orientation: [-0.232252943, 0.934979570, 0.064630341, 0.260182048], duration: 2.0}
       - {type: idel}
 
   # box_move 演示：需要视觉场景（仿真相机 + 红色箱子）。

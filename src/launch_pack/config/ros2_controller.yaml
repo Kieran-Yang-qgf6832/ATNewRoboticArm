@@ -71,10 +71,13 @@ arm_controller:
     # 控制器在**构造阶段**读这些参数，改这里必须重启控制器（docs/bugs.md C6）；
     # 实际生效值会打在控制器日志的 "cart constraint:" 那一行，不要只看本文件写了什么。
     #   tolerance：位置收敛判据（米）。
-    #   axis_tolerance_deg：MODE_POSITION_AND_TOOL_AXIS 下工具 z 轴的角容差（度）。
+    #   axis_tolerance_deg：MODE_POSITION_AND_TOOL_AXIS 下工具 z 轴的**通过**角容差（度）。
     #     与位置判据**分别**检查（不是混合范数）；任务层 tasks.yaml 的
     #     position_move.axis_tolerance_deg 应保持一致，否则会出现一侧判失败、
     #     另一侧仍认为可达的情况。
+    #   axis_converge_tolerance_deg：工具 z 轴的**收敛**角容差（度）。迭代一进入该值就停，
+    #     能对齐的目标因此仍然精确对齐；只有跑完仍未达标时才用上面的通过容差裁决。
+    #     两档的关系必须是 converge <= tolerance，写反会被 clamp 并打 WARN。
     #   nullspace_weight：零空间「就近」偏好权重，抑制姿态/joint6 漂移；0 = 关闭。
     #     实测整定：0.005 可用（漂移 14.77° -> 14.42°）；0.05 会让轨迹后段 IK 在
     #     t≈1.58 s 停滞（残余 1.16e-3 > 1e-3 判据）。抑制效果有限，不能靠它保证
@@ -82,7 +85,8 @@ arm_controller:
     #   precheck_samples：终点之外再等分采样的中间点数。单次 IK 最坏约 386 us、
     #     控制周期 2 ms，内部会 clamp 到 3（含终点最多 4 次）。
     pos_move_tolerance: 0.001
-    pos_move_axis_tolerance_deg: 1.0
+    pos_move_axis_tolerance_deg: 10.0
+    pos_move_axis_converge_tolerance_deg: 1.0
     pos_move_nullspace_weight: 0.005
     pos_move_precheck_samples: 2
     measure_trajectory_period: 10.0

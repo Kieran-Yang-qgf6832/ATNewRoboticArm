@@ -331,7 +331,10 @@ private:
     PoseMode pose_mode_{PoseMode::kFullPose};
     /// 位置约束类轨迹的容差：纯位置容差（米）、工具 z 轴角容差（弧度）、零空间偏好权重
     double position_tolerance_{1e-3};
-    double axis_tolerance_{1.7453292519943296e-2}; ///< 1°（弧度）；仅 position-and-axis 模式使用
+    /// 工具 z 轴的**通过**容差（弧度）；仅 position-and-axis 模式使用，与任务层验收同值
+    double axis_tolerance_{1.7453292519943296e-1}; ///< 10°
+    /// 工具 z 轴的**收敛**容差（弧度）：迭代一进入就停，保证能对齐的目标精确对齐
+    double axis_converge_tolerance_{1.7453292519943296e-2}; ///< 1°
     double nullspace_weight_{0.0};
     Eigen::VectorXd posture_reference_;            ///< 位置约束轨迹起点的关节角（构造期分配）
     /// 位置约束类轨迹的预检中间采样点数（构造期按实时预算 clamp）

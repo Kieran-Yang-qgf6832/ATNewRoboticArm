@@ -2,11 +2,14 @@
  * @file ik_solve.cpp
  * @brief 用给定的目标与初值跑一次逆解，用于离线复现仿真中的失败用例
  *
- * 用法：ik_solve [--axis|--position] <urdf> <t0..t5> <s0..s5>
+ * 用法：ik_solve [--axis|--position] [--accept-axis <deg>] <urdf> <t0..t5> <s0..s5>
  *   t* = 任务空间目标（位置 + 旋转向量）
  *   s* = 关节角初值
  *   --axis     = 5 维模式（位置 + 工具 z 轴方向，滚转自由），用于验证 pos_move orientation
  *   --position = 3 维模式（只约束位置），用于区分「位置不可达」与「姿态不可达」
+ *   --accept-axis = 5 维模式的**通过**容差（度，默认 10，与控制器 yaml 一致）。
+ *                传 1 即回到「只有收敛判据」的严格行为，可与默认值做 A/B：
+ *                同一目标、同一初值下，严格模式报 Unreachable、放宽模式报 Converged。
  *
  * @note 只用于离线排查，不参与控制器运行。
  */
@@ -25,19 +28,28 @@
 #include <Eigen/Dense>
 
 int main(int argc, char** argv) {
-    // 可选模式 flag：放在最前面，保持旧用法（不带 flag）完全不变。
-    int argument_offset = 1;
-    bool axis_mode      = false;
-    bool position_only  = false;
-    if (argc > 1 && std::string(argv[1]) == "--axis") {
-        axis_mode       = true;
-        argument_offset = 2;
-    } else if (argc > 1 && std::string(argv[1]) == "--position") {
-        position_only   = true;
-        argument_offset = 2;
+    // 可选 flag：放在最前面，保持旧用法（不带 flag）完全不变。
+    int argument_offset     = 1;
+    bool axis_mode          = false;
+    bool position_only      = false;
+    double accept_axis_deg  = 10.0; // 与控制器 pos_move_axis_tolerance_deg 默认值一致
+    while (argument_offset < argc) {
+        const std::string flag = argv[argument_offset];
+        if (flag == "--axis") {
+            axis_mode = true;
+            ++argument_offset;
+        } else if (flag == "--position") {
+            position_only = true;
+            ++argument_offset;
+        } else if (flag == "--accept-axis" && argument_offset + 1 < argc) {
+            accept_axis_deg = std::atof(argv[argument_offset + 1]);
+            argument_offset += 2;
+        } else {
+            break;
+        }
     }
     if (argc < 13 + argument_offset) {
-        fprintf(stderr, "usage: ik_solve [--axis|--position] <urdf> <t0..t5> <s0..s5>\n");
+        fprintf(stderr, "usage: ik_solve [--axis|--position] [--accept-axis <deg>] <urdf> <t0..t5> <s0..s5>\n");
         return 1;
     }
 
@@ -46,8 +58,10 @@ int main(int argc, char** argv) {
     IKSolver solver(model, mapping);
     constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
     if (axis_mode) {
+        // 与控制器 yaml 的默认值一致：收敛 1°、通过 10°。只按收敛判据会报 Unreachable，
+        // 看不出「差 6° 但已经能用」，排查放宽区间时容易误判；--accept-axis 1 可回到严格行为。
         mapping->set_pose_mode(PoseMode::kPositionAndToolAxis);
-        solver.set_solve_options(1e-3, 1.0 * kDegToRad, 0.005);
+        solver.set_solve_options(1e-3, 1.0 * kDegToRad, 0.005, accept_axis_deg * kDegToRad);
     } else if (position_only) {
         mapping->set_pose_mode(PoseMode::kPositionOnly);
         solver.set_solve_options(1e-3, 0.0, 0.005);
@@ -86,6 +100,13 @@ int main(int argc, char** argv) {
     printf("converged  = %s\n", converged ? "yes" : "NO");
     printf("result     = %s\n", result_name);
     printf("ik_err     = %.6e\n", solver.last_error_norm());
+    if (axis_mode) {
+        // 分离判据：位置与工具轴各自报，便于区分「位置不可达」与「工具轴对不齐」。
+        printf(
+            "pos/axis   = %.6e m / %.4f deg (converge <= 1.0 deg, accept <= %.3g deg, relaxed_accept = %s)\n",
+            solver.last_position_error_norm(), solver.last_axis_error_norm() / kDegToRad, accept_axis_deg,
+            solver.last_used_relaxed_axis() ? "yes" : "no");
+    }
     printf("iterations = %d\n", solver.last_iterations());
     printf("solve_time = %.1f us/次（%d 次平均）\n", microseconds_per_solve, kRepeatCount);
     printf("solution   = [");

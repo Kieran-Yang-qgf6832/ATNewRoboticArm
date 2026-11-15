@@ -70,7 +70,7 @@ public:
      * （docs/bugs.md O2）。
      */
     enum class SolveResult {
-        Converged, ///< 残余已在 @ref Tuning::tolerance 以内
+        Converged, ///< 残余已在 @ref Tuning::tolerance 以内；5 维模式下也可以是「收敛判据没达到、但通过判据达到」的放宽解
         Unreachable, ///< 迭代结束（停滞或次数用尽）时残余仍超判据：目标没有达到，通常意味着落在可达集之外
         Failed, ///< 数值失败（输入非法、雅可比不可用、步长非有限），可达性未知
     };
@@ -93,12 +93,17 @@ public:
      * @brief 设置求解选项（只做标量赋值，可在实时路径每周期调用）
      * @param tolerance position-only / position-and-axis 模式使用的位置容差（米）；
      *                  <= 0 表示沿用 Tuning::tolerance
-     * @param axis_tolerance position-and-axis 模式的工具 z 轴角容差（弧度）；
+     * @param axis_tolerance position-and-axis 模式的工具 z 轴角**收敛**容差（弧度）：
+     *                  迭代一进入该值就返回 Converged，精度优先；
      *                  <= 0 表示不启用分离判据，仍用单一误差范数
      * @param nullspace_weight 零空间「就近」偏好权重；0 = 关闭
-     * @note 三个值都是 IKSolver 实例状态，调用方须在每次 solve() 之前按当前轨迹模式设好。
+     * @param axis_accept_tolerance 工具 z 轴的**通过**容差（弧度，应 >= axis_tolerance）：
+     *                  迭代跑完仍未进入收敛容差时，用它做最后一次判定；<= 0 表示
+     *                  与 axis_tolerance 相同（严格行为）
+     * @note 四个值都是 IKSolver 实例状态，调用方须在每次 solve() 之前按当前轨迹模式设好。
      */
-    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight);
+    void set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight,
+                           double axis_accept_tolerance = 0.0);
 
     /**
      * @brief 设置零空间偏好的参考位形（轨迹起点关节角）
@@ -151,6 +156,12 @@ public:
         return last_iterations_;
     }
 
+    /// @return 上一次 solve() 是否只在放宽的通过容差下才判为成功
+    ///         （true = 没达到收敛判据，靠 axis_accept_tolerance 兜底）
+    bool last_used_relaxed_axis() const {
+        return last_relaxed_accept_;
+    }
+
     /// @return 上一次 solve() 的结果，用于区分「不可达」与「数值失败」
     SolveResult last_result() const {
         return last_result_;
@@ -191,8 +202,11 @@ private:
     double last_axis_error_norm_{0.0};      ///< 姿态分量范数（弧度）
     int last_iterations_{0};
     SolveResult last_result_{SolveResult::Failed};
+    bool last_relaxed_accept_{false}; ///< 上次成功是否靠放宽的通过容差（否则只满足收敛判据）
+
     double tolerance_override_{0.0};        ///< >0 时替代 Tuning::tolerance（position-only 用纯位置米数）
-    double axis_tolerance_override_{0.0};   ///< >0 时启用位置/工具轴分离判据
+    double axis_tolerance_override_{0.0};   ///< >0 时启用位置/工具轴分离判据（收敛判据）
+    double axis_accept_tolerance_{0.0};     ///< >0 时工具轴的通过容差（>= 收敛容差）；迭代结束后的放宽判定
     double nullspace_weight_{0.0};          ///< 0 = 关闭零空间就近偏好
     Eigen::VectorXd posture_reference_;     ///< 轨迹起点关节角（构造期分配）
     bool has_posture_reference_{false};

@@ -156,6 +156,10 @@ private:
      *   MODE_POSITION_AND_TOOL_AXIS；结束后 z 轴角误差超过全局 axis_tolerance_deg
      *   判失败（绕 z 的滚转不约束，也不再告警全姿态漂移）。
      *
+     * @note box_move 调用时额外把「轴角误差换算成工具尖端偏移」打进日志
+     *       （2·tool_offset·sin(θ/2)）：位置判据看的是 link6 原点，尖端偏离只会体现
+     *       在这条日志里，不作为判据。
+     *
      * @param precheck_rejected 输出：若控制器在**未运动**的情况下因预检拒绝而离开
      *        cart_traj，置 true；box_move 用它决定是否回退到 position-only。
      * @param strict_position 为 true 时，位置残差超过 @c step.tolerance 直接判失败；
@@ -216,8 +220,9 @@ private:
     std::map<std::string, std::vector<Step>> sequences_;   ///< 序列名 → 步骤列表
     std::function<void(const std::string&)> status_sink_;  ///< 任务状态出口（可为空）
     double default_max_drift_deg_{10.0};                   ///< pos_move 默认姿态漂移告警阈值（度）
-    /// pos_move 工具 z 轴角容差（度）；必须与控制器 pos_move_axis_tolerance_deg 一致
-    double default_axis_tolerance_deg_{1.0};
+    /// pos_move / box_move 工具 z 轴角**通过**容差（度）；必须与控制器
+    /// pos_move_axis_tolerance_deg 一致。控制器的收敛容差（默认 1°）更严，这里只看最终验收。
+    double default_axis_tolerance_deg_{10.0};
     /// box_move 的全局默认：视觉目标帧、工具尖端长度、等待与新鲜度阈值
     std::string box_frame_{"target_face"};
     double box_tool_offset_{0.039};

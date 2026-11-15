@@ -17,10 +17,11 @@ IKSolver::Tuning& IKSolver::tuning() {
     return instance;
 }
 
-void IKSolver::set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight) {
+void IKSolver::set_solve_options(double tolerance, double axis_tolerance, double nullspace_weight, double axis_accept_tolerance) {
     tolerance_override_      = tolerance;
     axis_tolerance_override_ = axis_tolerance;
     nullspace_weight_        = nullspace_weight;
+    axis_accept_tolerance_   = axis_accept_tolerance;
 }
 
 void IKSolver::record_error(const Eigen::VectorXd& error) {
@@ -133,9 +134,24 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
         return error.norm() < tolerance;
     };
 
+    // 通过判据：迭代跑完仍未进入收敛判据时，工具轴允许放宽到 axis_accept_tolerance_ 再判一次。
+    // 它只决定「最终算不算成功」，不改变迭代停止点——可达精确对齐的目标仍会走到收敛判据，
+    // 只有确实对不齐（例如 5 维下目标贴着可达集边界）才落在放宽区间里。位置判据不放宽：
+    // 米数直接对应落点误差，放宽会让 box_move 的贴面精度无声退化。
+    const auto accepted = [this, tolerance, &converged](const Eigen::VectorXd& error) {
+        if (converged(error)) {
+            return true;
+        }
+        if (error.size() != 6 || axis_tolerance_override_ <= 0.0 || axis_accept_tolerance_ <= axis_tolerance_override_) {
+            return false;
+        }
+        return error.head<3>().norm() <= tolerance && error.tail<3>().norm() <= axis_accept_tolerance_;
+    };
+
     // 默认按「数值失败」处理：只有确实停滞在局部极小时才升级为「不可达」，
     // 避免在输入非法等情况下给出关于可达性的错误结论。
-    last_result_ = SolveResult::Failed;
+    last_result_        = SolveResult::Failed;
+    last_relaxed_accept_ = false;
 
     const int joint_count = robot_->dof();
     if (target.size() != 6 || joint_pos.size() != joint_count) {
@@ -266,18 +282,26 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
             // max_iterations，拖慢控制周期、让机械臂跟不上轨迹。
             if (++consecutive_rejections >= kMaxConsecutiveRejections) {
                 record_error(workspace_.error);
-                // 连续多次找不到下降方向 = 已经停在局部极小。误差降不到判据以内，
-                // 说明目标不在可达集内（可达集边界到目标的距离就是 current_norm）。
-                last_result_ = converged(workspace_.error) ? SolveResult::Converged : SolveResult::Unreachable;
+                // 连续多次找不到下降方向 = 已经停在局部极小。误差降不到收敛判据以内时，
+                // 再用通过判据裁决一次：落在放宽区间内的解仍算成功（见 accepted）。
+                // 仍不通过说明目标不在可达集内（可达集边界到目标的距离就是 current_norm）。
+                if (accepted(workspace_.error)) {
+                    joint_pos            = workspace_.solution;
+                    last_result_         = SolveResult::Converged;
+                    last_relaxed_accept_ = !converged(workspace_.error);
+                } else {
+                    last_result_ = SolveResult::Unreachable;
+                }
                 return last_result_;
             }
         }
     }
 
     record_error(workspace_.error);
-    if (converged(workspace_.error)) {
-        joint_pos    = workspace_.solution;
-        last_result_ = SolveResult::Converged;
+    if (accepted(workspace_.error)) {
+        joint_pos            = workspace_.solution;
+        last_result_         = SolveResult::Converged;
+        last_relaxed_accept_ = !converged(workspace_.error);
         return SolveResult::Converged;
     }
     // 迭代次数用尽仍未达标。实测目标远远超出工作空间时（如 +X 平移 2 m，残余 1.2 m）
