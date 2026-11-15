@@ -12,11 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > `auto_declare`、**不要把辨识输出当下一轮先验** 等）。F 系列与 O1–O14 已闭环；
 > O15（4 轴辨识精度）配置侧已修，数据质量仍待办。
 
-> **模型切换说明（2026-10-17）**：`src/arm_model/model/` 现在是 **4 自由度**机械臂
+> **模型切换说明（2026-10-17）**：`src/arm_model/model_4dof/` 是 **4 自由度**机械臂
 > （几何/惯量/限位/网格来自它自己的 SolidWorks 导出）。接口层沿用 6 自由度版本的写法：
 > URDF 带 `<ros2_control>`（effort 命令 + position/velocity/effort/acceleration 状态）
 > 与 xacro `headless` 参数，MJCF 用 `<motor>` 力矩执行器，scene 显式 `timestep=0.002`
-> 且地面参与碰撞。6 自由度模型保存在 Git 历史（commit `5e59ef5`），可从那里取回。
+> 且地面参与碰撞。6 自由度模型原样保留在 `src/arm_model/model/`（不参与 4 轴构建，供跨分支同步对照）。
 > **任务空间已按 4 轴降维（2026-10-18，docs/bugs.md O13）**：控制器新增参数
 > `task_space_dof`（默认 4），任务空间 = **(x, y, z, joint4 自转)**。4 轴臂的 6 维几何
 > 雅可比秩恒为 4，用 6 维任务空间时笛卡尔目标必然不可达（实测 6 维最小二乘"尽力而为"

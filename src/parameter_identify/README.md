@@ -229,7 +229,7 @@ time,pos_0..pos_5,vel_0..vel_5,acc_0..acc_5,torque_0..torque_5
 ```bash
 python3 src/parameter_identify/tools/verify_torque.py \
     --urdf <辨识输出.urdf> \
-    --reference src/arm_model/model/robotic_arm.urdf \
+    --reference src/arm_model/model_4dof/robotic_arm.urdf \
     --csv <训练数据.csv> --csv <另一条没训练过的.csv>
 ```
 
@@ -267,7 +267,7 @@ python3 src/parameter_identify/tools/verify_torque.py \
 cd <项目根目录>
 ros2 run parameter_identify identify_arm \
   --csv measured_for_identification.csv \
-  --urdf src/arm_model/model/robotic_arm.urdf \
+  --urdf src/arm_model/model_4dof/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
   --report /tmp/robotic_arm_identify_report.yaml
@@ -284,7 +284,7 @@ ros2 run parameter_identify identify_arm \
 cd <项目根目录>
 PYTHONPATH=src/parameter_identify:$PYTHONPATH python3 -m parameter_identify.identify_arm \
   --csv measured_for_identification.csv \
-  --urdf src/arm_model/model/robotic_arm.urdf \
+  --urdf src/arm_model/model_4dof/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
   --report /tmp/robotic_arm_identify_report.yaml

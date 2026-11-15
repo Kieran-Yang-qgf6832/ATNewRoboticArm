@@ -15,7 +15,7 @@
 # 常用字段：duration（秒）、tolerance（到位容差）。
 # reset / teach / measure 只能从 idel 进出，执行器会自动先等待控制器空闲。
 #
-# 当前生效模型是 4 自由度机械臂（src/arm_model/model），控制器的任务空间是
+# 当前生效模型是 4 自由度机械臂（src/arm_model/model_4dof），控制器的任务空间是
 # **4 维**（参数 task_space_dof=4）：(x, y, z) + joint4 自转角。
 #   · 任务层仍然发 6 维位姿（位置 + 旋转向量），由控制器投影：取前 3 维位置，
 #     第 4 维自转锁存为载入时的 joint4 实测角，命令姿态的其余分量被丢弃。

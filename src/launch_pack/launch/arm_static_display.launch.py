@@ -27,7 +27,7 @@ def generate_launch_description():
     arm_share = get_package_share_directory("arm")
     launch_pack_share = get_package_share_directory("launch_pack")
 
-    urdf_path = os.path.join(arm_share, "model", "robotic_arm.urdf")
+    urdf_path = os.path.join(arm_share, "model_4dof", "robotic_arm.urdf")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
 
     with open(urdf_path, "r", encoding="utf-8") as inf:

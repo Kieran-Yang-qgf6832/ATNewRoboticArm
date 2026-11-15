@@ -205,7 +205,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     node->get_parameter<std::string>("urdf_path", urdf_path);
     if (urdf_path.empty()) {
         try {
-            urdf_path = ament_index_cpp::get_package_share_directory("arm_model") + "/model/robotic_arm.urdf";
+            urdf_path = ament_index_cpp::get_package_share_directory("arm_model") + "/model_4dof/robotic_arm.urdf";
             node->set_parameter(rclcpp::Parameter("urdf_path", urdf_path));
         } catch (const std::exception& error) {
             // 无法定位默认模型时初始化失败，避免后续以空路径构造机器人模型。

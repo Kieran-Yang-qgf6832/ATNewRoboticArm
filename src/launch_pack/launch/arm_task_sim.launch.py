@@ -72,7 +72,7 @@ def generate_launch_description():
     launch_pack_share = get_package_share_directory("launch_pack")
     tasks_share = get_package_share_directory("tasks")
 
-    plant_urdf_path = os.path.join(arm_model_share, "model", "robotic_arm.urdf")
+    plant_urdf_path = os.path.join(arm_model_share, "model_4dof", "robotic_arm.urdf")
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
     # MuJoCo 插件配置（外部力注入，docs/bugs.md O14）：导纳/示教的演示要能施力。
     mujoco_plugins_yaml = os.path.join(launch_pack_share, "config", "mujoco_plugins.yaml")

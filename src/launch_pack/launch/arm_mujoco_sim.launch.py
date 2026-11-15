@@ -44,7 +44,7 @@ def generate_launch_description():
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            os.path.join(arm_model_share, "model", "robotic_arm.urdf"),
+            os.path.join(arm_model_share, "model_4dof", "robotic_arm.urdf"),
         ]
     )
     robot_description = {

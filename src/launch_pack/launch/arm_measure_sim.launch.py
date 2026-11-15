@@ -140,7 +140,7 @@ def _launch_setup(context):
     arm_model_share = get_package_share_directory("arm_model")
     launch_pack_share = get_package_share_directory("launch_pack")
 
-    plant_urdf_path = os.path.join(arm_model_share, "model", "robotic_arm.urdf")
+    plant_urdf_path = os.path.join(arm_model_share, "model_4dof", "robotic_arm.urdf")
     controller_yaml = os.path.join(launch_pack_share, "config", "ros2_controller.yaml")
     rviz_path = os.path.join(launch_pack_share, "rviz", "display_config.rviz")
     measure_yaml = os.path.join(get_package_share_directory("tasks"), "config", "measure.yaml")
@@ -304,7 +304,7 @@ def _launch_setup(context):
 def generate_launch_description():
     default_csv_path = os.path.join(_workspace_root(), "measured_for_identification.csv")
     default_controller_urdf = os.path.join(
-        get_package_share_directory("arm_model"), "model", "robotic_arm.urdf"
+        get_package_share_directory("arm_model"), "model_4dof", "robotic_arm.urdf"
     )
 
     return LaunchDescription(
