@@ -306,7 +306,7 @@ private:
     Eigen::VectorXd task_force_;            ///< 任务空间力
     std::vector<float> default_kp_;         ///< 默认位置增益
     std::vector<float> default_kd_;         ///< 默认速度增益
-    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
+    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入锁实测、轨迹结束锁最后一帧命令，O19）
     std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
     std::size_t joint_count_{0};            ///< 关节数量
@@ -449,7 +449,7 @@ private:
     Eigen::VectorXd torque;                 ///< 关节力矩
     std::vector<float> default_kp_;         ///< 默认位置增益
     std::vector<float> default_kd_;         ///< 默认速度增益
-    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入或轨迹结束时锁存一次）
+    std::vector<float> hold_position_;      ///< 锁存的保持位置（进入锁实测、轨迹结束锁最后一帧命令，O19）
     std::vector<double> default_kp_param_;  ///< 位置增益参数原始值
     std::vector<double> default_kd_param_;  ///< 速度增益参数原始值
     std::size_t joint_count_{0};            ///< 关节数量
@@ -463,8 +463,9 @@ private:
     /**
      * @brief 多路点轨迹指令回调（非实时线程）
      *
-     * 仅在 @c state == TrajPhase::STOP 时受理：第一个节点取当前实测关节角，
-     * 其余为用户路点，交给 @ref WaypointTrajectory 规划一次。规划成功才切到 MOVING；
+     * 仅在 @c state == TrajPhase::STOP 时受理：第一个节点取**上一帧关节命令**
+     * （不是实测，见 O19 的参考连续性），其余为用户路点，交给 @ref WaypointTrajectory
+     * 规划一次。规划成功才切到 MOVING；
      * 失败只置 @c waypoint_plan_failed_，由 run() 统一走失效安全路径。
      */
     void on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd& msg);

@@ -140,7 +140,7 @@ public:
      * 每个控制周期读取硬件反馈、推进状态机，并下发关节命令。
      *
      * @param time   当前 ROS 时间戳，用于状态机内的时间相关逻辑。
-     * @param period 距上一次更新的周期时长，本实现未使用。
+     * @param period 距上一次更新的周期时长，用于力矩前馈的斜率限制（O19）。
      * @return 控制器执行结果
      * @retval OK    本周期正常，命令已下发
      * @retval ERROR 状态机运行失败，已下发安全保持命令
@@ -216,6 +216,23 @@ private:
     void publish_joint_command();
 
     /**
+     * @brief 对单个关节的力矩前馈做斜率限制（实时线程调用）
+     *
+     * 保持路径与轨迹路径的力矩来源完全不同（保持是重力前馈，轨迹是完整 RNEA），
+     * 两者交接时实机看到的是「0 ↔ 数十 N·m」的单帧阶跃；固件把这路力矩直接叠加到
+     * 速度环输出上，没有限幅也没有斜坡。这里把真正写进 effort 接口的值按
+     * @c torque_slew_rate 限速，使任何状态切换处的力矩都连续（O19）。
+     *
+     * @param index  关节下标
+     * @param target 本周期状态机算出的力矩目标（N·m）
+     * @param dt     控制周期（秒）；<= 0 表示本周期不做限速，直接跟随并记录
+     * @return 实际应写进 effort 接口的值
+     * @note @ref last_effort_ 无论是否限速都更新为实际写出的值，因此进出豁免状态
+     *       （measure / teach_pendant）时不会留下一段待补偿的差值。
+     */
+    double limit_effort_slew(std::size_t index, double target, double dt);
+
+    /**
      * @brief 故障兜底：锁定当前实测位置并请求切回 idel
      *
      * 当出现关节越限、或状态机报告可恢复故障（@c RunResult::Recoverable）/
@@ -225,13 +242,14 @@ private:
      * -# 把状态机的期望状态置为 @c idel，下一周期由状态机完成切换。
      *
      * @param reason 故障原因（字符串字面量），仅用于限流日志
+     * @param dt     控制周期（秒），传给力矩斜率限制
      *
      * @note 这是控制器内**唯一**的故障裁决点：状态只需 @c return false 报告失败，
      *       不需要自己写保持命令或修改期望状态，从而杜绝「新增状态忘记兜底」。
      * @warning 运行于实时控制线程，仅做标量运算与接口写入，禁止分配与阻塞。
      * @see ArmController::update
      */
-    void apply_safe_hold_and_idel(const char* reason);
+    void apply_safe_hold_and_idel(const char* reason, double dt);
 
     /**
      * @brief 查找第一个越出模型限位的关节
@@ -268,6 +286,19 @@ private:
      *       供 @ref ArmController::on_activate() 与安全保护逻辑使用。
      */
     std::vector<float> default_kp,default_kd;
+    /**
+     * @brief 力矩前馈的斜率限制（N·m/s，O19）
+     *
+     * 来自 controller YAML 的 @c torque_slew_rate，构造阶段读取一次（改 YAML 必须重启，
+     * 见 C6）。<= 0 表示关闭。实机 100 Hz 下 300 N·m/s 意味着 21 N·m 的阶跃用 7 帧
+     * （约 70 ms）走完，固件的速度环看不到阶跃。
+     *
+     * @note @c measure / @c teach_pendant 两个状态自己产生前馈（激励轨迹、示教重力项），
+     *       限速会改写它们真正下发的力矩，因此这两个状态跳过限速。
+     */
+    double torque_slew_rate_{300.0};
+    /// 上一周期实际写进 effort 接口的值（on_configure 按关节数定容）
+    std::vector<double> last_effort_;
     /// 状态机实际状态名的话题发布器（~/state，transient_local）
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub_;
     /// 状态发布用的 wall timer，运行在非实时线程

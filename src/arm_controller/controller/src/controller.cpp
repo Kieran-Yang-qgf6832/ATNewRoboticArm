@@ -82,6 +82,15 @@ bool state_unavailable_on_real(const std::string& state_name) {
     return state_name == "teach_pendant" || state_name == "measure";
 }
 
+/// 自己产生力矩前馈、不能被斜率限制改写的状态（O19）：
+/// - measure 的激励轨迹是 10 s 周期 3 次谐波，力矩变化率可到 100 N·m/s 以上，
+///   被削就等于计划轨迹与实际下发不再是同一条，辨识数据与碰撞/离地约束都失效；
+/// - teach_pendant 的力矩就是「重力补偿 + 阻尼」本身，削它等于削手感。
+/// 两者都不在位置轨迹的段边界上，没有需要平滑的阶跃。
+bool state_owns_torque_feedforward(const std::string& state_name) {
+    return state_name == "teach_pendant" || state_name == "measure";
+}
+
 } // namespace
 
 /**
@@ -144,6 +153,9 @@ controller_interface::CallbackReturn ArmController::on_init() {
     auto_declare<bool>("gravity_compensation", true);
     // 重力前馈缩放（0~1）。仿真默认 1.0 保持原行为；实机首启用小值逐步确认方向。
     auto_declare<double>("gravity_compensation_scale", 1.0);
+    // 力矩前馈的斜率限制（N·m/s，O19）：0 = 关闭。保持路径与轨迹路径的力矩来源完全不同，
+    // 交接处实机会看到 0 ↔ 数十 N·m 的单帧阶跃，固件又把这路力矩直接叠到速度环输出上。
+    auto_declare<double>("torque_slew_rate", 300.0);
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
@@ -252,6 +264,12 @@ controller_interface::CallbackReturn ArmController::on_init() {
         node->get_logger(), "task_dim=%d（%s），real_mode=%s，allow_constrained_traj=%s", task_dim,
         task_dim == 5 ? "位置 + 工具指向，不控滚转" : "完整 6 维位姿", real_mode_ ? "true" : "false",
         allow_constrained_traj ? "true" : "false (position-constrained trajectories disabled)");
+
+    // O19：力矩前馈斜率限制（0 = 关闭）。这里打出生效值——默认为 300 N·m/s 时，
+    // 21 N·m 的阶跃在 100 Hz 实机上走 7 帧（约 70 ms），固件看不到阶跃。
+    node->get_parameter("torque_slew_rate", torque_slew_rate_);
+    RCLCPP_INFO(
+        node->get_logger(), "torque_slew_rate=%.1f N·m/s（0 = 关闭；measure / teach_pendant 豁免）", torque_slew_rate_);
 
     // 多路点 C3 轨迹的每关节上限：构造期读取一次，改 yaml 必须重启控制器（C6）。
     // 长度规则：1 = 全部关节广播；= 关节数 = 逐关节；其它长度打 ERROR 并退回内部默认值。
@@ -395,6 +413,16 @@ controller_interface::CallbackReturn ArmController::on_init() {
                     result.reason     = "gravity_compensation_scale must be within [0, 1]";
                     return result;
                 }
+            } else if (name == "torque_slew_rate") {
+                // O19：力矩前馈斜率限制，允许 0（关闭）与正数；负值会反向斜坡。
+                // 就地生效：单个 double，实时线程每周期读一次，不需要重启控制器。
+                const double rate = param.as_double();
+                if (!std::isfinite(rate) || rate < 0.0) {
+                    result.successful = false;
+                    result.reason     = "torque_slew_rate must be non-negative (0 disables the limiter)";
+                    return result;
+                }
+                torque_slew_rate_ = rate;
             } else if (name == "reset_duration") {
                 // 复位持续时间必须为正。
                 if (param.as_double() <= 0.0) {
@@ -662,6 +690,9 @@ controller_interface::CallbackReturn ArmController::on_configure(const rclcpp_li
     joint_command_msg_.position.assign(joints_name.size(), 0.0);
     joint_command_msg_.velocity.assign(joints_name.size(), 0.0);
     joint_command_msg_.effort.assign(joints_name.size(), 0.0);
+
+    // 力矩斜率限制的「上周期值」同样在这里定容（O19），update() 只做逐元素读写。
+    last_effort_.assign(joints_name.size(), 0.0);
     return controller_interface::ControllerInterface::CallbackReturn::SUCCESS;
 }
 
@@ -697,6 +728,9 @@ controller_interface::CallbackReturn ArmController::on_activate(const rclcpp_lif
             fsm_factory->command_[i].ki       = 0.0f; // 不启用积分项
         }
     }
+
+    // 斜率限制的起点与上电力矩一致（0），首周期从 0 平滑爬升，不会一上电就打满前馈。
+    std::fill(last_effort_.begin(), last_effort_.end(), 0.0);
     return controller_interface::ControllerInterface::CallbackReturn::SUCCESS;
 }
 
@@ -716,17 +750,56 @@ controller_interface::CallbackReturn ArmController::on_deactivate(const rclcpp_l
 }
 
 /**
+ * @brief 对单个关节的力矩前馈做斜率限制（O19）
+ *
+ * 用法见 @ref update()：状态机算出的 effort 目标先过这里，再写进命令接口。
+ * @c dt <= 0（或斜率限制被关闭、或下标越界）时不做限速，但仍把目标记录下来。
+ *
+ * @param index  关节下标
+ * @param target 力矩目标（N·m）
+ * @param dt     控制周期（秒）
+ * @return 实际写出的力矩值
+ */
+double ArmController::limit_effort_slew(std::size_t index, double target, double dt) {
+    if (index >= last_effort_.size()) {
+        return target;
+    }
+
+    double& last = last_effort_[index];
+    if (!(torque_slew_rate_ > 0.0) || !(dt > 0.0) || !std::isfinite(target)) {
+        // 关闭 / 周期不可用 / 目标非有限值：直接跟随。非有限值不记录，避免污染下一次限速。
+        if (std::isfinite(target)) {
+            last = target;
+        }
+        return target;
+    }
+
+    const double max_step = torque_slew_rate_ * dt;
+    if (target > last + max_step) {
+        last += max_step;
+    } else if (target < last - max_step) {
+        last -= max_step;
+    } else {
+        last = target;
+    }
+    return last;
+}
+
+/**
  * @brief 故障兜底：锁定当前实测位置并请求切回 idel
  *
  * 控制器内唯一的故障裁决点。状态机报告可恢复故障或结构损坏时调用，
  * 使机械臂原地保持而不是失去力矩坠落，并把期望状态切回 @c idel。
+ *
+ * @param reason 故障原因（仅用于限流日志）
+ * @param dt     控制周期（秒），用于力矩斜率限制（O19）
  *
  * @note 下一周期由状态机自身完成 @c exit/@c enter 切换到 @c idel；本函数不直接
  *       修改 @c current_state_name_，避免绕过状态机的进入/退出语义。
  * @warning 运行于实时控制线程，仅做标量运算与接口写入，禁止分配与阻塞。
  * @see ArmController::update
  */
-void ArmController::apply_safe_hold_and_idel(const char* reason) {
+void ArmController::apply_safe_hold_and_idel(const char* reason, double dt) {
     // 位置锁定为当前实测值，速度/力矩/积分项清零，仅保留默认 kp/kd，避免失控运动。
     //
     // 同时写入状态机的命令缓存 command_：切回 idel 的那一周期，FSMFactory::run()
@@ -748,9 +821,13 @@ void ArmController::apply_safe_hold_and_idel(const char* reason) {
             command.ki       = 0.0f;
         }
 
+        // 故障交接同样要力矩连续（O19）：这里的目标是 0，按斜率限制爬过去，
+        // 否则故障前最后一次的数十 N·m 会在一帧内消失。
+        const double hold_torque = limit_effort_slew(i, 0.0, dt);
+
         command_interfaces_[i * 6 + 0].set_value(hold_position);
         command_interfaces_[i * 6 + 1].set_value(0.0);
-        command_interfaces_[i * 6 + 2].set_value(0.0);
+        command_interfaces_[i * 6 + 2].set_value(hold_torque);
         command_interfaces_[i * 6 + 3].set_value(hold_kp);
         command_interfaces_[i * 6 + 4].set_value(hold_kd);
         command_interfaces_[i * 6 + 5].set_value(0.0);
@@ -815,7 +892,7 @@ int ArmController::first_joint_limit_violation() const {
  * -# 否则将状态机计算出的位置/速度/力矩/kp/kd/ki 逐项写入命令接口，返回 @c OK。
  *
  * @param time   当前 ROS 时间戳，传给状态机用于轨迹/计时等时间相关逻辑。
- * @param period 距上一次更新的周期时长；本实现未使用（状态机内部自行管理时间）。
+ * @param period 距上一次更新的周期时长；用于力矩前馈的斜率限制（O19）。
  * @return 控制器执行结果：
  * @retval OK    本周期正常，命令已成功下发；可恢复故障也返回 @c OK；
  * @retval ERROR 仅当状态机结构损坏时返回，此时已下发保持命令。
@@ -828,7 +905,9 @@ int ArmController::first_joint_limit_violation() const {
  * @see FSMArmControlFactory::run
  */
 controller_interface::return_type ArmController::update(const rclcpp::Time& time, const rclcpp::Duration& period) {
-    (void)period;
+    // 力矩斜率限制用的周期（O19）。取不到有效周期时按「不限速」处理，只记录不削峰：
+    // 限速本身是平滑手段，不能因为周期无效就把力矩冻在原地。
+    const double dt = period.seconds();
 
     // 读取硬件反馈，刷新状态机工厂的关节状态缓存（每关节 position/velocity/effort，
     // 若 URDF 声明了 acceleration 再多一个——见 docs/bugs.md O8）。
@@ -865,7 +944,8 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
     if (result == RunResult::Fatal) {
         // 状态机结构损坏（状态名不存在、指针为空）：属于代码缺陷。
         // 停用链条前也先保持一拍，尽量避免机械臂在停用瞬间失去力矩。
-        apply_safe_hold_and_idel("state machine structure fault");
+        // 故障保持**不豁免**限速：把力矩平滑地拉到 0 比一帧内消失更安全。
+        apply_safe_hold_and_idel("state machine structure fault", dt);
         cache_joint_command_snapshot(time);
         return controller_interface::return_type::ERROR;
     }
@@ -873,16 +953,21 @@ controller_interface::return_type ArmController::update(const rclcpp::Time& time
     if (result == RunResult::Recoverable) {
         // 可恢复故障：锁定当前位置并切回 idel，但**不停用控制器链**。
         // 返回 ERROR 会让 controller_manager 停用整条链，力矩消失导致坠落。
-        apply_safe_hold_and_idel("state machine reported a failure");
+        apply_safe_hold_and_idel("state machine reported a failure", dt);
         cache_joint_command_snapshot(time);
         return controller_interface::return_type::OK;
     }
+
+    // measure / teach_pendant 自己产生前馈（激励轨迹、示教重力项），限速会改写它们
+    // 真正下发的力矩，因此按「本周期结束时的状态」判断是否豁免；离开这两个状态的
+    // 第一周期就不再豁免，于是能平滑地把力矩带回保持值。
+    const double slew_dt = state_owns_torque_feedforward(fsm_factory->current_state_name()) ? 0.0 : dt;
 
     // 状态机运行正常：下发每关节 6 个命令，顺序为 position/velocity/effort/kp/kd/ki。
     for (std::size_t i = 0; i < joints_name.size(); i++) {
         command_interfaces_[i * 6 + 0].set_value(static_cast<double>(fsm_factory->command_[i].position));
         command_interfaces_[i * 6 + 1].set_value(static_cast<double>(fsm_factory->command_[i].velocity));
-        command_interfaces_[i * 6 + 2].set_value(static_cast<double>(fsm_factory->command_[i].torque));
+        command_interfaces_[i * 6 + 2].set_value(limit_effort_slew(i, static_cast<double>(fsm_factory->command_[i].torque), slew_dt));
         command_interfaces_[i * 6 + 3].set_value(static_cast<double>(fsm_factory->command_[i].kp));
         command_interfaces_[i * 6 + 4].set_value(static_cast<double>(fsm_factory->command_[i].kd));
         command_interfaces_[i * 6 + 5].set_value(static_cast<double>(fsm_factory->command_[i].ki));

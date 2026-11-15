@@ -179,7 +179,9 @@ def _sorted_unique(t: np.ndarray, *arrays: np.ndarray):
     t = t[order]
     arrays = tuple(array[order] for array in arrays)
     keep = np.concatenate(([True], np.diff(t) > 0))
-    return (t,) + tuple(array[keep] for array in arrays)
+    # 时间轴必须一起过 keep：否则去重后 t 仍比跟着过滤的数组多一条，
+    # np.interp(t_src, values) 会直接抛「fp and xp are not of the same length」。
+    return (t[keep],) + tuple(array[keep] for array in arrays)
 
 
 def _read_bag(bag: Path) -> dict:

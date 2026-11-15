@@ -56,6 +56,13 @@ arm_controller:
     # 打开时用 RNEA 在 dq = ddq = 0 下算出重力力矩作为力矩前馈，静差被直接补掉。
     # 这是实机上唯一一处主动输出力矩的保持路径，怀疑模型质量或力矩符号时先关掉它。
     gravity_compensation: true
+    # 力矩前馈的斜率限制（N·m/s，docs/bugs/O19）。
+    # 保持路径与轨迹路径的力矩来源不同（保持是重力前馈，轨迹是完整 RNEA），状态切换时
+    # 实机会看到 0 ↔ 数十 N·m 的单帧阶跃，而固件把这路力矩直接叠到速度环输出上、既不
+    # 限幅也不斜坡。这里在控制器出口对 effort 做限速：300 N·m/s 时 21 N·m 的阶跃要
+    # 70 ms（实机 100 Hz 为 7 帧）。0 = 关闭。
+    # measure / teach_pendant 自己产生前馈（激励轨迹、示教重力项），这两个状态豁免。
+    torque_slew_rate: 300.0
     reset_joint_pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     reset_duration: 3.0
     reset_tolerance: 0.01

@@ -29,6 +29,10 @@ constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 /// 控制周期 2 ms，含终点在内最多 4 次（约 1.54 ms），再多就可能被实时周期卡住。
 constexpr int kMaxPrecheckSamples = 3;
 
+/// 轨迹边界偏差告警阈值（rad，O19）。段末 |终点 − 实测| 或段首 |首点 − 上一帧命令|
+/// 超过它，说明这一段根本没跟上目标；只告警、不改变行为。
+constexpr double kTrajectoryBoundaryDeviationWarn = 0.1;
+
 // load_trajectory_from_message 依赖各 FSM 的 traj 预分配容量不小于最大点数，
 // 在订阅回调中复用预分配 buffer（clear + add_point），避免实时路径内重新分配内存。
 int model_dof_from_context(std::any ctx) {
@@ -93,9 +97,12 @@ bool compute_gravity_torque(
 /**
  * @brief 锁存当前实测关节角，作为后续「保持」的位置指令
  *
- * 必须在**进入保持时调用一次**。绝不能每个周期重新读取实测值：那样位置指令永远
- * 等于当前值，位置误差恒为 0，kp 再大也产生不了恢复力，机械臂只剩 kd 阻尼，会在
- * 重力下缓慢坠落——"保持"名不副实。IDELState 用的就是这种锁存式保持。
+ * 只在**进入状态**时调用（此刻还没有上一帧命令可用）。绝不能每个周期重新读取实测值：
+ * 那样位置指令永远等于当前值，位置误差恒为 0，kp 再大也产生不了恢复力，机械臂只剩
+ * kd 阻尼，会在重力下缓慢坠落——"保持"名不副实。IDELState 用的就是这种锁存式保持。
+ *
+ * 轨迹**结束**时不要用本函数，改用 @ref latch_command_position：那里锁存实测会把
+ * 累积的跟踪误差变成一帧位置台阶（O19）。
  *
  * @param factory       状态机工厂
  * @param joint_count   关节数
@@ -108,6 +115,95 @@ void latch_joint_position(FSMArmControlFactory* factory, std::size_t joint_count
 
     for (std::size_t i = 0; i < joint_count; ++i) {
         (*hold_position)[i] = factory->state_[i].position;
+    }
+}
+
+/**
+ * @brief 轨迹结束时，把保持位置锁存到「本周期刚下发的命令」（O19）
+ *
+ * 段末**不能**锁存实测：实测与命令差多少，锁存的那一帧命令就跳多少。实机固件
+ * 直接跟着位置目标跑，看到的是「位置目标单帧突变 + 力矩前馈从 RNEA 掉回保持值」，
+ * 表现成段末跳一下并伴随一声闷响。锁存命令则参考全程连续，剩下的跟踪误差交给
+ * 伺服继续消（这正是「锁存终点而不是实测」的取舍）。
+ *
+ * 同时报告段末跟踪偏差：选了这个策略之后，没跟上的偏差会变成持续的位置误差，
+ * 不打日志它就只是从「一跳」变成「一直偷偷偏在那里」。
+ *
+ * @param factory       状态机工厂
+ * @param joint_count   关节数
+ * @param hold_position 输出：预分配的保持位置缓存
+ * @param state_name    状态名，仅用于日志
+ * @note 必须在**写完本周期命令之后**调用：锁存值取的就是 @c command_。
+ */
+void latch_command_position(
+    FSMArmControlFactory* factory, std::size_t joint_count, std::vector<float>* hold_position, const char* state_name) {
+    if (factory == nullptr || hold_position == nullptr || factory->command_.size() != joint_count || hold_position->size() != joint_count
+        || factory->state_.size() != joint_count) {
+        return;
+    }
+
+    float worst             = 0.0f;
+    std::size_t worst_index = 0;
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        (*hold_position)[i]  = factory->command_[i].position;
+        const float deviation = std::fabs(factory->state_[i].position - (*hold_position)[i]);
+        if (deviation > worst) {
+            worst       = deviation;
+            worst_index = i;
+        }
+    }
+
+    if (worst > kTrajectoryBoundaryDeviationWarn && factory->node_ != nullptr) {
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "%s: trajectory finished with %.3f rad tracking deviation at joint%zu; the hold command latches the commanded "
+            "endpoint (not the measured position), so this deviation becomes a standing position error",
+            state_name != nullptr ? state_name : "?", worst, worst_index + 1);
+    }
+}
+
+/**
+ * @brief 段首：用「上一帧命令」覆盖轨迹首点（O19）
+ *
+ * 发布者写进来的首点通常是**发送那一刻的实测**，与控制器手里的命令差一个等待期的
+ * 塌陷/下垂（实机重力前馈关掉时约 0.09 rad）。直接用它起步，第一帧就是一个位置台阶。
+ * 把首点重定基到上一帧命令，参考从上一周期原处接着走，台阶为零，轨迹形状不变。
+ *
+ * @param factory     状态机工厂
+ * @param joint_count 关节数
+ * @param traj        已装载好的轨迹（就地改写第一个点）
+ * @param state_name  状态名，仅用于日志
+ * @note 首点的速度/加速度前馈保持不变，只改位置。
+ */
+void rebase_first_point_on_last_command(
+    FSMArmControlFactory* factory, std::size_t joint_count, Trajectory* traj, const char* state_name) {
+    if (factory == nullptr || traj == nullptr || traj->empty() || factory->command_.size() != joint_count) {
+        return;
+    }
+
+    Point& first = traj->points.front();
+    if (first.pos.size() != static_cast<Eigen::Index>(joint_count)) {
+        return;
+    }
+
+    float worst             = 0.0f;
+    std::size_t worst_index = 0;
+    for (std::size_t i = 0; i < joint_count; ++i) {
+        const auto index      = static_cast<Eigen::Index>(i);
+        const float deviation = std::fabs(static_cast<float>(first.pos(index)) - factory->command_[i].position);
+        if (deviation > worst) {
+            worst       = deviation;
+            worst_index = i;
+        }
+        first.pos(index) = static_cast<double>(factory->command_[i].position);
+    }
+
+    if (worst > kTrajectoryBoundaryDeviationWarn && factory->node_ != nullptr) {
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "%s: first trajectory point was %.3f rad away from the last command at joint%zu; the start has been rebased on "
+            "the last command to keep the reference continuous",
+            state_name != nullptr ? state_name : "?", worst, worst_index + 1);
     }
 }
 
@@ -918,8 +1014,8 @@ bool CartTrajState::run_waypoint_motion(const rclcpp::Time& time) {
     if (elapsed >= waypoint_traj_.duration()) {
         waypoint_active_ = false;
         state            = TrajPhase::STOP;
-        // 轨迹结束时锁存终点（理由同普通轨迹路径）。
-        latch_joint_position(factory, joint_count_, &hold_position_);
+        // O19：锁存本周期刚下发的命令（不是实测），段末参考保持连续。
+        latch_command_position(factory, joint_count_, &hold_position_, fsm_name_.c_str());
     }
     return true;
 }
@@ -1194,8 +1290,8 @@ bool CartTrajState::run(const rclcpp::Time& time) {
     if (trajectory_finished(traj, traj_start_time_, time)) {
         traj.stop();
         state = TrajPhase::STOP;
-        // 轨迹结束时锁存终点：否则进入 STOP 后位置指令会跟着实测值跑，失去刚度。
-        latch_joint_position(factory, joint_count_, &hold_position_);
+        // O19：锁存本周期刚下发的命令（不是实测），段末参考保持连续。
+        latch_command_position(factory, joint_count_, &hold_position_, fsm_name_.c_str());
     }
 
     return true;
@@ -1230,6 +1326,9 @@ JointTrajState::JointTrajState(const std::string& name, std::any ctx)
             if (state != TrajPhase::STOP || !load_trajectory_from_message(msg.position, msg.seconds, joint_count_, &traj)) {
                 return;
             }
+            // O19：首点重定基到上一帧命令。发布者的 wp0 是发送时刻的实测，与控制器
+            // 手里的命令差一个等待期间的塌陷/下垂，直接用它起步就是段首台阶。
+            rebase_first_point_on_last_command(factory, joint_count_, &traj, "joint_traj");
             const auto now = factory->node_->get_clock()->now();
             traj.start(now);
             traj_start_time_ = now;
@@ -1281,7 +1380,8 @@ void JointTrajState::on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd&
         }
     }
 
-    // 首节点自动补当前实测关节角，保证轨迹从当前位置起步。
+    // 首节点补「上一帧命令」而不是实测（O19）：实测与命令相差一个等待期间的塌陷，
+    // 用它起步会在 t=0 打出一个位置台阶。首点的合法性检查仍然针对实测做。
     const auto dof = static_cast<Eigen::Index>(joint_count_);
     // 起点必须是合法状态：仿真若在控制器激活前跌落/撞限位，实测关节可能已经越界。
     const Eigen::VectorXd& lower = factory->model_->lower_joint_limit();
@@ -1302,8 +1402,10 @@ void JointTrajState::on_waypoint_command(const robot_msgs::msg::WaypointTrajCmd&
         }
     }
     std::vector<Eigen::VectorXd> nodes(user_count + 1, Eigen::VectorXd::Zero(dof));
+    const bool have_last_command = factory->command_.size() == joint_count_;
     for (Eigen::Index i = 0; i < dof; ++i) {
-        nodes[0](i) = factory->state_[static_cast<std::size_t>(i)].position;
+        const auto index = static_cast<std::size_t>(i);
+        nodes[0](i)      = have_last_command ? factory->command_[index].position : factory->state_[index].position;
     }
     for (std::size_t i = 0; i < user_count; ++i) {
         const auto& values = msg.waypoints[i].pos;
@@ -1375,8 +1477,8 @@ bool JointTrajState::run_waypoint_motion(const rclcpp::Time& time) {
     if (elapsed >= waypoint_traj_.duration()) {
         waypoint_active_ = false;
         state            = TrajPhase::STOP;
-        // 轨迹结束时锁存终点（理由同普通轨迹路径）。
-        latch_joint_position(factory, joint_count_, &hold_position_);
+        // O19：锁存本周期刚下发的命令（不是实测），段末参考保持连续。
+        latch_command_position(factory, joint_count_, &hold_position_, fsm_name_.c_str());
     }
     return true;
 }
@@ -1486,8 +1588,8 @@ bool JointTrajState::run(const rclcpp::Time& time) {
         if (trajectory_finished(traj, traj_start_time_, time)) {
             traj.stop();
             state = TrajPhase::STOP;
-            // 轨迹结束时锁存终点（理由同 CartTrajState::run）。
-            latch_joint_position(factory, joint_count_, &hold_position_);
+            // O19：锁存本周期刚下发的命令（不是实测），段末参考保持连续。
+            latch_command_position(factory, joint_count_, &hold_position_, fsm_name_.c_str());
         }
     }
     return true;

@@ -45,5 +45,11 @@ arm_controller:
     gravity_compensation: false
     gravity_compensation_scale: 0.1
 
+    # 力矩前馈的斜率限制（N·m/s，docs/bugs/O19）：固件把 effort 直接叠到速度环输出上，
+    # 不限幅也不斜坡，所以保持（重力关掉时为 0）与轨迹（完整 RNEA，同姿态 joint2 约
+    # 21 N·m）交接时必须在控制侧削成斜坡。100 Hz 下 21 N·m / 300 N·m/s = 7 帧 ≈ 70 ms。
+    # 0 = 关闭（对照旧行为）。
+    torque_slew_rate: 300.0
+
     # 实机不支持 measure：MCU 不上报加速度，acc_* 列恒为 0，辨识结果不可用。
     # 需要参数辨识请回仿真链路。
