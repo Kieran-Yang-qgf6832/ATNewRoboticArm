@@ -87,7 +87,6 @@ def generate_launch_description():
             "headless": LaunchConfiguration("headless"),
             "show_rviz": LaunchConfiguration("show_rviz"),
             "mujoco_model": LaunchConfiguration("mujoco_model"),
-            "controller_overlay": LaunchConfiguration("controller_overlay"),
             "record_bag": LaunchConfiguration("record_bag"),
             "bag_dir": LaunchConfiguration("bag_dir"),
         }.items(),

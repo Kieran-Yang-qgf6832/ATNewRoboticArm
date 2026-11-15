@@ -110,8 +110,6 @@ joint_limits:
     joint2: {min: -90.0,  max:  90.0}   # URDF ±1.5708 rad
     joint3: {min: -166.2, max: 166.2}   # URDF ±2.9 rad
     joint4: {min: -114.6, max: 103.1}   # URDF -2.0 .. +1.8 rad
-    joint5: {min: -35.0,  max:  35.0}   # URDF ±0.61087 rad
-    joint6: {min: -180.0, max: 180.0}   # URDF ±3.14159 rad
 
 sequences:
   # 导纳演示（docs/bugs.md O22）：不带 offset = **自由导纳**。
