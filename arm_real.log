@@ -1,0 +1,64 @@
+[INFO] [launch]: All log files can be found below /home/kangy/.ros/log/2026-11-16-21-59-21-779836-kangy-ThinkBook-16-G6-IMH-185451
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [launch.user]: [提示] 若使用 loopback:=true，本进程不会打开 USB 设备，读到的状态来自指令回读；接真机前务必去掉该参数。
+[INFO] [launch.user]: [bag] 录制关节命令/状态到 /home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/.ros/ros2bags/arm_real_20261116-215921（Ctrl-C 结束 launch 时自动收尾）
+[INFO] [robot_state_publisher-1]: process started with pid [185481]
+[INFO] [ros2_control_node-2]: process started with pid [185482]
+[INFO] [ros2-3]: process started with pid [185483]
+[INFO] [rviz2-4]: process started with pid [185484]
+[INFO] [launch.user]: ros2_control_node started, spawning joint_state_broadcaster
+[INFO] [spawner-5]: process started with pid [185485]
+[robot_state_publisher-1] [INFO] [1794837562.078614135] [robot_state_publisher]: Robot initialized
+[ros2_control_node-2] [INFO] [1794837562.117679868] [controller_manager]: Using Steady (Monotonic) clock for triggering controller manager cycles.
+[ros2_control_node-2] [INFO] [1794837562.129302793] [controller_manager]: Subscribing to '/arm_robot_description' topic for robot description.
+[ros2_control_node-2] [INFO] [1794837562.129465085] [controller_manager]: update rate is 100 Hz
+[ros2_control_node-2] [INFO] [1794837562.129485754] [controller_manager]: Overruns handling is : enabled
+[ros2_control_node-2] [INFO] [1794837562.129497188] [controller_manager]: Spawning controller_manager RT thread with scheduler priority: 50
+[ros2_control_node-2] [WARN] [1794837562.129618569] [controller_manager]: Could not enable FIFO RT scheduling policy: with error number <1>(Operation not permitted). See [https://control.ros.org/master/doc/ros2_control/controller_manager/doc/userdoc.html] for details on how to enable realtime scheduling.
+[ros2_control_node-2] [INFO] [1794837562.255869160] [controller_manager]: Received robot description from topic.
+[ros2_control_node-2] [INFO] [1794837562.255975874] [controller_manager]: Enforcing command limits is disabled. Command limits from URDF will be ignored.
+[ros2_control_node-2] [INFO] [1794837562.261186370] [controller_manager]: Loading hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1794837562.300185854] [controller_manager]: Loaded hardware 'arm_hw' from plugin 'arm_controller/ArmRealInterfaces'
+[ros2_control_node-2] [INFO] [1794837562.300410495] [controller_manager]: Initialize hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1794837562.314803251] [arm_real_interfaces]: Configured ArmRealInterfaces for 4 joints, 4 motors (loopback=true, state_timeout=100 ms).
+[ros2_control_node-2] [INFO] [1794837562.314864586] [arm_real_interfaces]:   joint1: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1794837562.314876411] [arm_real_interfaces]:   joint2: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1794837562.314881391] [arm_real_interfaces]:   joint3: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1794837562.314886114] [arm_real_interfaces]:   joint4: dir=+1.000 zero=+0.000000
+[ros2_control_node-2] [INFO] [1794837562.314925588] [controller_manager]: Successful initialization of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1794837562.316112444] [controller_manager]: Activating component 'arm_hw'.
+[ros2_control_node-2] [INFO] [1794837562.316179491] [resource_manager]: 'configure' hardware 'arm_hw' 
+[ros2_control_node-2] [WARN] [1794837562.316198646] [arm_real_interfaces]: loopback=true：不打开 USB 设备，状态由指令回读生成。仅用于无硬件冒烟，接真机时必须关闭。
+[ros2_control_node-2] [INFO] [1794837562.316210995] [resource_manager]: Successful 'configure' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1794837562.316231017] [resource_manager]: 'activate' hardware 'arm_hw' 
+[ros2_control_node-2] [INFO] [1794837562.316266368] [resource_manager]: Successful 'activate' of hardware 'arm_hw'
+[ros2_control_node-2] [INFO] [1794837562.316505515] [controller_manager]: Registering statistics for : arm_hw
+[ros2_control_node-2] [INFO] [1794837562.316650717] [controller_manager]: Resource Manager has been successfully initialized. Starting Controller Manager services...
+[ros2_control_node-2] [INFO] [1794837562.328484369] [controller_manager]: Received robot description from topic.
+[ros2_control_node-2] [WARN] [1794837562.328581835] [controller_manager]: ResourceManager has already loaded a urdf and is initialized. Ignoring attempt to reload a robot description.
+[rviz2-4] [INFO] [1794837562.502510111] [rviz2]: Stereo is NOT SUPPORTED
+[rviz2-4] [INFO] [1794837562.502630107] [rviz2]: OpenGl version: 4.6 (GLSL 4.6)
+[rviz2-4] [INFO] [1794837562.538425200] [rviz2]: Stereo is NOT SUPPORTED
+[ros2-3] [INFO] [1794837562.570358232] [rosbag2_recorder]: Event publisher thread: Started
+[ros2-3] [INFO] [1794837562.575426262] [rosbag2_recorder]: Starting recording to '/home/kangy/MyProjects/2027ATRobotArm_LowerAndUpper/ATNewRoboticArm_Upper/.ros/ros2bags/arm_real_20261116-215921'
+[ros2-3] [INFO] [1794837562.577289326] [rosbag2_recorder]: Listening for topics...
+[ros2-3] [INFO] [1794837562.577323045] [rosbag2_recorder]: Recording...
+[ros2-3] [INFO] [1794837562.577385358] [rosbag2_recorder]: Topics discovery started.
+[spawner-5] [INFO] [1794837562.599033193] [spawner_joint_state_broadcaster]: waiting for service /controller_manager/list_controllers to become available...
+[ros2-3] [INFO] [1794837563.061875734] [rosbag2_recorder]: Subscribed to topic '/joint_states'
+[ros2-3] [INFO] [1794837563.064227103] [rosbag2_recorder]: Subscribed to topic '/arm_controller/joint_command'
+[ros2-3] [INFO] [1794837563.066112769] [rosbag2_recorder]: Subscribed to topic '/arm_controller/state'
+[spawner-5] [WARN] [1794837563.352297549] [spawner_joint_state_broadcaster]: Controller already loaded, skipping load_controller
+[ros2_control_node-2] [INFO] [1794837563.354257560] [controller_manager]: Configuring controller: 'joint_state_broadcaster'
+[ros2_control_node-2] [ERROR] [1794837563.354336469] [controller_manager]: Could not configure controller with name 'joint_state_broadcaster' because no controller with this name exists
+[spawner-5] [ERROR] [1794837563.356786148] [spawner_joint_state_broadcaster]: Failed to configure controller
+[ERROR] [spawner-5]: process has died [pid 185485, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner --controller-manager /controller_manager --controller-manager-timeout 30 --switch-timeout 30 --service-call-timeout 30 joint_state_broadcaster --ros-args'].
+[INFO] [launch.user]: joint_state_broadcaster spawned, spawning arm_controller
+[INFO] [spawner-6]: process started with pid [185602]
+[spawner-6] [INFO] [1794837564.140676001] [spawner_arm_controller]: waiting for service /controller_manager/list_controllers to become available...
+[spawner-6] [WARN] [1794837565.252693566] [spawner_arm_controller]: Controller already loaded, skipping load_controller
+[ros2_control_node-2] [INFO] [1794837565.255551717] [controller_manager]: Configuring controller: 'arm_controller'
+[ros2_control_node-2] [ERROR] [1794837565.255661378] [controller_manager]: Could not configure controller with name 'arm_controller' because no controller with this name exists
+[spawner-6] [ERROR] [1794837565.257862195] [spawner_arm_controller]: Failed to configure controller
+[ERROR] [spawner-6]: process has died [pid 185602, exit code 1, cmd '/opt/ros/jazzy/lib/controller_manager/spawner --controller-manager /controller_manager --controller-manager-timeout 30 --switch-timeout 30 --service-call-timeout 30 arm_controller --ros-args'].
+[ros2-3] [INFO] [1794837587.046804489] [rosbag2_recorder]: Subscribed to topic '/arm_joint_traj'

@@ -11,10 +11,14 @@
     当前生效模型：4 自由度机械臂
     ==========================================================================
     几何/惯量/关节限位/网格全部来自这台 4 自由度臂自己的数据（robotic_arm.csv 是
-    SolidWorks 导出的原始表）；接口层（ros2_control 硬件块、headless 参数、虚拟根
+    SolidWorks 导出的原始表）；    接口层（ros2_control 硬件块、headless 参数、虚拟根
     link）沿用 6 自由度模型（Git commit 5e59ef5）的写法，使控制器链路不需要任何改动：
 
       ArmController → SimPidController → mujoco_ros2_control/MujocoSystem
+
+    hardware:=real 时换成实机块：ArmController → ArmRealInterfaces → USB CDC → MCU。
+    4 轴实机只有 4 个电机，motor_count=4 把 URDF 的 joint1..joint4 映射到 MCU 帧的
+    前 4 个槽位；第 5/6 槽保持不动（见 arm_real_interfaces.cpp 的 write()）。
 
     注意：本文件同时被 pinocchio 当**纯 URDF** 解析（identify_arm / 激励轨迹生成），
     pinocchio 会忽略 <ros2_control> 整块和 xacro 元素，所以这里加 xacro 是安全的；
@@ -22,15 +26,27 @@
     ==========================================================================
   -->
   <xacro:arg name="headless" default="false"/>
+  <!-- hardware：选择 ros2_control 硬件插件。mujoco（默认）= MuJoCo 仿真，
+       real = 实机 USB CDC 接口。只切换 <ros2_control> 块，运动学完全共用；
+       pinocchio 解析时整块被忽略，因此不影响控制器内部的模型。 -->
+  <xacro:arg name="hardware" default="mujoco"/>
+  <!-- loopback：实机接口的本地回环，不打开 USB 设备，只用于无硬件冒烟。
+       默认 false；接真机时必须保持 false。 -->
+  <xacro:arg name="loopback" default="false"/>
+  <!-- mujoco_model：MuJoCo 加载的 MJCF 场景。默认 scene.xml（辨识/测量共用）；
+       视觉验证时由 launch 传 scene_vision.xml。只影响仿真硬件块。 -->
+  <xacro:arg name="mujoco_model" default="$(find arm_model)/model_4dof/scene.xml"/>
 
+  <xacro:if value="${'$(arg hardware)' == 'mujoco'}">
   <ros2_control name="arm_hw" type="system">
     <hardware>
       <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
-      <param name="mujoco_model">$(find arm_model)/model_4dof/scene.xml</param>
+      <param name="mujoco_model">$(arg mujoco_model)</param>
       <!-- mujoco_ros2_control 的硬件参数：headless=true 时用 HeadlessAdapter 代替 GLFW，
            不开窗口、不跑渲染线程，物理线程照常推进。 -->
       <param name="headless">$(arg headless)</param>
     </hardware>
+
 
     <joint name="joint1">
       <command_interface name="effort"/>
@@ -67,6 +83,83 @@
     </joint>
 
   </ros2_control>
+  </xacro:if>
+
+  <!-- hardware:=real：实机 USB CDC 接口。接口名与 6 轴模型的实机块一致，控制器层
+       不需要区分轴数；关节数由 <ros2_control> 里列出的 joint 决定。 -->
+  <xacro:unless value="${'$(arg hardware)' == 'mujoco'}">
+  <ros2_control name="arm_hw" type="system">
+    <hardware>
+      <plugin>arm_controller/ArmRealInterfaces</plugin>
+      <!-- loopback=true 时跳过 USB 打开、把指令读回状态，只用于无硬件冒烟。 -->
+      <param name="loopback">$(arg loopback)</param>
+      <!-- 超过该时长没收到 MCU 状态包就返回 ERROR，让 controller_manager 停控制器。 -->
+      <param name="state_timeout_ms">100</param>
+      <!-- 实际驱动的电机数：4 轴硬件只有 4 个电机，占用 MCU 帧（固定 6 槽）的前 4 槽。
+           第 5/6 槽不发新目标，见 arm_real_interfaces.cpp 的 write()。 -->
+      <param name="motor_count">4</param>
+      <!-- 关节标定表：q_urdf = dir * (q_raw - zero)。固件零位与 URDF 的 SolidWorks
+           零位没有共同基准，必须现场标定；未标定时文件里是 dir=1/zero=0 的占位值。 -->
+      <param name="joint_calibration_file">$(find arm_controller)/config/joint_calibration_4dof.yaml</param>
+    </hardware>
+
+    <joint name="joint1">
+      <!-- 固件只接收位置/速度/力矩前馈，kp/kd/ki **不会**上总线（固件跑自己的
+           位置/速度双环 PID）。保留这三个接口只是为了满足 ArmController 的声明。 -->
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <!-- MCU 不上报加速度；接口导出恒 0，满足控制器对 acceleration 的请求。 -->
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint2">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint3">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <state_interface name="acceleration"/>
+    </joint>
+
+    <joint name="joint4">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <command_interface name="effort"/>
+      <command_interface name="kp"/>
+      <command_interface name="kd"/>
+      <command_interface name="ki"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+      <state_interface name="acceleration"/>
+    </joint>
+
+  </ros2_control>
+  </xacro:unless>
 
   <!-- 虚拟根链接，解决 KDL 根链接惯量问题：base_link 有质量，当 URDF 根时 kdl_parser
        会刷 "root link has an inertia" 警告并丢掉这份惯量；加一个无惯量的 world 当根、

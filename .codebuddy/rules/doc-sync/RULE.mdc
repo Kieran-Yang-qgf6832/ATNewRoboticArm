@@ -1,0 +1,39 @@
+---
+description: 任务收尾时同步更新项目文档体系，并做链接与索引校验
+alwaysApply: true
+enabled: true
+---
+
+# 任务收尾：同步文档
+
+一次改动完成、准备交付或验收时执行以下检查；不要求每次编辑都写文档。
+
+## 变更 → 文档
+
+| 本次改了什么 | 必须更新 |
+| --- | --- |
+| 修 bug、推翻旧结论 | `docs/bugs/YYYY-MM-DD/HHMM-中文短语.md` + `docs/bugs/README.md` |
+| 技术选型、架构、约束 | `docs/adr/…` + `docs/adr/README.md` |
+| 对外可见的功能/兼容性变化 | `docs/changelog/…` + `docs/changelog/README.md` |
+| FSM / 状态 / 控制器参数 | `docs/execute/02-仿真运行.md`、`docs/execute/08-开发约定.md` |
+| `tasks.yaml` / 步骤类型 | `docs/execute/05-任务层与序列.md` |
+| launch / 控制器 YAML | `docs/execute/02-仿真运行.md`、`docs/execute/04-实机首次运行与标定.md` |
+| URDF `<ros2_control>` 接口 | `docs/execute/04-实机首次运行与标定.md`、`docs/execute/08-开发约定.md` |
+| 工具路径 / 命令 | `docs/execute/07-离线工具与排错.md` |
+| 新增、移动、删除文档 | 对应分类的 `README.md` 索引 |
+
+## 步骤
+
+1. 用 `git status --short` 与 `git --no-pager diff --stat` 看本次真实变更；
+2. 按上表逐项判断：该写的地方写完整，其它地方只放链接；
+3. 更新对应 `README.md` 索引；
+4. 跑 `python3 docs/tools/check_docs.py`，必须输出 `OK`；
+5. 在回复末尾列出「文档更新：…」；确实无需更新时也要明确说一句。
+
+## 硬规则
+
+- 引用缺陷直指条目文件，不写 `docs/bugs.md O8`（该路径只是兼容映射）；
+- 条目命名 `YYYY-MM-DD/HHMM-中文短语.md`，时间取发现问题/做决策的时间；
+- 不写碎条：同一天、同一问题的多次改动合并进一个条目；
+- 文档职责与单一事实源见 `docs/README.md`，开发约定见 `docs/execute/08-开发约定.md`。
+- 教学材料 `docs/teach/` 不入库，不要写进上面的索引。

@@ -1,8 +1,11 @@
-# 实机差异覆盖配置。
+# 实机差异覆盖配置（4 轴硬件）。
 #
 # 与 ros2_controller.yaml **叠加**加载：本文件只写实机与仿真的不同项，
 # 其余参数（状态机、measure、导纳等）沿用仿真那份的默认值。
 # 启动方式见 launch_pack/launch/arm_real.launch.py。
+#
+# 当前阶段只验收**关节控制**（idel / joint_traj / joint_move）：笛卡尔链路
+# （pos_move / cart_traj）的 4 维投影在实机上还没有做过闭环验证，先不要用。
 
 controller_manager:
   ros__parameters:
@@ -18,20 +21,22 @@ arm_controller:
     command_interface_prefix: ""
 
     # 实机标志：teach_pendant / measure 在实机上物理不成立（MCU 不接收阻抗增益、
-    # 不上报加速度，joint6 无电机），这两个状态会被拒绝切入。
+    # 不上报加速度），这两个状态会被拒绝切入；position-only 轨迹也会被拒绝。
     real_mode: true
 
-    # 实机只有 5 个自由度：joint6 无电机、机械锁死。
-    # 5 维任务 = 位置 3 + 工具指向 2，绕工具轴的滚转不参与求解。
-    task_dim: 5
+    # 4 轴模型的任务空间 = (x, y, z, joint4 自转角)。初始化后不可修改，
+    # 实际生效值见控制器启动日志 "task_space_dof="。
+    task_space_dof: 4
 
     # 首次上电只锁住上电姿态，不做自动复位——臂可能停在任意位置。
+    # 关节标定完成前，idel 是唯一安全的动作（下发值等于当前实测值）。
     exp_state: idel
 
     # 固件不接收 kp/kd/ki（它跑自己的位置/速度双环 PID，增益硬编码在固件里），
     # 这三个值只用来满足 ros2_control 的命令接口，不产生任何效果。
-    default_kp: [40.0, 40.0, 40.0, 2.0, 2.0, 0.2]
-    default_kd: [1.6, 1.6, 1.6, 0.08, 0.04, 0.01]
+    # 长度按 4 关节写；超过关节数会被参数校验拒绝。
+    default_kp: [15.0, 20.0, 3.0, 3.0]
+    default_kd: [1.2, 2.0, 0.1, 0.3]
 
     # 重力前馈先关掉：下发力矩会被固件直接叠加到速度环输出上（固件侧没有限幅），
     # 而 URDF 的质量/惯量只在仿真里辨识过、没在实机核过符号。

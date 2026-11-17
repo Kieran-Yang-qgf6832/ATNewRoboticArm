@@ -60,9 +60,9 @@ private:
     static constexpr std::size_t kStateInterfaceCount = 4;
     static constexpr std::size_t kCommandInterfaceCount = 6;
 
-    /// 固件实际驱动的电机数。MCU 通信帧固定 6 槽，但第 6 槽既不应答也不驱动
-    /// （实机末端回转 joint6 无电机、机械锁死）。上位机对它的处理见 read()。
-    static constexpr std::size_t kDrivenJointCount = 5;
+    /// MCU 通信帧固定的电机槽数（data_pack.h）。URDF 的关节数必须 <= 它，
+    /// 实际参与的槽数由 <param name="motor_count"> 决定（4 轴实机是 4，6 轴是 5）。
+    static constexpr std::size_t kMaxMotorCount = 6;
 
     /// 接收缓冲：USB FS bulk 上限 64 字节，77 字节的状态帧必然被拆包，
     /// 这里按字节流累加后再切帧（见 on_pack_praser）。
@@ -70,13 +70,16 @@ private:
 
     void on_pack_praser(const uint8_t* data, int size);
 
-    /// 从 joint_calibration.yaml 载入 dir/zero（joint1..joint5）与 joint6 的固定角。
+    /// 从 joint_calibration.yaml 载入前 motor_count_ 个关节的 dir/zero；
+    /// 关节名按 URDF 取（找不到时回退 joint<i>）。无电机关节可带 fixed 占位角。
     bool load_calibration(const std::string& path);
 
     // 关节名在 on_init 中从 URDF 的 <ros2_control> 段读取，不再硬编码。
     std::vector<std::string> joint_names_;
     std::vector<JointStateData> states_;
     // 固件上报的**原始**角度（未做 dir/zero 换算），换算在 read() 里做。
+    // 长度固定 kMaxMotorCount：帧里的每个槽位都记下来，这样 write() 能给
+    // 没有 URDF 关节的槽位回填实测值（保持不动），而不是发 0 让电机回零位。
     std::vector<JointStateData> received_states_;
     std::vector<JointCommandData> commands_;
     std::mutex received_states_mutex_;
@@ -87,10 +90,17 @@ private:
     // 固件上报的角度零位是它自己上电标定的物理姿态，与 URDF 的 SolidWorks 零位无关；
     // 方向也可能相反（固件 joint[2] 的 inv_motor = -1）。这两组值必须现场标定，
     // 缺省为 dir = 1、zero = 0（等同于直接透传）。
-    std::array<double, kDrivenJointCount> calib_dir_{{1.0, 1.0, 1.0, 1.0, 1.0}};
-    std::array<double, kDrivenJointCount> calib_zero_{{0.0, 0.0, 0.0, 0.0, 0.0}};
-    // joint6 无电机：它的状态位由指令回写（见 read()），此值仅用于日志与上电占位。
-    double joint6_fixed_{0.0};
+    std::array<double, kMaxMotorCount> calib_dir_{{1.0, 1.0, 1.0, 1.0, 1.0, 1.0}};
+    std::array<double, kMaxMotorCount> calib_zero_{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    // 无电机关节（i >= motor_count_）：状态位由指令回写（见 read()），
+    // 此值仅用于日志与上电占位。
+    std::array<double, kMaxMotorCount> fixed_joint_position_{{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+
+    /// 实际驱动的电机数（URDF <param name="motor_count">，缺省 = 关节数）。
+    std::size_t motor_count_{0};
+    /// 是否收到过至少一帧 MCU 状态。未收到前不发送任何指令：那时还不知道
+    /// 各槽位的实际角度，把默认 0 发出去等于命令电机冲向零位。
+    std::atomic<bool> has_received_state_{false};
 
     // 接收字节流缓冲与已填充长度。
     std::array<uint8_t, kRxBufferSize> rx_buffer_{};

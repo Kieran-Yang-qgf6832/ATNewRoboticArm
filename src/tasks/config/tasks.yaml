@@ -100,16 +100,16 @@ box_move:
   max_age: 0.5
 
 # 交互输入的门禁（joint_console 专用）：超限只提示重输，一个运动指令都不下发。
-# 单位是**度**，抄自 arm_model/model/robotic_arm.urdf 的 <limit>（弧度换成度）：
+# 单位是**度**，抄自 arm_model/model_4dof/robotic_arm.urdf 的 <limit>（弧度换成度）：
 #   换模型时这里必须同步，否则拦的是旧限位。整段可省略 = 不检查。
 joint_limits:
   # 单步允许的最大关节变化量；0 = 不限制。
   max_step_deg: 90.0
   joints:
-    joint1: {min: -103.1, max: 103.1}   # URDF ±1.8 rad
-    joint2: {min: -90.0,  max:  90.0}   # URDF ±1.5708 rad
-    joint3: {min: -166.2, max: 166.2}   # URDF ±2.9 rad
-    joint4: {min: -114.6, max: 103.1}   # URDF -2.0 .. +1.8 rad
+    joint1: {min: -90.0,  max:  90.0}   # URDF ±1.5708 rad
+    joint2: {min: -177.6, max: 177.6}   # URDF ±3.1 rad
+    joint3: {min: -179.9, max: 179.9}   # URDF ±3.14 rad
+    joint4: {min: -90.0,  max:  90.0}   # URDF ±1.5708 rad
 
 sequences:
   # 导纳演示（docs/bugs.md O22）：不带 offset = **自由导纳**。

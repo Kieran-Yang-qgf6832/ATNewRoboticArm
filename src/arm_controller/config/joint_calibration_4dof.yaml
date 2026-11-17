@@ -1,0 +1,23 @@
+# 4 轴实机关节标定表（由 ArmRealInterfaces 在 on_init 读取）
+#
+# 换算关系：
+#   q_urdf = dir * (q_raw - zero)
+#   q_raw  = zero + dir * q_urdf          （下发时用这条逆映射）
+#
+# q_raw 是固件上报的弧度值，它已经包含固件内部的 inv_motor 与 pos_offset，
+# 与 URDF 的 SolidWorks 零位没有任何共同基准，必须现场实测：
+#   1. 用 joint_calibrate 工具逐关节点动，确认 dir（+1 / -1）；
+#   2. 把机械臂摆到 URDF 的零位，读 /joint_states 得到 q_raw，令 zero = q_raw。
+#
+# 下面全部是占位值（dir = 1、zero = 0，等同直接透传）。未标定完之前不要下发
+# 绝对关节角目标，否则会在错误方向上满力矩运动。
+#
+# 只写前 4 个关节：本文件对应 model_4dof/robotic_arm.urdf（motor_count=4），
+# MCU 帧的第 5/6 槽不参与收发（见 arm_real_interfaces.cpp 的 write()）。
+# 6 轴旧硬件用同目录的 joint_calibration.yaml。
+
+joints:
+  joint1: {dir: 1.0, zero: 0.0}
+  joint2: {dir: 1.0, zero: 0.0}
+  joint3: {dir: 1.0, zero: 0.0}
+  joint4: {dir: 1.0, zero: 0.0}

@@ -55,20 +55,44 @@ hardware_interface::CallbackReturn ArmRealInterfaces::on_init(const hardware_int
         joint_names_.push_back(joint.name);
     }
 
-    // MCU 通信帧长度固定为 kProtocolMotorCount。数量不符时，收发循环会越界读写
-    // commands_ / received_states_，把垃圾数据当指令发给电机（docs/bugs.md O3）。
-    // 这里直接拒绝启动，而不是靠截断把问题藏起来。
-    if (joint_names_.size() != kProtocolMotorCount) {
+    // MCU 通信帧固定 kProtocolMotorCount 个槽。关节数超过槽数时收发循环会越界，
+    // 这里直接拒绝启动，而不是靠截断把问题藏起来（docs/bugs.md O3）。
+    if (joint_names_.empty() || joint_names_.size() > kProtocolMotorCount) {
         RCLCPP_ERROR(
             rclcpp::get_logger("arm_real_interfaces"),
-            "URDF 声明了 %zu 个关节，但 MCU 通信帧固定为 %zu 个电机，拒绝启动。",
+            "URDF 声明了 %zu 个关节，MCU 通信帧只有 %zu 个电机槽，拒绝启动。",
             joint_names_.size(),
             kProtocolMotorCount);
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    // 实际参与的槽数：4 轴硬件 4 个电机，6 轴旧硬件 5 个（joint6 无电机、机械锁死）。
+    // 缺省等于关节数；不允许超过关节数——多出来的槽位没有可下发的目标。
+    motor_count_ = joint_names_.size();
+    const auto motor_count_it = hardware_info.hardware_parameters.find("motor_count");
+    if (motor_count_it != hardware_info.hardware_parameters.end()) {
+        try {
+            const long parsed = std::stol(motor_count_it->second);
+            if (parsed <= 0 || static_cast<std::size_t>(parsed) > joint_names_.size()) {
+                RCLCPP_ERROR(
+                    rclcpp::get_logger("arm_real_interfaces"),
+                    "motor_count=\"%s\" 非法：须在 1..%zu（URDF 关节数）之间。",
+                    motor_count_it->second.c_str(),
+                    joint_names_.size());
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            motor_count_ = static_cast<std::size_t>(parsed);
+        } catch (const std::exception& error) {
+            RCLCPP_ERROR(
+                rclcpp::get_logger("arm_real_interfaces"), "motor_count=\"%s\" 无法解析（%s）。",
+                motor_count_it->second.c_str(), error.what());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+    }
+
     states_.assign(joint_names_.size(), JointStateData{});
-    received_states_.assign(joint_names_.size(), JointStateData{});
+    // 固定 6 槽：帧里每个槽位都要留位置，未映射的槽位靠它做「保持不动」。
+    received_states_.assign(kProtocolMotorCount, JointStateData{});
     commands_.assign(joint_names_.size(), JointCommandData{});
 
     // loopback 与掉线超时都写在 URDF 的 <hardware><param> 里。
@@ -114,12 +138,18 @@ hardware_interface::CallbackReturn ArmRealInterfaces::on_init(const hardware_int
 
     RCLCPP_INFO(
         rclcpp::get_logger("arm_real_interfaces"),
-        "Configured ArmRealInterfaces for %zu joints (loopback=%s, state_timeout=%lld ms).",
-        joint_names_.size(), loopback_ ? "true" : "false", static_cast<long long>(state_timeout_.count()));
-    for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
+        "Configured ArmRealInterfaces for %zu joints, %zu motors (loopback=%s, state_timeout=%lld ms).",
+        joint_names_.size(), motor_count_, loopback_ ? "true" : "false",
+        static_cast<long long>(state_timeout_.count()));
+    for (std::size_t i = 0; i < motor_count_; ++i) {
         RCLCPP_INFO(
             rclcpp::get_logger("arm_real_interfaces"), "  %s: dir=%+.3f zero=%+.6f",
-            i < joint_names_.size() ? joint_names_[i].c_str() : "?", calib_dir_[i], calib_zero_[i]);
+            joint_names_[i].c_str(), calib_dir_[i], calib_zero_[i]);
+    }
+    for (std::size_t i = motor_count_; i < joint_names_.size(); ++i) {
+        RCLCPP_INFO(
+            rclcpp::get_logger("arm_real_interfaces"),
+            "  %s: 无电机（MCU 帧第 %zu 槽不驱动），状态按指令回写", joint_names_[i].c_str(), i + 1);
     }
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -141,8 +171,11 @@ bool ArmRealInterfaces::load_calibration(const std::string& path) {
         return false;
     }
 
-    for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
-        const std::string name = "joint" + std::to_string(i + 1);
+    // 只有前 motor_count_ 个关节参与收发，必须提供 dir/zero。
+    // 无电机关节（i >= motor_count_）不参与收发，缺项不影响运动。
+    for (std::size_t i = 0; i < motor_count_; ++i) {
+        // 关节名以 URDF 为准；标定表的键必须与 <joint name> 一致。
+        const std::string& name = joint_names_[i];
         const YAML::Node entry = joints[name];
         if (!entry || !entry.IsMap()) {
             RCLCPP_ERROR(
@@ -173,9 +206,22 @@ bool ArmRealInterfaces::load_calibration(const std::string& path) {
         }
     }
 
-    const YAML::Node joint6 = root["joint6"];
-    if (joint6 && joint6["fixed"]) {
-        joint6_fixed_ = joint6["fixed"].as<double>(0.0);
+    // 无电机关节：可选的 fixed 名义角（旧 6 轴模型的 joint6）。
+    // 支持写在 joints 段内，也兼容旧文件的顶层写法。
+    for (std::size_t i = motor_count_; i < joint_names_.size(); ++i) {
+        const std::string& name = joint_names_[i];
+        YAML::Node entry = joints[name];
+        if (!entry) {
+            entry = root[name];
+        }
+        if (entry && entry["fixed"]) {
+            try {
+                fixed_joint_position_[i] = entry["fixed"].as<double>();
+            } catch (const std::exception& error) {
+                RCLCPP_WARN(
+                    rclcpp::get_logger("arm_real_interfaces"), "解析 %s 的 fixed 失败：%s", name.c_str(), error.what());
+            }
+        }
     }
 
     return true;
@@ -235,6 +281,8 @@ hardware_interface::CallbackReturn ArmRealInterfaces::on_cleanup(const rclcpp_li
     cdc_event_thread_.reset();
     cdc_.reset();
     event_thread_running = true;
+    // 重新 configure 后必须再等到第一帧状态才允许下发指令。
+    has_received_state_.store(false);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -304,9 +352,10 @@ hardware_interface::return_type ArmRealInterfaces::read(const rclcpp::Time& time
         return hardware_interface::return_type::ERROR;
     }
 
-    // 有电机的前 5 轴：把固件原始角度换算到 URDF 坐标系（q_urdf = dir * (q_raw - zero)）。
-    // 力矩与角速度同步乘 dir，保证上行的 effort/velocity 与角度在同一套符号下。
-    const auto driven_count = std::min({states_.size(), received_states_.size(), kDrivenJointCount});
+    // 前 motor_count_ 个关节有电机：把固件原始角度换算到 URDF 坐标系
+    // （q_urdf = dir * (q_raw - zero)）。力矩与角速度同步乘 dir，保证上行
+    // effort/velocity 与角度在同一套符号下。
+    const auto driven_count = std::min({states_.size(), received_states_.size(), motor_count_});
     for (std::size_t i = 0; i < driven_count; ++i) {
         const double direction = calib_dir_[i];
         states_[i].position = direction * (received_states_[i].position - calib_zero_[i]);
@@ -315,15 +364,14 @@ hardware_interface::return_type ArmRealInterfaces::read(const rclcpp::Time& time
         states_[i].acceleration = 0.0;
     }
 
-    // joint6 无电机、机械锁死：固件那一槽永远是 0，既不能读也不能写。
-    // 这里直接把状态回写成指令值，让所有 6 维到位判据（reset/joint_traj）自洽；
-    // 代价是 /joint_states 里 joint6 是“镜像值”，不是实测——它不参与 5 维任务空间。
-    if (states_.size() > kDrivenJointCount && commands_.size() > kDrivenJointCount) {
-        const std::size_t last           = kDrivenJointCount;
-        states_[last].position           = commands_[last].position;
-        states_[last].velocity           = 0.0;
-        states_[last].effort             = 0.0;
-        states_[last].acceleration       = 0.0;
+    // 无电机关节（仅 6 轴旧模型的 joint6）：固件那一槽永远是 0，既不能读也不能写。
+    // 这里把状态回写成指令值，让到位判据自洽；代价是 /joint_states 里它是
+    // “镜像值”而不是实测，因此它不能参与任务空间。
+    for (std::size_t i = motor_count_; i < states_.size() && i < commands_.size(); ++i) {
+        states_[i].position     = commands_[i].position;
+        states_[i].velocity     = 0.0;
+        states_[i].effort       = 0.0;
+        states_[i].acceleration = 0.0;
     }
 
     return hardware_interface::return_type::OK;
@@ -341,21 +389,42 @@ hardware_interface::return_type ArmRealInterfaces::write(const rclcpp::Time& tim
         return hardware_interface::return_type::ERROR;
     }
 
+    // 未收到任何状态前不发帧：各槽位的实际角度还未知，把 pack{} 里的 0 发出去
+    // 等于命令电机冲向固件零位。等第一帧状态到达后再开始下发。
+    if (!has_received_state_.load()) {
+        static rclcpp::Clock throttle_clock(RCL_STEADY_TIME);
+        RCLCPP_WARN_THROTTLE(
+            rclcpp::get_logger("arm_real_interfaces"), throttle_clock, 2000,
+            "尚未收到 MCU 状态包，暂不下发指令。");
+        return hardware_interface::return_type::OK;
+    }
+
     MCUTargetPack pack{};
     pack.pack_type = 0x01;
 
-    // 只发有电机的前 5 轴，且把 URDF 关节角换算回固件坐标系（write 是 read 的逆映射）：
-    //   q_raw = zero + dir * q_urdf
-    // kp/kd/ki 不上总线：固件用的是自己的双闭环 PID，增益硬编码在 Task_Init.c。
-    const auto driven_count = std::min(commands_.size(), kDrivenJointCount);
-    for (std::size_t i = 0; i < driven_count; ++i) {
-        const double direction = calib_dir_[i];
-        pack.joint[i].rad   = static_cast<float>(calib_zero_[i] + direction * commands_[i].position);
-        pack.joint[i].omega = static_cast<float>(direction * commands_[i].velocity);
-        pack.joint[i].torque = static_cast<float>(direction * commands_[i].effort);
+    {
+        std::lock_guard<std::mutex> lock(received_states_mutex_);
+
+        // 有电机的槽位：URDF 关节角换算回固件坐标系（write 是 read 的逆映射）：
+        //   q_raw = zero + dir * q_urdf
+        // kp/kd/ki 不上总线：固件用的是自己的双闭环 PID，增益硬编码在 Task_Init.c。
+        for (std::size_t i = 0; i < motor_count_ && i < commands_.size(); ++i) {
+            const double direction = calib_dir_[i];
+            pack.joint[i].rad    = static_cast<float>(calib_zero_[i] + direction * commands_[i].position);
+            pack.joint[i].omega  = static_cast<float>(direction * commands_[i].velocity);
+            pack.joint[i].torque = static_cast<float>(direction * commands_[i].effort);
+        }
+
+        // 没有 URDF 关节的槽位（4 轴硬件的第 5/6 槽）：回填实测原始角度，速度/力矩给 0，
+        // 让它们原地不动。固件坐标系的角度不需要再做 dir/zero 换算。
+        for (std::size_t i = motor_count_; i < kProtocolMotorCount; ++i) {
+            pack.joint[i].rad    = static_cast<float>(received_states_[i].position);
+            pack.joint[i].omega  = 0.0f;
+            pack.joint[i].torque = 0.0f;
+        }
     }
 
-    // joint[5] 保持 0（固件不读该槽）；气泵本次不接，恒发 0；worked 恒 0。
+    // 气泵本次不接，恒发 0；worked 恒 0。
     pack.air_pump = 0;
     pack.worked   = 0;
 
@@ -395,8 +464,10 @@ void ArmRealInterfaces::on_pack_praser(const uint8_t* data, int size) {
 
     // ---- 2. 定长切帧 ----
     constexpr std::size_t kFrameSize = sizeof(MCUStatePack);
-    const auto plausible             = [](const MCUStatePack& candidate) {
-        for (std::size_t i = 0; i < kDrivenJointCount; ++i) {
+    const auto plausible             = [this](const MCUStatePack& candidate) {
+        // 只检查有电机的槽位：4 轴硬件的第 5/6 槽、6 轴硬件的第 6 槽都不驱动，
+        // 拿它们做量级判断会把正常帧误判成错位。
+        for (std::size_t i = 0; i < motor_count_; ++i) {
             const MotorPack& motor = candidate.joint[i];
             if (!std::isfinite(motor.rad) || !std::isfinite(motor.omega) || !std::isfinite(motor.torque)) {
                 return false;
@@ -423,8 +494,14 @@ void ArmRealInterfaces::on_pack_praser(const uint8_t* data, int size) {
 
         {
             std::lock_guard<std::mutex> lock(received_states_mutex_);
-            const auto joint_count = std::min(received_states_.size(), kDrivenJointCount);
-            for (std::size_t i = 0; i < joint_count; ++i) {
+            // 帧里每个槽位都存下来：write() 要给没有 URDF 关节的槽位回填实测值，
+            // 让它们原地不动。未映射槽位不参与 plausible() 校验，因此这里跳过
+            // 非有限值（悬空槽位可能是任意噪声）。
+            const auto slot_count = std::min(received_states_.size(), kProtocolMotorCount);
+            for (std::size_t i = 0; i < slot_count; ++i) {
+                if (i >= motor_count_ && !std::isfinite(pack.joint[i].rad)) {
+                    continue;
+                }
                 // 这里存**原始**固件角度，dir/zero 换算在 read() 里做。
                 received_states_[i].position = pack.joint[i].rad;
                 received_states_[i].velocity = pack.joint[i].omega;
@@ -433,6 +510,7 @@ void ArmRealInterfaces::on_pack_praser(const uint8_t* data, int size) {
                 received_states_[i].acceleration = 0.0;
             }
             last_state_time_ = std::chrono::steady_clock::now();
+            has_received_state_.store(true);
         }
 
         std::memmove(rx_buffer_.data(), rx_buffer_.data() + kFrameSize, rx_len_ - kFrameSize);

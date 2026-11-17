@@ -112,6 +112,9 @@
       <param name="loopback">$(arg loopback)</param>
       <!-- 超过该时长没收到 MCU 状态包就返回 ERROR，让 controller_manager 停控制器。 -->
       <param name="state_timeout_ms">100</param>
+      <!-- 实际驱动的电机数：这一代硬件末端回转 joint6 无电机、机械锁死，只有 5 个。
+           MCU 帧固定 6 槽，第 6 槽不参与收发。 -->
+      <param name="motor_count">5</param>
       <!-- 关节标定表：q_urdf = dir * (q_raw - zero)。固件零位与 URDF 的 SolidWorks
            零位没有共同基准，必须现场标定；未标定时文件里是 dir=1/zero=0 的占位值。 -->
       <param name="joint_calibration_file">$(find arm_controller)/config/joint_calibration.yaml</param>

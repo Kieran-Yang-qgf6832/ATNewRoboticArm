@@ -1,0 +1,24 @@
+# Checklist
+
+- [x] `WaypointTrajCmd.msg` 已定义并构建成功，字段包含 `space`、`total_duration`、`Vector[] waypoints`
+- [x] 规划器对 2–9 个节点均能生成轨迹；起点与终点的速度、加速度、jerk 全部为 0
+- [x] 内部路点处左右两段的位置、速度、加速度、jerk 一致（解析校验 ≤ 1e-9）
+- [x] 中间路点速度非零、轨迹不在路点停顿（除单路点退化情形）
+- [x] 时间分配在未写 `duration` 时自动完成，采样后的关节速度/加速度/jerk 不超过配置限位
+- [x] `duration` 覆盖生效：总时长等于用户值；小于自动最短时长时整条轨迹被拒绝
+- [x] 位置过冲超出关节限位时整条轨迹被拒绝，日志指出关节与越界位置
+- [x] `multi_traj_max_vel` / `multi_traj_max_acc` / `multi_traj_max_jerk` 已 `auto_declare`，构造期生效值打日志，速度与 URDF `velocity` 取 min
+- [x] `joint_traj` 状态能接收 `/arm_joint_waypoints` 并执行，原 `JointTrajCmd` 路径行为不变
+- [x] `cart_traj` 状态能接收 `/arm_cart_waypoints`，逐点 IK 种子策略正确（首点实测、后续前一解）
+- [x] `real_mode=true` 时 `cart_waypoints` 在下发任何运动前被拒绝，`joint_waypoints` 正常允许
+- [x] 路点数 0 或 >8、路点维度错误在任务层配置加载阶段报错，错误信息含实际数量/下标
+- [x] 任一 IK 失败、限位越界或时长不可行时机械臂零运动，控制器回到 `idel`，任务步骤失败并给出原因
+- [x] `joint_waypoints` / `cart_waypoints` 两个步骤类型已加入步骤表与字段白名单，现有步骤类型解析不受影响
+- [x] YAML 中 `waypoints`、可选 `duration`、可选 `tolerance` 能正确解析并下发
+- [x] `tasks.yaml` 含关节 1..8 路点共 8 条、笛卡尔 1..8 路点共 8 条验证序列
+- [x] 离线 `waypoint_planner_test` 对 1..8 个用户路点全部通过
+- [x] 仿真中 8 条关节序列全部退出码 0，`waypoint_check` 通过（路点误差 ≤ 0.01 rad）
+- [x] 仿真中 8 条笛卡尔序列全部退出码 0，`waypoint_check` 通过（终点位置误差 ≤ 5 mm）
+- [x] 全部 16 条序列中无关节限位越界，速度/加速度/jerk 无超过配置限位 10% 的尖峰
+- [x] `CLAUDE.md` 已补充新步骤类型、新参数、路点语义与验收入口
+- [x] 原有 `joint_move` / `cart_move` / `pos_move` / `box_move` 序列回归通过，行为与改动前一致

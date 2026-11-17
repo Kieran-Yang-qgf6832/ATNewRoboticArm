@@ -3,11 +3,11 @@
 @brief 实机链路（控制器层）：USB CDC 硬件接口 + ArmController + 状态广播
 
 启动内容：
-  1. robot_state_publisher  ：xacro 展开 arm_model/model/robotic_arm.urdf（hardware:=real）
-                              后发布 /arm_robot_description 与 TF
+  1. robot_state_publisher  ：xacro 展开 arm_model/model_4dof/robotic_arm.urdf
+                              （hardware:=real，4 关节）后发布 /arm_robot_description 与 TF
   2. ros2_control_node      ：controller_manager + ArmRealInterfaces 硬件插件
   3. joint_state_broadcaster：发布 /joint_states
-  4. arm_controller         ：状态机控制器，命令直接写 MCU（MIT 阻抗模式）
+  4. arm_controller         ：状态机控制器，命令直接写 MCU（固件自己的位置/速度双环）
   5. rosbag2                ：录制关节命令与关节状态（record_bag:=false 关闭），
                               见 arm_bag_record.launch.py
   6. rviz2                  ：show_rviz:=true 时启动
@@ -28,12 +28,15 @@
 
 @note 任务层不在这里启动。task_runner 需要 TF 与 /joint_states，确认控制器激活后
       再单独启动。
+@note 当前阶段只验收**关节控制**（idel / joint_traj / joint_move）：4 轴实机的
+      笛卡尔链路（pos_move / cart_traj）尚未做闭环验证，先不要用。
 @note 默认录制 /joint_states（下位机回报）与 /arm_controller/joint_command（上位机下发的
      每周期命令）。实机上 bag 的时间戳是系统时间，与消息 header.stamp 一致。
 @warning 实机不支持 measure：MCU 不上报加速度，acc_* 列恒 0，辨识结果不可用。
 """
 
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
@@ -52,7 +55,43 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterFile, ParameterValue
 
 
+def _find_stale_controller_manager():
+    """检查同一 domain 里是否已有 /controller_manager。
+
+    上一次 launch 的 ros2_control_node 没退出时，两个同名进程会同时应答
+    /controller_manager 的服务：spawner 的 list_controllers 被旧进程接走（报
+    "Controller already loaded"），configure 落到新进程（报 "no controller with
+    this name exists"），两个 spawner 都以 1 退出——而 launch 照旧启动 RViz，
+    看起来像成功了。这里在启动前拦住。
+
+    @return 失败原因；没有冲突时返回 None。
+    """
+    try:
+        result = subprocess.run(
+            ["ros2", "node", "list", "--no-daemon"],
+            capture_output=True,
+            text=True,
+            timeout=8.0,
+            env=os.environ,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return f"无法查询已有 ROS 节点（{error}），跳过残留检查"
+
+    if any(line.strip() == "/controller_manager" for line in result.stdout.splitlines()):
+        return (
+            "检测到已有 /controller_manager 在运行（上一次 launch 的 ros2_control_node "
+            "可能没有退出）。同名进程会让 spawner 在「已加载」与「不存在」之间错乱并静默失败。"
+            "先执行 `ros2 node list`，确认没有残留后重试。"
+        )
+    return None
+
+
 def generate_launch_description():
+    stale_manager = _find_stale_controller_manager()
+    if stale_manager is not None:
+        # 不启动任何节点：宁可拒绝启动，也不要让用户在不知道的情况下跑在别人的控制器上。
+        return LaunchDescription([LogInfo(msg=f"[拒绝启动] {stale_manager}"), Shutdown(reason=stale_manager)])
+
     arm_model_share = get_package_share_directory("arm_model")
     launch_pack_share = get_package_share_directory("launch_pack")
 
@@ -190,6 +229,36 @@ def generate_launch_description():
         output="screen",
     )
 
+    def on_joint_state_broadcaster_exit(event, context):
+        """joint_state_broadcaster spawner 退出：失败就整体停机，不要继续起 RViz。"""
+        del context
+        if event.returncode != 0:
+            return [
+                LogInfo(
+                    msg="[失败] joint_state_broadcaster 没有加载/配置成功（spawner 退出码 "
+                    f"{event.returncode}）。若日志里是 “already loaded” + “no controller with this name”，"
+                    "说明还有残留的 /controller_manager 在应答，先把旧进程停掉。"
+                ),
+                Shutdown(reason="joint_state_broadcaster spawner failed"),
+            ]
+        return [
+            LogInfo(msg="joint_state_broadcaster spawned, spawning arm_controller"),
+            arm_controller,
+        ]
+
+    def on_arm_controller_exit(event, context):
+        """arm_controller spawner 退出：失败同样停机，避免“launch 在跑但控制器没激活”。"""
+        del context
+        if event.returncode != 0:
+            return [
+                LogInfo(
+                    msg="[失败] arm_controller 没有激活（spawner 退出码 "
+                    f"{event.returncode}），本次 launch 不提供任何控制能力，已停止。"
+                ),
+                Shutdown(reason="arm_controller spawner failed"),
+            ]
+        return [LogInfo(msg="arm_controller 已激活")]
+
     load_joint_state_broadcaster = RegisterEventHandler(
         OnProcessStart(
             target_action=ros2_control_node,
@@ -201,13 +270,11 @@ def generate_launch_description():
     )
 
     load_arm_controller = RegisterEventHandler(
-        OnProcessExit(
-            target_action=joint_state_broadcaster,
-            on_exit=[
-                LogInfo(msg="joint_state_broadcaster spawned, spawning arm_controller"),
-                arm_controller,
-            ],
-        )
+        OnProcessExit(target_action=joint_state_broadcaster, on_exit=on_joint_state_broadcaster_exit)
+    )
+
+    check_arm_controller = RegisterEventHandler(
+        OnProcessExit(target_action=arm_controller, on_exit=on_arm_controller_exit)
     )
 
     loopback_hint = LogInfo(
@@ -230,6 +297,7 @@ def generate_launch_description():
             bag_record,
             load_joint_state_broadcaster,
             load_arm_controller,
+            check_arm_controller,
             rviz2,
         ]
     )
