@@ -4,7 +4,7 @@ title: arm_real.launch.py 指向 4 轴模型但 URDF 没有 real 分支，实机
 severity: 高
 status: 已修
 date: 2026-11-16 2145
-commit: —
+commit: 8974055
 ---
 
 # O24 arm_real.launch.py 指向 4 轴模型但 URDF 没有 real 分支，实机链路静默跑成 MuJoCo 仿真【高】

@@ -144,10 +144,11 @@ add_executable(arm_real_joint_count_test tools/arm_real_joint_count_test.cpp)
 target_link_libraries(arm_real_joint_count_test arm_controller)
 ament_target_dependencies(arm_real_joint_count_test rclcpp hardware_interface)
 
-# 实机单关节点动标定：确认 joint_calibration.yaml 里的 dir/zero。同样不安装。
+# 实机单关节点动标定：确认标定 YAML 里的 dir/zero；print_zero 模式直接生成片段。
+# 关节数从 /joint_states 自动识别（4 轴 / 6 轴共用），标定表用 yaml-cpp 解析。同样不安装。
 add_executable(joint_calibrate tools/joint_calibrate.cpp)
-target_link_libraries(joint_calibrate arm_controller)
-ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces)
+target_link_libraries(joint_calibrate arm_controller yaml-cpp::yaml-cpp)
+ament_target_dependencies(joint_calibrate rclcpp sensor_msgs robot_msgs rcl_interfaces ament_index_cpp yaml_cpp_vendor)
 
 install(
   FILES

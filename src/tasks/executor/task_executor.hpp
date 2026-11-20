@@ -145,10 +145,10 @@ private:
      * @brief 执行 box_move：读取视觉目标面 TF，移动到箱体位姿
      *
      * 目标来源为 @c frame（默认 target_face）在基座系下的 TF，并同时检查
-     * TargetFace 消息的 valid 与时间戳新鲜度。5 维模式（位置 + 工具 z 轴）优先：
-     * link6 原点 = 面心 - tool_offset * 面 z，使工具尖端落在面心。
+     * TargetFace 消息的 valid 与时间戳新鲜度。位姿模式（位置 + 工具 z 轴）优先：
+     * 末端原点 = 面心 - tool_offset * 面 z，使工具尖端落在面心。
      * 若控制器预检在未运动时拒绝，则自动回退为 position-only（目标仍为同一
-     * link6 位置，姿态不约束）；回退成功时步骤成功并上报告警。
+     * 末端位置，姿态不约束）；回退成功时步骤成功并上报告警。
      */
     bool run_box_move(const Step& step, std::string* error);
 

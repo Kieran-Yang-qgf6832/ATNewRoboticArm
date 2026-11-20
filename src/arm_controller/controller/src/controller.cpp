@@ -77,7 +77,7 @@ constexpr double kJointLimitFaultSlack = 0.05;
 namespace {
 
 /// 实机模式下不可用的状态：teach 依赖「kp = 0 + 纯阻尼」，而 MCU 只跑自己的位置环；
-/// measure 需要关节加速度与 joint6 激励，而 MCU 既不上报加速度、joint6 也没有电机。
+/// measure 需要关节加速度，而 MCU 不上报加速度（acc_* 恒 0，辨识结果不可用）。
 bool state_unavailable_on_real(const std::string& state_name) {
     return state_name == "teach_pendant" || state_name == "measure";
 }
@@ -191,9 +191,6 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
     auto_declare<double>("measure_traj_collision_safe_distance", 0.0);
     auto_declare<double>("measure_traj_ground_clearance", 0.0);
-    // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
-    // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
-    auto_declare<int>("task_dim", 6);
     // pos_move（只约束末端位置）的求解参数。构造阶段读取，改 yaml 必须重启控制器（C6）。
     //   tolerance：position-only 的纯位置收敛判据（米），与 6 维「米+弧度」混合范数分开；
     //   nullspace_weight：零空间「就近」偏好权重，0 = 关闭；
@@ -576,7 +573,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     if (real_mode_ && state_unavailable_on_real(exp_state)) {
         // YAML 里配错时不能静默降级成别的行为，直接拒绝并把期望状态拉回 idel。
         RCLCPP_ERROR(
-            node->get_logger(), "实机模式不支持 exp_state=%s（MCU 无阻抗增益/加速度反馈，joint6 无电机），已改为 idel。",
+            node->get_logger(), "实机模式不支持 exp_state=%s（MCU 无阻抗增益/加速度反馈），已改为 idel。",
             exp_state.c_str());
         exp_state = "idel";
     }

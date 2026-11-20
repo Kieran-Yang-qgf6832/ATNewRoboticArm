@@ -64,9 +64,13 @@ tool:
 points:
   home:      [0.0, 0.0,  0.0, 0.0]
   ready:     [0.8, 1.2, -1.2, 0.8]
-  above_box: [0.2, 0.4, -0.4, 0.2]
-  # 视觉抓取（box_move）的粗定位点：4 轴下要按实际箱体位置用 joint_console 重新摆位，
-  # 原 6 轴的 box_pregrasp / box_low_pregrasp 是 6 维关节角，不能直接用。
+  # 视觉抓取（box_move）的粗定位点：末端落在 (0.177, 0.010, 0.425)，即视觉场景
+  # （model_4dof/scene_vision.xml）里目标面心外 7 cm、正上方 25 cm。这组角是 IK 在
+  # 无碰撞分支里解出来的：25 个随机种子里 28 组无碰撞解之一，且 reset → above_box →
+  # 目标面的关节空间插值与 Cartesian 段全程无碰撞（离线 mujoco 校验）。
+  # 抬到 25 cm 而不是 15 cm：15 cm 时 link3/link4 的投影会压住箱体像框，
+  # 25 cm 时手臂完全在箱体像框之外，检测不受遮挡。
+  above_box: [0.75, 2.05, -1.44, -1.16]
 
 # 基座系绝对目标点（pos_move 专用，单位：米）。只存 [x, y, z]，与上面 points 的
 # 6 维关节角不是一回事。下面两个值由 fk_dump 在 ready 位形实测：
@@ -89,13 +93,16 @@ position_move:
 
 # box_move 的全局默认。
 # frame：视觉目标帧名，必须与 /target_face 消息的 child_frame_id 一致；
-# tool_offset：link6 +z 到工具尖端的距离（米）。5D 目标位置 = 面心 - tool_offset * 面 z，
-#   即工具尖端落在面心；回退到 position-only 时仍用同一个 link6 位置。
+# tool_offset：末端 frame 原点沿面法线**向外**的驻点距离（米）。目标位置 = 面心 + 该值 × 外法线。
+#   4 轴下取 0.07 = link4 工具沿 +z 的最远点（网格实测 0.062 m），于是工具尖离面约 8 mm；
+#   这个值同时决定「末端原点能否落进可达带」：末端 link4 的 y 只能到 -0.0126~+0.0274，
+#   所以可见面的 y 只能落在 0.057~0.097，取 0.07 正好居中。position-only 下工具尖
+#   是否真的贴面不作保证（姿态不受控），验收看的是末端位置残差。
 # target_timeout：等待 valid 目标的最长时间（秒）。
 # max_age：TargetFace 与 TF 时间戳允许的最大年龄（秒）；防止视觉节点卡住时用旧目标。
 box_move:
   frame: target_face
-  tool_offset: 0.039
+  tool_offset: 0.07
   target_timeout: 5.0
   max_age: 0.5
 
@@ -310,7 +317,7 @@ sequences:
   #   1) ready -> below_ready_5cm，四元数取 ready 姿态 -> 只动位置、工具方向不变；
   #   2) below_ready_5cm -> ready_pos，目标 z 轴从 ready 方向再抬高 15°
   #      （[-0.0183, 0, 0, 0.99983] 的 z 轴 = [0, 0.0366, 0.9993]）。
-  # 两个目标都已用 ik_solve --axis 离线验证（5 维模式收敛，位置残余 < 1e-4 m）。
+  # 两个目标都已用 ik_solve --axis 离线验证（工具轴模式下收敛，位置残余 < 1e-4 m）。
   pos_axis_demo:
     steps:
       - {type: reset}
@@ -319,23 +326,13 @@ sequences:
       - {type: pos_move, to: ready_pos, orientation: [-0.018302957, 0.0, 0.0, 0.999832487], duration: 2.0}
       - {type: idel}
 
-  # box_move 演示：需要视觉场景（仿真相机 + 红色箱子）。
-  # 抬高场景（scene_vision_raised.xml）里 5D 目标可达；先用 joint_move 到
-  # above_box 做粗定位，再由 box_move 走最后约 10 cm（4 轴下只控位置）并读取 TF 修正。
+  # box_move 演示：需要视觉场景（model_4dof/scene_vision.xml：固定相机 + 45° 红箱）。
+  # 4 轴是 2R 平面臂，末端原点只能落在 y≈0 的平面里，所以只能抓法线朝相机侧的
+  # 那个侧面（-X' 面，法线 (-0.707, -0.707, 0)）；先用 joint_move 到 above_box
+  # 粗定位，再由 box_move 竖直下降 25 cm 到「面心外 7 cm」的驻点（position-only）。
   box_move_demo:
     steps:
       - {type: reset}
       - {type: joint_move, to: above_box, duration: 4.0}
       - {type: box_move, duration: 2.0}
-      - {type: idel}
-
-  # 低处回退验证：原 scene_vision.xml（箱体/相机 z≈0.175）。
-  # 4 轴下 box_move 恒为 position-only；低处目标已接近该臂
-  # 的实际可达边界，实测残差约 1.2 cm，所以这里把位置容差放宽到 2 cm。
-  # 若位置也超出容差，步骤会失败（退出码 1），日志里能看到回退原因和残差。
-  box_move_low:
-    steps:
-      - {type: reset}
-      - {type: joint_move, to: above_box, duration: 6.0}
-      - {type: box_move, duration: 4.0, tolerance: 0.02}
       - {type: idel}

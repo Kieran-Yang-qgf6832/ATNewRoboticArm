@@ -7,7 +7,7 @@ URDF 实际 41.8%）。判断一个 URDF 能不能用，必须拿它自己正演
 
 用法：
     python3 verify_torque.py --urdf out.urdf --csv train.csv [--csv test.csv ...]
-                             [--reference src/arm_model/model/robotic_arm.urdf]
+                             [--reference src/arm_model/model_4dof/robotic_arm.urdf]
 
 输出（对每份 CSV）：
   - 逐关节 + 总体的 平均/最大 相对误差   ‖tau_pred - tau_meas‖ / ‖tau_meas‖

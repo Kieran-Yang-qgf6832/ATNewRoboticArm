@@ -3,7 +3,7 @@
 @brief 参数辨识（measure）专用场景：一条命令完成「起仿真 → 跑测量 → 落 CSV」
 
 启动内容（按实际启动顺序）：
-  1. robot_state_publisher  ：xacro 展开 arm_model/model/robotic_arm.urdf，发布
+  1. robot_state_publisher  ：xacro 展开 arm_model/model_4dof/robotic_arm.urdf，发布
                               /arm_robot_description 与 TF（话题名不是标准名，原因见 O4）
   2. mujoco_ros2_control    ：ros2_control_node，MuJoCo 以 SystemInterface 插件运行
   3. joint_state_broadcaster：发布 /joint_states
@@ -38,7 +38,7 @@
 后续离线辨识：
     ros2 run parameter_identify identify_arm \\
         --csv <项目根目录>/measured_for_identification.csv \\
-        --urdf src/arm_model/model/robotic_arm.urdf \\
+        --urdf src/arm_model/model_4dof/robotic_arm.urdf \\
         --output /tmp/robotic_arm_identified.urdf \\
         --config src/parameter_identify/config/identify.yaml \\
         --report /tmp/robotic_arm_identify_report.yaml

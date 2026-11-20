@@ -142,7 +142,7 @@ double quaternion_angle_deg(const std::vector<double>& a, const std::vector<doub
     return 2.0 * std::acos(std::min(1.0, dot)) / kDegToRad;
 }
 
-/// @return link6 的 z 轴方向（基座系）；调用方保证四元数已归一化。
+/// @return 末端的 z 轴方向（基座系）；调用方保证四元数已归一化。
 tf2::Vector3 tool_axis_from_quaternion(const tf2::Quaternion& orientation) {
     tf2::Vector3 axis = tf2::Matrix3x3(orientation) * tf2::Vector3(0.0, 0.0, 1.0);
     axis.normalize();
@@ -1711,8 +1711,8 @@ bool TaskExecutor::run_box_move(const Step& step, std::string* error) {
     q_face.normalize();
     const tf2::Vector3 face_axis = tool_axis_from_quaternion(q_face);
 
-    // 5 维目标：link6 原点沿面法线后退 tool_offset，使工具尖端落在面心；
-    // 姿态只取面坐标系的 +Z，滚转由控制器投影放开。
+    // 位姿目标：末端原点沿面法线后退 tool_offset，使工具尖端落在面心；
+    // 姿态只取面坐标系的 +Z，滚转由控制器投影放开（4 轴下 orientation 不参与收敛）。
     Step resolved = step;
     resolved.type = "box_move";
     resolved.position = {
@@ -1726,7 +1726,7 @@ bool TaskExecutor::run_box_move(const Step& step, std::string* error) {
     RCLCPP_INFO(
         node_->get_logger(),
         "box_move: frame '%s', target age %.3f s, face [%.3f %.3f %.3f], face z [%.3f %.3f %.3f], "
-        "tool_offset %.3f m, link6 target [%.3f %.3f %.3f]",
+        "tool_offset %.3f m, end-effector target [%.3f %.3f %.3f]",
         frame.c_str(), target_age, face_pose[0], face_pose[1], face_pose[2], face_axis.x(), face_axis.y(), face_axis.z(),
         tool_offset, resolved.position[0], resolved.position[1], resolved.position[2]);
 
@@ -1739,7 +1739,7 @@ bool TaskExecutor::run_box_move(const Step& step, std::string* error) {
         return fail(first_error);
     }
 
-    // 5 维预检拒绝且没有产生运动：放宽为只到位置。目标仍是同一个 link6 位置
+    // 位姿预检拒绝且没有产生运动：放宽为只到位置。目标仍是同一个末端位置
     // （面心 - tool_offset * 面 z），姿态不约束；工具尖端位置不再有定义。
     RCLCPP_WARN(
         node_->get_logger(),

@@ -39,7 +39,7 @@ def generate_launch_description():
 
     # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开，
     # MJCF 场景由 URDF 的 <ros2_control> 硬件标签指定：
-    #   $(find arm_model)/model/scene.xml
+    #   $(find arm_model)/model_4dof/scene.xml
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),

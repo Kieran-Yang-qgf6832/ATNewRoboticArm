@@ -21,7 +21,7 @@
 - **轨迹插值**：五次 Hermite/Bezier 段插值，保证位置、速度、加速度连续。
 - **动力学参数辨识**：激励轨迹生成（傅里叶级数，可复现且保证关节限位可行）、CSV 测量
   记录（含真实关节加速度）、离线辨识与 URDF 回写。实测参数误差 0.39%、物理校验通过。
-- **视觉链路（MuJoCo 验证）**：`scene_vision.xml` 提供一台固定深度相机（640×480 / fovy 60°）
+- **视觉链路（MuJoCo 验证）**：`model_4dof/scene_vision.xml` 提供一台固定深度相机（640×480 / fovy 60°）
   与边长 0.35 m 的红色目标箱，`view` 包执行 HSV 分割 → 四边形拟合 → 深度分面 → PnP，
   发布 `TargetFace` 与目标面 TF；`ros2 run view check_sim_vision` 把结果经 TF 转到
   `base_link` 与真值比对（实测面心 1.37 mm、法线 0.11°、箱心 1.17 mm）。
@@ -167,7 +167,7 @@ ros2 param set /arm_controller exp_state reset
 | `joint_move` | 关节空间轨迹；用 `to` 引用目标点，或直接给 `target` |
 | `joint_console` | 终端交互式关节运动；运行时**逐项输入**（一次一个数）：6 个关节角（**度**）→ 执行时间（秒，回车取默认）；回车取消本组、`exit` 结束、运动中 `stop` 立即停止。步骤写 `ui: true` 时改为 Qt5 窗口 |
 | `cart_move` | 笛卡尔轨迹；`offset` 为相对当前末端位姿的位移（3 维），严格保持姿态 |
-| `pos_move` | 把末端移到基座系绝对位置（`to` / `position`）；可选 `orientation` 约束 link6 z 轴方向 |
+| `pos_move` | 把末端移到基座系绝对位置（`to` / `position`）；可选 `orientation` 在 4 轴下被忽略（只打 WARN） |
 | `box_move` | 读取视觉目标面 TF（默认 `target_face`），工具 z 对齐面 z、工具尖端到面心；5D 预检不可达时自动回退到只到位置 |
 | `admittance_move` | 导纳控制下的期望轨迹；同样用 `offset` |
 | `tool` | 末端执行器开关量；`action` 取 `tool` 段定义的语义名 |
@@ -188,16 +188,14 @@ ros2 param set /arm_controller exp_state reset
 尚未验证）。控制器参数 `pos_move_tolerance` / `pos_move_nullspace_weight` /
 `pos_move_precheck_samples` 在构造阶段读取并打 INFO（C6），实测整定见 `docs/bugs.md` §9。
 
-`pos_move` 还可选 `orientation: [x, y, z, w]`（基座系四元数）：只取它的 z 轴，
-按轨迹下发 `MODE_POSITION_AND_TOOL_AXIS`，即位置 3 维 + link6 z 方向 2 维、
-绕 z 滚转自由；z 轴角误差超过 `pos_move_axis_tolerance_deg`（默认 1°）判失败，
-不再告警全姿态漂移。目标姿态以起点实测姿态为基准、按「起点 z → 目标 z 的最小旋转」
-重建；两者反平行（180°）时直接用给定四元数消歧。`box_move` 复用这条路径。
+`pos_move` 仍接受 `orientation: [x, y, z, w]`（基座系四元数）字段，但 4 轴映射下它
+**不参与下发与验收**：任务层恒以 `MODE_POSITION_ONLY` 下发并打 WARN，目标姿态照抄起点；
+工具指向由 joint1/2/3 的位置唯一决定（`docs/bugs.md` O21）。`box_move` 复用这条路径。
 
 `box_move` 读取 `base_link -> target_face` 的 TF，同时检查 `/target_face` 的 `valid`、
-`child_frame_id` 与消息/TF 时间戳新鲜度；拿到一帧后**快照**。5D 目标位置 =
-面心 − `tool_offset` × 面 z（工具尖端到面心），工具 z 与面 z 同向。若控制器预检在
-**未运动**时拒绝，自动回退到 position-only（同一 link6 位置、姿态不约束）并打 WARN；
+`child_frame_id` 与消息/TF 时间戳新鲜度；拿到一帧后**快照**。目标位置 =
+面心 − `tool_offset` × 面 z（工具尖端到面心）。若控制器预检在
+**未运动**时拒绝，自动回退到 position-only（同一末端位置、姿态不约束）并打 WARN；
 运动中途失败不回退。全局默认在 `tasks.yaml` 的 `box_move` 段
 （`frame` / `tool_offset` / `target_timeout` / `max_age`），步骤可覆盖 `frame` /
 `tool_offset` / `tolerance`。
@@ -218,8 +216,7 @@ ros2 param set /arm_controller exp_state reset
 | `pos_move_direct` | 正常 | 同上，但直接给 `position` 坐标并覆盖 `max_drift_deg` |
 | `pos_move_near` | **反例，预期失败** | +Z 5 cm：放松姿态仍受连杆长度/关节限位限制，position-only 残余约 0.031 m，仍被下发前拒绝 |
 | `pos_axis_demo` | 正常 | `pos_move` 的 `orientation`：先保持 ready 方向下移 5 cm，再回到 ready 并把工具 z 抬高 15° |
-| `box_move_demo` | 正常 | **抬高视觉场景**：`joint_move` 到 `box_pregrasp` 粗定位，再由 `box_move` 做最后约 10 cm 的视觉 5D 移动（位置残差 0.0015 m、工具轴误差 0.25°） |
-| `box_move_low` | 正常（回退） | **低处视觉场景**：5D 预检拒绝后自动回退 position-only；实测残差约 1.25 cm（演示容差 2 cm） |
+| `box_move_demo` | 正常 | **4 轴视觉场景**：`joint_move` 到 `above_box` 粗定位，再由 `box_move` 竖直下降 25 cm 到面心外 7 cm 的驻点（position-only，实测位置残差 0.0016 m） |
 | `joint_console_ui` | 正常 | `joint_console` 的 Qt5 窗口版：6 个角度输入 + 执行时间 + Execute/Stop/Exit，实时当前角/限位 |
 | `reset_then_cart` | **反例，预期失败** | 零位形机械臂完全伸直、处于工作空间边界，目标被判为不可达并在**下发前拒绝**（不产生任何运动） |
 | `unreachable_near` | **反例，预期失败** | 从 `ready` 沿 +Z 抬升 5 cm，目标不可达 |
@@ -252,13 +249,8 @@ ros2 launch launch_pack arm_task_sim.launch.py
 # 任意序列，任务结束后整个 launch 自动关闭
 ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
 
-# 视觉一条龙：抬高场景 + 相机 TF/检测 + box_move_demo
+# 视觉一条龙：4 轴视觉场景 + 相机 TF/检测 + box_move_demo
 ros2 launch launch_pack arm_task_vision_sim.launch.py
-
-# 低处回退验证
-ros2 launch launch_pack arm_task_vision_sim.launch.py \
-  task_sequence:=box_move_low \
-  mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
 ```
 
 `arm_task_sim.launch.py` 的 `exit_when_idle` 默认 `true`：任务/UI 退出后仿真一起关闭；
@@ -361,22 +353,23 @@ ros2 launch launch_pack arm_real.launch.py
 > 超过 100 ms 收不到状态包会返回 ERROR，由 `controller_manager` 停用控制器。
 >
 > **上真机前必须标定关节**：固件角度零位与 URDF 零位没有共同基准，符号也可能相反。
-> 换算参数在 `arm_controller/config/joint_calibration.yaml`（`q_urdf = dir·(q_raw − zero)`），
-> 标定工具 `build/arm_controller/joint_calibrate`（不安装）。流程见
-> [`docs/bugs.md` §8.1](docs/bugs.md)。
+> 换算参数在 `arm_controller/config/joint_calibration_4dof.yaml`（`q_urdf = dir·(q_raw − zero)`），
+> 标定工具 `build/arm_controller/joint_calibrate`（不安装，关节数从 `/joint_states` 自动识别）。
+> 流程见 [实机首次运行与标定](docs/execute/04-实机首次运行与标定.md) 与
+> [实机联调记录](docs/bugs/2026-10-29/2106-实机联调完整记录.md)。
 >
-> 实机只有 5 个自由度（joint6 无电机、机械锁死），所以任务空间降为 5 维
-> （位置 + 工具指向，不控绕工具轴滚转），`teach_pendant` 与 `measure` 在实机模式下被拒绝。
+> 4 轴实机（`model_4dof`、`motor_count=4`）的任务空间降为 4 维
+> （位置 + joint4 自转），`teach_pendant` 与 `measure` 在实机模式下被拒绝。
 
 ### 3. 视觉链路（仿真）
 
-MuJoCo 场景 `scene_vision.xml` 里有一台固定深度相机和一个边长 0.35 m 的红色目标箱。
+MuJoCo 场景 `model_4dof/scene_vision.xml` 里有一台固定深度相机和一个边长 0.35 m 的红色目标箱。
 三个终端分别负责：仿真、相机 TF + 检测、数值验收。
 
 ```bash
 # 1) 用视觉场景启动仿真（默认仍是 scene.xml，参数辨识共用，不能加箱子）
 ros2 launch launch_pack arm_controller_test_sim.launch.py \
-    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model_4dof/scene_vision.xml
 
 # 2) 仿真相机 TF（解析 MJCF 里的相机位姿）+ 检测节点
 ros2 launch view view_sim.launch.py            # display:=false 可关预览
@@ -385,7 +378,7 @@ ros2 launch view view_sim.launch.py            # display:=false 可关预览
 ros2 run view check_sim_vision
 ```
 
-- 相机安装位姿只有 `scene_vision.xml` 一个来源，`view_sim.launch.py` 启动时直接解析
+- 相机安装位姿只有 `model_4dof/scene_vision.xml` 一个来源，`view_sim.launch.py` 启动时直接解析
   `<camera pos/xyaxes>`，再固定补一段绕 X 180° 的 optical 帧（MuJoCo 相机是 X 右 / Y 上 / −Z 前）。
 - 检测节点在仿真里**不开 `use_sim_time`**：`/clock` 是 500 Hz，rclpy 的 TimeSource 会吃掉
   约一个核（O13）；改用图像 `header.stamp` 作唯一时间基准（`stamp_from_image:=true`）。
@@ -394,31 +387,28 @@ ros2 run view check_sim_vision
 - 实机检测仍用 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离；
   该 launch 的默认参数未改动。
 
-`box_move` 的 5D 演示需要把箱体和相机一起抬高：`scene_vision_raised.xml` 是
-`scene_vision.xml` 的抬高变体（箱体/相机 z=0.6），`view_sim.launch.py` 增加
-`scene_path` 参数。**仿真和相机 TF 必须指向同一个场景文件**，否则 TF 与渲染不一致：
+4 轴是 **2R 平面臂**，几何与 6 轴完全不同，场景参数不是随手拍的（推导见
+[03 视觉链路](docs/execute/03-视觉链路.md)）：
 
-```bash
-# 抬高场景：5D box_move 演示（box_move_demo）
-ros2 launch launch_pack arm_controller_test_sim.launch.py headless:=true \
-    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision_raised.xml
-ros2 launch view view_sim.launch.py display:=false \
-    scene_path:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision_raised.xml
-ros2 run tasks task_runner --ros-args -p task_sequence:="box_move_demo" \
-    -p exit_when_idle:=true -p use_sim_time:=true
+- 末端 `link4` 原点的 y 只能在 **−0.0126 ~ +0.0274**，工具尖最多到 y≈0.057；
+- 所以箱体可见面只能落在 y≈0.057~0.097，`box_move.tool_offset` 取 0.07；
+- 箱心 (0.35, 0.183, 0.175)、0.35 立方、绕 z 45°，可抓面法线 (−0.707, −0.707, 0)，
+  末端目标 (0.177, 0.010, 0.175)；
+- 相机在 (0.05, −0.55, 0.175) **斜看**箱心：可抓面入射 28.9°，另一面 79.8°。
+  相机若正对箱心，两面入射对称，追踪器会锁到 +x 侧那一面（横穿箱体，IK 无解）；
+- `above_box` = (0.177, 0.010, 0.425) 的 IK 解，抬 25 cm 时手臂不在箱体像框内，
+  且 `reset → above_box → 目标` 全程无碰撞。
 
-# 低处场景：position-only 回退验证（box_move_low）
-ros2 launch launch_pack arm_controller_test_sim.launch.py headless:=true \
-    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
-ros2 launch view view_sim.launch.py display:=false
-ros2 run tasks task_runner --ros-args -p task_sequence:="box_move_low" \
-    -p exit_when_idle:=true -p use_sim_time:=true
+一条龙跑完 `box_move_demo` 的验收输出（本机实测，headless）：
+
+```text
+box_move: face [0.226 0.059 0.176], tool_offset 0.070 m, target [0.177 0.010 0.176]
+box_move finished, position error 0.0016 m
+sequence 'box_move_demo' finished
 ```
 
 > `box_move` 会检查 `TargetFace.header.stamp` 与 TF 的新鲜度，仿真里 `task_runner`
 > **必须带 `use_sim_time:=true`**；否则任务层用墙钟比较仿真时间戳，会一直超时。
-> 低处箱体已接近该臂实际可达边界：5D 会超关节限位，回退 position-only 后残差约
-> 1.25 cm，`box_move_low` 用 2 cm 演示容差；干净演示请用抬高场景。
 
 ### 关于 `/arm_robot_description`
 
@@ -475,7 +465,7 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 # 2) 离线辨识
 ros2 run parameter_identify identify_arm \
   --csv measured_for_identification.csv \
-  --urdf src/arm_model/model/robotic_arm.urdf \
+  --urdf src/arm_model/model_4dof/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
   --report /tmp/robotic_arm_identify_report.yaml

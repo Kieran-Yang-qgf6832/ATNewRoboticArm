@@ -4,9 +4,9 @@
 
 用法（三条命令，顺序无关，但仿真要先起来话题才有数据）：
 
-    # 终端 1：用视觉场景启动仿真（scene_vision.xml 里有相机和红色箱子）
+    # 终端 1：用视觉场景启动仿真（model_4dof/scene_vision.xml 里有相机和红色箱子）
     ros2 launch launch_pack arm_controller_test_sim.launch.py \
-        mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+        mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model_4dof/scene_vision.xml
 
     # 终端 2：仿真相机 TF + 检测节点
     ros2 launch view view_sim.launch.py
@@ -14,7 +14,7 @@
     # 终端 3：数值验收（退出码 0 = 通过）
     ros2 run view check_sim_vision
 
-相机安装位姿在整个工程里只有 scene_vision.xml 一个来源：本 launch 启动时直接解析
+相机安装位姿在整个工程里只有 model_4dof/scene_vision.xml 一个来源：本 launch 启动时直接解析
 该文件的 <camera> 元素（pos + xyaxes/quat），再发布 base_link -> vision_camera_link，
 因此渲染用的位姿和算法用的 TF 是同一串数字，不会漂移。
 
@@ -205,7 +205,7 @@ def generate_launch_description():
 
     scene_path_arg = DeclareLaunchArgument(
         'scene_path',
-        default_value=os.path.join(arm_model_share, 'model', 'scene_vision.xml'),
+        default_value=os.path.join(arm_model_share, 'model_4dof', 'scene_vision.xml'),
         description='含 <camera name="vision_camera"> 的 MJCF 场景；相机 TF 直接从这里解析')
 
     display_arg = DeclareLaunchArgument(

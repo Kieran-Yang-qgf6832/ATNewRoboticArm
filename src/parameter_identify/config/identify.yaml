@@ -1,5 +1,5 @@
 model:
-  # 当前生效模型是 4 自由度（src/arm_model/model）。必须与 URDF 和测量 CSV 的关节数一致；
+  # 当前生效模型是 4 自由度（src/arm_model/model_4dof）。必须与 URDF 和测量 CSV 的关节数一致；
   # 换回 6 轴模型时改成 joint1..joint6。
   active_joints: [joint1, joint2, joint3, joint4]
 

@@ -1,15 +1,10 @@
 """
 @file arm_task_vision_sim.launch.py
-@brief 视觉一条龙：抬高视觉场景 + 相机 TF/检测 + task_runner（默认 box_move_demo）
+@brief 视觉一条龙：4 轴视觉场景 + 相机 TF/检测 + task_runner（默认 box_move_demo）
 
 用法：
-    # 默认：scene_vision_raised.xml（箱体/相机 z=0.6）+ 检测 + box_move_demo
+    # 默认：model_4dof/scene_vision.xml（45° 红箱 + 固定相机）+ 检测 + box_move_demo
     ros2 launch launch_pack arm_task_vision_sim.launch.py
-
-    # 低处回退验证：原 scene_vision.xml + box_move_low
-    ros2 launch launch_pack arm_task_vision_sim.launch.py \
-        task_sequence:=box_move_low \
-        mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
 
     # 需要 target_face 检测预览时
     ros2 launch launch_pack arm_task_vision_sim.launch.py vision_display:=true
@@ -39,12 +34,12 @@ def generate_launch_description():
     view_sim_launch = os.path.join(view_share, "launch", "view_sim.launch.py")
 
     default_tasks_config = os.path.join(tasks_share, "config", "tasks.yaml")
-    default_scene = os.path.join(arm_model_share, "model", "scene_vision_raised.xml")
+    default_scene = os.path.join(arm_model_share, "model_4dof", "scene_vision.xml")
 
     task_sequence_arg = DeclareLaunchArgument(
         "task_sequence",
         default_value="box_move_demo",
-        description="tasks.yaml 里的序列名；默认 box_move_demo（抬高场景）",
+        description="tasks.yaml 里的序列名；默认 box_move_demo（4 轴视觉场景）",
     )
     tasks_config_arg = DeclareLaunchArgument(
         "tasks_config",

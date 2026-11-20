@@ -3,12 +3,12 @@
 @brief 机械臂 MuJoCo 仿真主场景：拉起 ros2_control 控制链路与全部控制器（当前仓库推荐入口）
 
 启动内容（按实际启动顺序）：
-  1. robot_state_publisher  ：用 xacro 处理 arm_model/model/robotic_arm.urdf 后发布
+  1. robot_state_publisher  ：用 xacro 处理 arm_model/model_4dof/robotic_arm.urdf 后发布
                               /arm_robot_description 与 TF（RViz 显示、tasks 查询末端位姿都依赖它）
                               话题名不是标准的 /robot_description——原因见下面 O4 的注释
   2. mujoco_ros2_control    ：ros2_control_node，MuJoCo 以 SystemInterface 插件形式运行在
                               controller_manager 进程内；硬件插件与 MJCF 路径写在 URDF 的
-                              <ros2_control> 标签里（$(find arm_model)/model/scene.xml）
+                              <ros2_control> 标签里（$(find arm_model)/model_4dof/scene.xml）
   3. joint_state_broadcaster：发布 /joint_states（tasks 的关节反馈来源）
   4. sim_pid_controller     ：链式 PID，把 arm_controller 的期望量转成 effort 送给 MuJoCo
   5. arm_controller         ：机械臂状态机控制器（idel/reset/cart_traj/joint_traj/servo/
@@ -71,7 +71,8 @@ def generate_launch_description():
 
     # 通过 xacro 处理 URDF，使硬件标签里的 $(find arm_model) 被正确展开；
     # headless 透传给 mujoco_ros2_control，默认 false = 保留 MuJoCo UI 窗口。
-    # mujoco_model 默认 scene.xml；视觉验证传 scene_vision.xml（含相机与红色箱子）。
+    # mujoco_model 默认 model_4dof/scene.xml：必须与上面的 URDF 同在 model_4dof/，
+    # 否则 MuJoCo 里的连杆与 TF/控制器内部模型不是同一台臂（4 轴分支只维护 4 轴场景）。
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
@@ -110,10 +111,10 @@ def generate_launch_description():
 
     mujoco_model_arg = DeclareLaunchArgument(
         "mujoco_model",
-        default_value=os.path.join(arm_model_share, "model", "scene.xml"),
+        default_value=os.path.join(arm_model_share, "model_4dof", "scene.xml"),
         description=(
-            "MuJoCo 加载的 MJCF 场景。默认 scene.xml（辨识/测量共用）；"
-            "视觉验证时传 arm_model/model/scene_vision.xml（含相机与红色目标箱）"
+            "MuJoCo 加载的 MJCF 场景。默认 model_4dof/scene.xml（与 URDF 同一台 4 轴臂，辨识/测量共用）；"
+            "换场景时留在 model_4dof/ 内，不要指向 6 轴的 model/——那样仿真实体会与 TF 不一致"
         ),
     )
 
@@ -159,7 +160,7 @@ def generate_launch_description():
     )
 
     # 用 xacro 展开 URDF 里的 $(find arm_model)：URDF 自身是纯 URDF，但 <ros2_control>
-    # 硬件标签里写了 $(find arm_model)/model/scene.xml，不展开 controller_manager 会加载失败。
+    # 硬件标签里写了 $(find arm_model)/model_4dof/scene.xml，不展开 controller_manager 会加载失败。
     robot_state_pub = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
@@ -174,7 +175,7 @@ def generate_launch_description():
     # 新版 mujoco_ros2_control：MuJoCo 仿真以 SystemInterface 插件形式
     # 运行在 controller_manager 进程内，硬件插件与 MJCF 路径在 URDF
     # 的 <ros2_control> 标签中声明。MJCF 场景：
-    #   $(find arm_model)/model/scene.xml
+    #   $(find arm_model)/model_4dof/scene.xml
     mujoco = Node(
         package="mujoco_ros2_control",
         executable="ros2_control_node",

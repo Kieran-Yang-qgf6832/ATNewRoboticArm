@@ -10,7 +10,7 @@
 
     ros2 launch view calib.launch.py start_handeye:=false
 
-标定类型固定 eye_on_base：相机装在支架上俯视工作区，标靶装在末端 link6 上随机械臂走。
+标定类型固定 eye_on_base：相机装在支架上俯视工作区，标靶装在末端 link4 上随机械臂走。
 tracking_base_frame 用 camera_link 而不是光学帧——easy_handeye2 自带的 dummy 静态发布器
 会给它挂上 base_link 父帧，而光学帧在 RealSense 驱动里已经有父帧，同一个子帧两个父帧
 会让整条光学链的位姿出错。
@@ -52,7 +52,7 @@ def generate_launch_description():
                               description='是否开 OpenCV 预览窗口（标定建议开）'),
         DeclareLaunchArgument('image_qos', default_value='sensor',
                               description='图像订阅 QoS：sensor 或 reliable'),
-        DeclareLaunchArgument('name', default_value='arm5dof_realsense',
+        DeclareLaunchArgument('name', default_value='arm4dof_realsense',
                               description='标定名，决定 .calib 文件名与 rqt 里的条目'),
         DeclareLaunchArgument('calibration_type', default_value='eye_on_base',
                               description='标定类型，本链路固定 eye_on_base'),
@@ -62,8 +62,8 @@ def generate_launch_description():
                               description='标靶帧，必须与检测节点的 child_frame_id 一致'),
         DeclareLaunchArgument('robot_base_frame', default_value='base_link',
                               description='机器人基座帧'),
-        DeclareLaunchArgument('robot_effector_frame', default_value='link6',
-                              description='末端帧'),
+        DeclareLaunchArgument('robot_effector_frame', default_value='link4',
+                              description='末端帧；4 轴模型是 link4（6 轴模型才是 link6）'),
         # 版面参数与 PDF 一致；换板时改这四个数即可
         DeclareLaunchArgument('squares_x', default_value='11',
                               description='横向格数'),

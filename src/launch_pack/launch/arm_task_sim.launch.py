@@ -63,7 +63,7 @@ def generate_launch_description():
     mujoco_model_arg = DeclareLaunchArgument(
         "mujoco_model",
         default_value=default_mujoco_model,
-        description="MuJoCo MJCF 场景；4 轴视觉场景（scene_vision*.xml）待补，当前只有 scene.xml",
+        description="MuJoCo MJCF 场景；默认 scene.xml，视觉演示用 model_4dof/scene_vision.xml",
     )
     exit_when_idle_arg = DeclareLaunchArgument(
         "exit_when_idle",

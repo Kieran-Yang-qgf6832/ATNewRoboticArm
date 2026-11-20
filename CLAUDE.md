@@ -75,12 +75,12 @@ ros2 launch launch_pack arm_controller_test_sim.launch.py
 # 一条龙（推荐）：仿真 + task_runner；默认打开 Qt joint_console，任务/UI 退出后自动关仿真
 ros2 launch launch_pack arm_task_sim.launch.py
 ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
-# 视觉一条龙：抬高场景 + 相机 TF/检测 + box_move_demo
+# 视觉一条龙：4 轴视觉场景 + 相机 TF/检测 + box_move_demo
 ros2 launch launch_pack arm_task_vision_sim.launch.py
 
 # 视觉链路（三个终端）：带相机与红色目标箱的场景 → 仿真相机 TF + 检测节点 → 数值验收
 ros2 launch launch_pack arm_controller_test_sim.launch.py \
-    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model/scene_vision.xml
+    mujoco_model:=$(ros2 pkg prefix arm_model)/share/arm_model/model_4dof/scene_vision.xml
 ros2 launch view view_sim.launch.py        # 实机仍用 view.launch.py（RealSense 相机）
 ros2 run view check_sim_vision             # 退出码 0 = 通过
 
@@ -104,7 +104,7 @@ ros2 launch launch_pack arm_measure_sim.launch.py
 # 离线辨识
 ros2 run parameter_identify identify_arm \
   --csv measured_for_identification.csv \
-  --urdf src/arm_model/model/robotic_arm.urdf \
+  --urdf src/arm_model/model_4dof/robotic_arm.urdf \
   --output /tmp/robotic_arm_identified.urdf \
   --config src/parameter_identify/config/identify.yaml \
   --report /tmp/robotic_arm_identify_report.yaml
@@ -132,7 +132,7 @@ ArmController (controller_interface, 500 Hz)
 ### 视觉链路（MuJoCo → view）
 
 ```
-scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
+model_4dof/scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
   └── CameraPlugin（mujoco_ros2_control_plugins）
         └── /vision_camera/{color, depth, camera_info}   640x480 / fovy 60 / 32FC1 深度
               └── view/red_quad_detector（HSV → 四边形 → 深度分面 → PnP）
@@ -140,11 +140,15 @@ scene_vision.xml（固定深度相机 + 0.35 m 红色目标箱）
                           └── ros2 run view check_sim_vision（转到 base_link 与真值比对）
 ```
 
-- 相机安装位姿只有 `scene_vision.xml` 一个来源：`view_sim.launch.py` 启动时解析
+- 相机安装位姿只有 `model_4dof/scene_vision.xml` 一个来源：`view_sim.launch.py` 启动时解析
   `<camera pos/xyaxes>` 发 `base_link → vision_camera_link`，再固定一段绕 X 180° 的
   `vision_camera_link → vision_camera_optical_frame`。改相机位置只改 MJCF。
-- 仿真场景用主仿真 launch 的 `mujoco_model:=.../scene_vision.xml` 切换；默认仍是
+- 仿真场景用主仿真 launch 的 `mujoco_model:=.../model_4dof/scene_vision.xml` 切换；默认仍是
   `scene.xml`（参数辨识共用，不能加箱子）。
+- 4 轴是 2R 平面臂：末端 link4 原点的 y 只能到 −0.0126~+0.0274，所以可见面只能落在
+  y≈0.057~0.097；相机在 (0.05, −0.55, 0.175) 斜看箱心，只有可抓面在门限内
+  （另一面 79.8°，正对箱心看时追踪器会锁错面）。场景数值与推导见
+  `docs/execute/03-视觉链路.md`。
 - 实机检测仍走 `ros2 launch view view.launch.py`（RealSense），与仿真完全分离。
 
 ### 两层控制：控制器侧 FSM + 任务层配置驱动执行器
@@ -183,8 +187,10 @@ z 轴角误差作为硬失败判据。四个 `pos_move_*` 参数必须 `auto_dec
 优先下发 5 维目标：link6 原点 = 面心 − `tool_offset` × 面 z（工具尖端落在面心），
 工具 z 与面 z 同向；若控制器预检在**未运动**时拒绝，自动回退到 position-only
 （同一 link6 位置，姿态不约束），回退成功会打 WARN；运动中途失败不回退。
-全局参数在 `tasks.yaml` 的 `box_move` 段。低处箱体（z≈0.18）5D 会超出关节限位，
-演示用 `scene_vision_raised.xml`（箱体/相机 z=0.6）+ `box_pregrasp` 粗定位。
+全局参数在 `tasks.yaml` 的 `box_move` 段。4 轴分支的 `task_space_dof=4` 不支持 5 维目标，
+`box_move` 直接走 position-only：`tool_offset` 取 0.07（= link4 工具长度），
+目标 = 面心 + 0.07 × 外法线，正好落在末端可达的 y 带内；`box_move_demo` 先用
+`joint_move` 到 `above_box`（面心外 7 cm、正上方 25 cm 的 IK 解），再竖直下降。
 
 `joint_console` 是唯一**交互式**步骤：用户**逐项**输入（一次一个数）——6 个关节角（度）→
 1 个执行时间（秒，回车取默认），步骤内部循环；输入途中回车取消本组、`exit` 结束、

@@ -33,11 +33,11 @@ struct Step {
     std::vector<double> target;      ///< joint_move：绝对关节角（由 to 解析或直接给出）
     std::vector<double> offset;      ///< cart_move / admittance_move：相对末端位移（3 维）
     std::vector<double> position;    ///< pos_move：基座系绝对目标 [x, y, z]（由 to 解析或直接给出）
-    std::vector<double> orientation; ///< pos_move：目标姿态四元数 [x, y, z, w]（基座系；只约束 link6 z 轴）
+    std::vector<double> orientation; ///< pos_move：目标姿态四元数 [x, y, z, w]（基座系；只约束末端 z 轴）
     std::string action;              ///< tool：语义名（如 suck / release）
     std::string to;                  ///< joint_move 引用 points；pos_move 引用 positions
     std::string frame;               ///< box_move：视觉目标帧名（空 = 用全局默认）
-    double tool_offset{-1.0};        ///< box_move：工具尖端沿 +z 到 link6 原点的距离（米）
+    double tool_offset{-1.0};        ///< box_move：工具尖端沿 +z 到末端原点的距离（米）
     bool has_tool_offset{false};     ///< 步骤是否显式给出 tool_offset（区分 0 与“未写”）
     bool ui{false};                  ///< joint_console：true = 打开 Qt 输入窗口
     double max_drift_deg{0.0};       ///< pos_move：姿态漂移告警阈值（度）；0 = 用配置默认值
