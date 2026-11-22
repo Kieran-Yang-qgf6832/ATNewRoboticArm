@@ -39,17 +39,38 @@ arm_controller:
     default_kp: [40.0, 40.0, 40.0, 2.0, 2.0, 0.2]
     default_kd: [1.6, 1.6, 1.6, 0.08, 0.04, 0.01]
 
-    # 重力前馈先关掉：下发力矩会被固件直接叠加到速度环输出上（固件侧没有限幅），
-    # 而 URDF 的质量/惯量只在仿真里辨识过、没在实机核过符号。
-    # 等通信、标定与基本运动都确认无误后，再把 gravity_compensation 打开并从 0.1 起加。
-    gravity_compensation: false
-    gravity_compensation_scale: 0.1
+    # 重力前馈（docs/bugs/O21 + ADR-20261122-1007）。原先是关的：下发力矩会被固件直接叠加到
+    # 速度环输出上（固件侧没有限幅），而 URDF 的质量/惯量只在仿真里辨识过、没在实机核过符号。
+    #
+    # 打开过程（2026-11-22 一天内完成，两档都留了数据）：
+    #   1) [已完成 14:58] idel 力矩脉冲逐关节定下行符号：joint1..joint4 与 URDF 全部同号
+    #      （bag arm_real_20261122-145837），joint5 未测但该位形重力项约 0.0002 N·m；
+    #   2) [已完成 15:38] 0.5 档：静差随之减小、无自走；
+    #   3) [当前档 1.0] 起步/停止的力矩台阶实测 ≤ 0.06 N·m（原 0.5 档约 3.3、关掉时 6.6 N·m），
+    #      保持 effort 与 RNEA 完全一致（bag arm_real_20261122-154728）。
+    #      之所以要 1.0 而不是 0.5：台阶 = (1 − scale)·τ_g，只有 1.0 归零。
+    # 这两项只在状态机构造时读一次：改完必须重启 launch，运行中 `ros2 param set` 会被接受但不生效。
+    # 回滚：任一环节出现异常（自走、静差变大、起步更晃），改回 false / 0.5 再重启 launch。
+    gravity_compensation: true
+    gravity_compensation_scale: 1.0
 
     # 力矩前馈的斜率限制（N·m/s，docs/bugs/O19）：固件把 effort 直接叠到速度环输出上，
     # 不限幅也不斜坡，所以保持（重力关掉时为 0）与轨迹（完整 RNEA，同姿态 joint2 约
-    # 21 N·m）交接时必须在控制侧削成斜坡。100 Hz 下 21 N·m / 300 N·m/s = 7 帧 ≈ 70 ms。
+    # 6.6 N·m）交接时必须在控制侧削成斜坡。100 Hz 下 6.6 N·m / 300 N·m/s = 3 帧 ≈ 30 ms。
+    # 打开重力前馈后这个台阶消失，限速只剩故障保持/模式切换的兜底作用。
     # 0 = 关闭（对照旧行为）。
     torque_slew_rate: 300.0
 
+    # 一次性力矩脉冲自检（docs/bugs/O21）：默认关闭。只在 idel 生效，
+    # |value| <= 5 N·m、duration <= 0.5 s，到点自动归零，请求 30 s 未被消费即作废。
+    # 用法见 docs/execute/07 § 力矩脉冲自检。
+    test_torque_joint: 0
+    test_torque_value: 0.0
+    test_torque_duration: 0.0
+
     # 实机不支持 measure：MCU 不上报加速度，acc_* 列恒为 0，辨识结果不可用。
     # 需要参数辨识请回仿真链路。
+
+
+
+

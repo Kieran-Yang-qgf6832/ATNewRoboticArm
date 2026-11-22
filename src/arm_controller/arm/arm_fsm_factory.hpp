@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "arm.hpp"
 #include "arm_fsm.hpp"
 #include "default6dof_task.hpp"
@@ -147,6 +149,26 @@ public:
      * @see robot_msgs::msg::MotorCmd
      */
     std::vector<robot_msgs::msg::MotorCmd> command_;
+
+    /**
+     * @brief 一次性力矩脉冲自检请求（docs/bugs/O21）
+     *
+     * 用途：给指定关节叠加一个**已知符号**的短力矩，看实测关节角往哪边走——
+     * 用于确认下行力矩前馈的符号（RNEA 在 joint2 上与 MCU 上报的出力反号，
+     * 而标定文件自述该关节符号待确认）。
+     *
+     * 写入方是参数服务线程（@c ArmController::param_cb_），读取方是控制周期的实时线程
+     * （@c IDELState::run ），因此用原子量：实时线程不做参数查询（实时约束）。
+     * 安全约束见 @c IDELState::update_test_torque_pulse 与参数回调的校验：
+     * 仅在 @c idel 生效、|value| ≤ 5 N·m、duration ≤ 0.5 s、请求 30 s 未消费即作废。
+     */
+    struct TestTorqueRequest {
+        std::atomic<int> joint{0};         ///< 1..joint_count；0 = 没有请求
+        std::atomic<double> value{0.0};    ///< 叠加力矩（N·m，URDF 符号）
+        std::atomic<double> duration{0.0}; ///< 持续时长（秒）
+        std::atomic<int64_t> armed_ns{0};  ///< 请求写入时刻（纳秒），用于过期判定
+    };
+    TestTorqueRequest test_torque; ///< 力矩脉冲自检请求（默认关闭）
 
     /**
      * @brief ROS 2 生命周期节点共享指针

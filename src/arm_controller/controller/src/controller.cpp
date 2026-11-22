@@ -49,6 +49,7 @@
 #include <pinocchio/parsers/urdf.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -156,6 +157,15 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // 力矩前馈的斜率限制（N·m/s，O19）：0 = 关闭。保持路径与轨迹路径的力矩来源完全不同，
     // 交接处实机会看到 0 ↔ 数十 N·m 的单帧阶跃，固件又把这路力矩直接叠到速度环输出上。
     auto_declare<double>("torque_slew_rate", 300.0);
+    // 一次性力矩脉冲自检（docs/bugs/O21）：给指定关节叠加一个已知符号的短力矩，
+    // 用实测关节角往哪边走来判断下行力矩前馈的符号（RNEA 在 joint2 上与 MCU 上报的
+    // 出力反号，标定文件也自述该关节符号待确认）。
+    // 默认关闭（joint = 0）；只在 idel 状态生效，|value| <= 5 N·m、duration <= 0.5 s，
+    // 到点自动归零，请求 30 s 未被消费即作废。参数由 param_cb_ 写进工厂的原子量，
+    // 实时线程不做参数查询。
+    auto_declare<int>("test_torque_joint", 0);
+    auto_declare<double>("test_torque_value", 0.0);
+    auto_declare<double>("test_torque_duration", 0.0);
     auto_declare<double>("measure_trajectory_period", 10.0);
     auto_declare<double>("measure_move_to_start_duration", 3.0);
     auto_declare<int>("measure_trajectory_repeat_cnt", 1);
@@ -368,7 +378,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 // 期望状态名允许热更新，直接写入状态机工厂，由各状态的 check_switch() 消费。
                 const std::string requested = param.as_string();
                 if (real_mode_ && state_unavailable_on_real(requested)) {
-                    // 物理上不成立的状态：拒绝而不是“进去但行为不对”。
+                    // 物理上不成立的状态：拒绝而不是"进去但行为不对"。
                     result.successful = false;
                     result.reason     = requested
                                   + " is unavailable in real mode (MCU has no impedance gains / "
@@ -423,6 +433,38 @@ controller_interface::CallbackReturn ArmController::on_init() {
                     return result;
                 }
                 torque_slew_rate_ = rate;
+            } else if (name == "test_torque_joint") {
+                // O21：一次性力矩脉冲自检的目标关节。0 = 关闭；1..N = 第几个关节。
+                // 写入即「上膛」：armed_ns 记下本次写入时刻，idel 的 run() 若在 30 s 内
+                // 没取走就作废（见 IDELState::update_test_torque_pulse）。
+                const int joint = param.as_int();
+                if (joint < 0 || static_cast<std::size_t>(joint) > joints_name.size()) {
+                    result.successful = false;
+                    result.reason     = "test_torque_joint must be within [0, joints size]";
+                    return result;
+                }
+                // 先写关节号再写时间戳：实时线程看到 joint > 0 时会同时读到时间戳。
+                fsm_factory->test_torque.armed_ns.store(joint > 0 ? get_node()->now().nanoseconds() : 0,
+                                                        std::memory_order_relaxed);
+                fsm_factory->test_torque.joint.store(joint, std::memory_order_relaxed);
+            } else if (name == "test_torque_value") {
+                // 与 arm_fsm.cpp 的 kMaxTestTorque 一致：直接给臂下力的通道不接受大值。
+                const double value = param.as_double();
+                if (!std::isfinite(value) || std::fabs(value) > 5.0) {
+                    result.successful = false;
+                    result.reason     = "test_torque_value must be finite and |value| <= 5 N·m";
+                    return result;
+                }
+                fsm_factory->test_torque.value.store(value, std::memory_order_relaxed);
+            } else if (name == "test_torque_duration") {
+                // 与 arm_fsm.cpp 的 kMaxTestPulseDuration 一致：不接受「忘了停」的长脉冲。
+                const double duration = param.as_double();
+                if (!std::isfinite(duration) || duration < 0.0 || duration > 0.5) {
+                    result.successful = false;
+                    result.reason     = "test_torque_duration must be within [0, 0.5] s";
+                    return result;
+                }
+                fsm_factory->test_torque.duration.store(duration, std::memory_order_relaxed);
             } else if (name == "reset_duration") {
                 // 复位持续时间必须为正。
                 if (param.as_double() <= 0.0) {

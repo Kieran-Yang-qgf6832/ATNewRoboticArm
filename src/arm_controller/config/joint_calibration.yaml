@@ -9,15 +9,21 @@
 #   1. 用 joint_calibrate 工具逐关节点动，确认 dir（+1 / -1）；
 #   2. 把机械臂摆到 URDF 的零位，读 /joint_states 得到 q_raw，令 zero = q_raw。
 #
+# 第三条符号 torque_dir（力矩通道方向）目前**还没有实现**，不在下面的字段里：
+# 已有的 dir 同时乘在 position 与 effort 上，等于假设固件两条通道同号，而 joint2 的
+# 实测数据不支持这个假设（MCU 上报出力与 RNEA 反号，见 docs/bugs/2026-11-22 的 O21）。
+# 打开 gravity_compensation 之前必须先用 idel 的力矩脉冲通道逐关节测出这个符号，
+# 步骤见 docs/execute/04 的 5.5「标定重力力矩方向」。
+#
 # 下面全部是占位值（dir = 1、zero = 0，等同直接透传）。未标定完之前不要下发
 # 绝对关节角目标，否则会在错误方向上满力矩运动。
 
 joints:
   joint1: {dir: -1.0, zero: 0.0}
   joint2: {dir:  1.0, zero: 0.0}   # 固件 joint[2] 的 inv_motor = -1，符号待实机确认
-  joint3: {dir: -1.0, zero: 0.0}
+  joint3: {dir:  1.0, zero: 0.0}
   joint4: {dir:  1.0, zero: 0.0}
-  joint5: {dir:  1.0, zero: 0.0}
+  joint5: {dir: -1.0, zero: 0.0}
 
 # joint6 无电机、机械锁死：固件那一槽既不读也不写。
 # 上位机把它的状态回写成指令值（见 ArmRealInterfaces::read），这里只记录

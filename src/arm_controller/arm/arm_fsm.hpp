@@ -160,6 +160,31 @@ private:
 
     /// 重力补偿（docs/bugs.md O6）。buffer 在构造阶段分配，run() 中不再分配内存。
     HoldGravityFeedforward gravity_;
+
+    /**
+     * @brief 消费一次性的力矩脉冲自检请求并在到点时收尾（docs/bugs/O21）
+     *
+     * 请求由 @c ArmController 的参数回调（参数服务线程）写进
+     * @c FSMArmControlFactory::test_torque 的原子量，本函数在实时线程里只做无锁读取，
+     * 不查参数（实时约束）。请求要么被消费（joint 原子量清零，随后按 duration 倒计时），
+     * 要么过期作废，不会无限期挂起。
+     *
+     * @param time 当前控制周期时间，用于计时与 30 s 过期判定
+     * @note 脉冲只在 @c idel 输出：离开 idel 时本状态的局部状态随 @c exit() 清空，
+     *       轨迹态不会带着脉冲跑。
+     */
+    void update_test_torque_pulse(const rclcpp::Time& time);
+
+    /// 是否正在输出力矩脉冲
+    bool test_pulse_active_{false};
+    /// 脉冲起点（控制周期时间）
+    rclcpp::Time test_pulse_start_;
+    /// 本次脉冲的关节下标（0 起）
+    std::size_t test_pulse_index_{0};
+    /// 本次脉冲的力矩（N·m，URDF 符号）
+    float test_pulse_value_{0.0f};
+    /// 本次脉冲的持续时长（秒）
+    double test_pulse_duration_{0.0};
 };
 
 /**

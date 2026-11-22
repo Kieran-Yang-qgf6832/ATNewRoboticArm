@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <exception>
 
 #include <rclcpp/duration.hpp>
@@ -36,6 +37,18 @@ constexpr double kMaxPositionPassTolerance = 0.5;
 /// 轨迹边界偏差告警阈值（rad，O19）。段末 |终点 − 实测| 或段首 |首点 − 上一帧命令|
 /// 超过它，说明这一段根本没跟上目标；只告警、不改变行为。
 constexpr double kTrajectoryBoundaryDeviationWarn = 0.1;
+
+// ---- idel 力矩脉冲自检的硬上限（docs/bugs/O21）------------------------------------
+// 这是「给臂一个已知力矩」的调试通道，宁可限制过头，也不能让手滑的参数把关节推跑。
+// 固件位置环等效刚度实测约 2600 N·m/rad：2 N·m 约推开 0.8 mrad（>2 倍位置抖动），
+// 0.5 N·m 只有 0.19 mrad，埋在噪声里，所以下限用途有限、上限必须卡死。
+/// 单次脉冲的力矩上限（N·m）
+constexpr double kMaxTestTorque = 5.0;
+/// 单次脉冲的时长上限（秒）：到点必须自动归零
+constexpr double kMaxTestPulseDuration = 0.5;
+/// 请求有效期（秒）：参数写好后这么久没被 idel 消费（例如中途切走了状态）即作废，
+/// 避免「几十秒后突然给了一脚」。
+constexpr double kTestTorqueArmTimeout = 30.0;
 
 // load_trajectory_from_message 依赖各 FSM 的 traj 预分配容量不小于最大点数，
 // 在订阅回调中复用预分配 buffer（clear + add_point），避免实时路径内重新分配内存。
@@ -490,6 +503,10 @@ bool IDELState::enter(const std::string& last_state, const rclcpp::Time& time) {
 
 bool IDELState::exit(const std::string& next_state) {
     (void)next_state;
+    // 脉冲只在 idel 输出：离开时清掉局部状态，轨迹态不会带着脉冲跑（docs/bugs/O21）。
+    test_pulse_active_   = false;
+    test_pulse_value_    = 0.0f;
+    test_pulse_duration_ = 0.0;
     return true;
 }
 
@@ -502,8 +519,6 @@ const std::string& IDELState::check_switch() const {
 }
 
 bool IDELState::run(const rclcpp::Time& time) {
-    (void)time;
-
     if (factory == nullptr || factory->command_.size() != joint_count_) {
         return false;
     }
@@ -511,17 +526,96 @@ bool IDELState::run(const rclcpp::Time& time) {
     // 重力前馈：只靠 kp 保持时静差为 τ/kp，零位姿下 joint4 会偏出 0.1 rad 以上（O6）。
     gravity_.refresh(factory, joint_count_, fsm_name_.c_str());
 
+    // 一次性力矩脉冲自检（docs/bugs/O21）：先更新，脉冲到点后本周期即回到保持值。
+    update_test_torque_pulse(time);
+
     for (std::size_t i = 0; i < hold_position_.size(); ++i) {
         auto& command    = factory->command_[i];
         command.position = hold_position_[i];
         command.velocity = 0.0f;
         command.torque   = gravity_.torque(i);
+        if (test_pulse_active_ && i == test_pulse_index_) {
+            command.torque += test_pulse_value_;
+        }
         command.kp       = default_kp_[i];
         command.kd       = default_kd_[i];
         command.ki       = 0.0f;
     }
 
     return true;
+}
+
+void IDELState::update_test_torque_pulse(const rclcpp::Time& time) {
+    if (factory == nullptr || factory->node_ == nullptr) {
+        return;
+    }
+
+    // 脉冲进行中：只判是否到点。到点后立刻清零，本周期写回保持值。
+    if (test_pulse_active_) {
+        const double elapsed = (time - test_pulse_start_).seconds();
+        if (elapsed < test_pulse_duration_) {
+            return;
+        }
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "idel test torque pulse finished: joint%zu %+.3f N·m for %.0f ms (elapsed %.3f s); back to the hold value",
+            test_pulse_index_ + 1, static_cast<double>(test_pulse_value_), test_pulse_duration_ * 1e3, elapsed);
+        test_pulse_active_   = false;
+        test_pulse_value_    = 0.0f;
+        test_pulse_duration_ = 0.0;
+        factory->test_torque.value.store(0.0, std::memory_order_relaxed);
+        factory->test_torque.duration.store(0.0, std::memory_order_relaxed);
+        return;
+    }
+
+    const int joint = factory->test_torque.joint.load(std::memory_order_relaxed);
+    if (joint <= 0) {
+        return; // 没有请求
+    }
+    const double value    = factory->test_torque.value.load(std::memory_order_relaxed);
+    const double duration = factory->test_torque.duration.load(std::memory_order_relaxed);
+    const int64_t armed   = factory->test_torque.armed_ns.load(std::memory_order_relaxed);
+
+    // 三个参数可能分三次写进来：任何一项还没就位就继续等，不报错。
+    if (!std::isfinite(value) || value == 0.0 || !std::isfinite(duration) || duration <= 0.0) {
+        return;
+    }
+
+    // 过期作废：参数写好后隔很久才切回 idel 时，绝不能再给一脚（docs/bugs/O21）。
+    const double armed_age = static_cast<double>(time.nanoseconds() - armed) * 1e-9;
+    if (armed <= 0 || std::fabs(armed_age) > kTestTorqueArmTimeout) {
+        factory->test_torque.joint.store(0, std::memory_order_relaxed);
+        factory->test_torque.armed_ns.store(0, std::memory_order_relaxed);
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "idel test torque request discarded: armed %.1f s ago (limit %.0f s); set test_torque_joint again to re-arm",
+            armed_age, kTestTorqueArmTimeout);
+        return;
+    }
+
+    if (static_cast<std::size_t>(joint) > joint_count_ || std::fabs(value) > kMaxTestTorque
+        || duration > kMaxTestPulseDuration) {
+        factory->test_torque.joint.store(0, std::memory_order_relaxed);
+        factory->test_torque.armed_ns.store(0, std::memory_order_relaxed);
+        RCLCPP_ERROR(
+            factory->node_->get_logger(),
+            "idel test torque request rejected: joint=%d (max %zu), |value|=%.3f N·m (max %.1f), duration=%.3f s (max %.1f)",
+            joint, joint_count_, std::fabs(value), kMaxTestTorque, duration, kMaxTestPulseDuration);
+        return;
+    }
+
+    // 消费请求：joint 清零代表「已取走」，value/duration 留到脉冲结束时再清。
+    factory->test_torque.joint.store(0, std::memory_order_relaxed);
+    test_pulse_active_   = true;
+    test_pulse_index_    = static_cast<std::size_t>(joint - 1);
+    test_pulse_value_    = static_cast<float>(value);
+    test_pulse_duration_ = duration;
+    test_pulse_start_    = time;
+    RCLCPP_WARN(
+        factory->node_->get_logger(),
+        "idel test torque pulse: joint%d %+.3f N·m for %.0f ms (URDF sign); watch whether /joint_states q%d moves %s. "
+        "This is a deliberate debug pulse — keep the E-stop within reach",
+        joint, value, duration * 1e3, joint, value > 0.0 ? "in the positive direction" : "in the negative direction");
 }
 
 ResetState::ResetState(const std::string& name, std::any ctx)
