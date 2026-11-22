@@ -92,7 +92,7 @@ arm_controller:
     #   precheck_samples：终点之外再等分采样的中间点数。单次 IK 最坏约 386 us、
     #     控制周期 2 ms，内部会 clamp 到 3（含终点最多 4 次）。
     pos_move_tolerance: 0.001
-    pos_move_axis_tolerance_deg: 10.0
+    pos_move_axis_tolerance_deg: 5.0
     pos_move_axis_converge_tolerance_deg: 1.0
     pos_move_nullspace_weight: 0.005
     pos_move_precheck_samples: 2

@@ -9,3 +9,9 @@ float32[] seconds
 Vector[] position
 Vector[] velocity
 Vector[] acceleration
+
+# 位置**通过**容差（米）。0 = 沿用控制器 pos_move_tolerance（严格，与收敛判据相同）。
+# 只对位置约束模式（mode=1/2）有效：迭代收敛判据仍是 pos_move_tolerance，
+# 跑完仍未收敛时，停滞点（最近可达位姿）的位置误差在该值以内即判为成功并执行；
+# 超过该值则整条轨迹在下发前被拒绝。box_move 用它做「允许停在离目标多远」。
+float32 position_pass_tolerance

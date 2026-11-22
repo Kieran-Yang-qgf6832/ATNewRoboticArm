@@ -2,14 +2,17 @@
  * @file ik_solve.cpp
  * @brief 用给定的目标与初值跑一次逆解，用于离线复现仿真中的失败用例
  *
- * 用法：ik_solve [--axis|--position] [--accept-axis <deg>] <urdf> <t0..t5> <s0..s5>
+ * 用法：ik_solve [--axis|--position] [--accept-axis <deg>] [--accept-position <m>] <urdf> <t0..t5> <s0..s5>
  *   t* = 任务空间目标（位置 + 旋转向量）
  *   s* = 关节角初值
  *   --axis     = 5 维模式（位置 + 工具 z 轴方向，滚转自由），用于验证 pos_move orientation
  *   --position = 3 维模式（只约束位置），用于区分「位置不可达」与「姿态不可达」
- *   --accept-axis = 5 维模式的**通过**容差（度，默认 10，与控制器 yaml 一致）。
+ *   --accept-axis = 5 维模式的**通过**容差（度，默认 5，与控制器 yaml 一致）。
  *                传 1 即回到「只有收敛判据」的严格行为，可与默认值做 A/B：
  *                同一目标、同一初值下，严格模式报 Unreachable、放宽模式报 Converged。
+ *   --accept-position = 位置的**通过**容差（米，默认 0 = 与收敛判据 1 mm 相同）。
+ *                与 CartTrajCmd.position_pass_tolerance 同义：跑完仍未收敛时，
+ *                停滞点（最近可达位姿）的位置误差在该值以内即判 Converged。
  *
  * @note 只用于离线排查，不参与控制器运行。
  */
@@ -29,10 +32,11 @@
 
 int main(int argc, char** argv) {
     // 可选 flag：放在最前面，保持旧用法（不带 flag）完全不变。
-    int argument_offset     = 1;
-    bool axis_mode          = false;
-    bool position_only      = false;
-    double accept_axis_deg  = 10.0; // 与控制器 pos_move_axis_tolerance_deg 默认值一致
+    int argument_offset        = 1;
+    bool axis_mode             = false;
+    bool position_only         = false;
+    double accept_axis_deg     = 5.0; // 与控制器 pos_move_axis_tolerance_deg 默认值一致
+    double accept_position_m   = 0.0; // 0 = 与收敛判据（1 mm）相同
     while (argument_offset < argc) {
         const std::string flag = argv[argument_offset];
         if (flag == "--axis") {
@@ -44,12 +48,16 @@ int main(int argc, char** argv) {
         } else if (flag == "--accept-axis" && argument_offset + 1 < argc) {
             accept_axis_deg = std::atof(argv[argument_offset + 1]);
             argument_offset += 2;
+        } else if (flag == "--accept-position" && argument_offset + 1 < argc) {
+            accept_position_m = std::atof(argv[argument_offset + 1]);
+            argument_offset += 2;
         } else {
             break;
         }
     }
     if (argc < 13 + argument_offset) {
-        fprintf(stderr, "usage: ik_solve [--axis|--position] [--accept-axis <deg>] <urdf> <t0..t5> <s0..s5>\n");
+        fprintf(stderr, "usage: ik_solve [--axis|--position] [--accept-axis <deg>] [--accept-position <m>] "
+                        "<urdf> <t0..t5> <s0..s5>\n");
         return 1;
     }
 
@@ -58,13 +66,13 @@ int main(int argc, char** argv) {
     IKSolver solver(model, mapping);
     constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
     if (axis_mode) {
-        // 与控制器 yaml 的默认值一致：收敛 1°、通过 10°。只按收敛判据会报 Unreachable，
-        // 看不出「差 6° 但已经能用」，排查放宽区间时容易误判；--accept-axis 1 可回到严格行为。
+        // 与控制器 yaml 的默认值一致：收敛 1°、通过 5°。只按收敛判据会报 Unreachable，
+        // 看不出「差 3° 但已经能用」，排查放宽区间时容易误判；--accept-axis 1 可回到严格行为。
         mapping->set_pose_mode(PoseMode::kPositionAndToolAxis);
-        solver.set_solve_options(1e-3, 1.0 * kDegToRad, 0.005, accept_axis_deg * kDegToRad);
+        solver.set_solve_options(1e-3, 1.0 * kDegToRad, 0.005, accept_axis_deg * kDegToRad, accept_position_m);
     } else if (position_only) {
         mapping->set_pose_mode(PoseMode::kPositionOnly);
-        solver.set_solve_options(1e-3, 0.0, 0.005);
+        solver.set_solve_options(1e-3, 0.0, 0.005, 0.0, accept_position_m);
     }
 
     const int dof = model->dof();
@@ -103,9 +111,15 @@ int main(int argc, char** argv) {
     if (axis_mode) {
         // 分离判据：位置与工具轴各自报，便于区分「位置不可达」与「工具轴对不齐」。
         printf(
-            "pos/axis   = %.6e m / %.4f deg (converge <= 1.0 deg, accept <= %.3g deg, relaxed_accept = %s)\n",
+            "pos/axis   = %.6e m / %.4f deg (converge <= 1.0 deg, accept <= %.3g deg, relaxed_axis = %s)\n",
             solver.last_position_error_norm(), solver.last_axis_error_norm() / kDegToRad, accept_axis_deg,
             solver.last_used_relaxed_axis() ? "yes" : "no");
+    }
+    if (axis_mode || position_only) {
+        const double effective_pass = accept_position_m > 1e-3 ? accept_position_m : 1e-3;
+        printf(
+            "pos pass   = %.6e m (pass <= %.3g m, relaxed_position = %s)\n", solver.last_position_error_norm(),
+            effective_pass, solver.last_used_relaxed_position() ? "yes" : "no");
     }
     printf("iterations = %d\n", solver.last_iterations());
     printf("solve_time = %.1f us/次（%d 次平均）\n", microseconds_per_solve, kRepeatCount);

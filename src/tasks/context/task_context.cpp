@@ -321,14 +321,15 @@ bool TaskContext::latest_target_face(robot_msgs::msg::TargetFace* msg) const {
     return true;
 }
 
-bool TaskContext::publish_cart_traj(
-    const std::vector<std::vector<float>>& points, const std::vector<float>& seconds, std::uint8_t mode) const {
+bool TaskContext::publish_cart_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds,
+                                    std::uint8_t mode, double position_pass_tolerance) const {
     robot_msgs::msg::CartTrajCmd msg;
     if (!fill_trajectory_message(points, seconds, kTaskDof, &msg)) {
         return false;
     }
 
-    msg.mode = mode;
+    msg.mode                    = mode;
+    msg.position_pass_tolerance = position_pass_tolerance > 0.0 ? static_cast<float>(position_pass_tolerance) : 0.0f;
     cart_traj_pub_->publish(msg);
     return true;
 }

@@ -161,21 +161,27 @@ private:
      *       在这条日志里，不作为判据。
      *
      * @param precheck_rejected 输出：若控制器在**未运动**的情况下因预检拒绝而离开
-     *        cart_traj，置 true；box_move 用它决定是否回退到 position-only。
+     *        cart_traj，置 true（仅用于诊断；回退逻辑已移除）。
      * @param strict_position 为 true 时，位置残差超过 @c step.tolerance 直接判失败；
      *        为 false 时沿用 pos_move 的“只告警”行为。
+     * @param position_pass_tolerance 位置**通过**容差（米）：随轨迹下发给控制器，
+     *        0 = 严格（与控制器收敛判据相同）。box_move 传 @c step.tolerance，
+     *        使「允许停在离目标多远」与任务层验收是同一个值。
      */
     bool run_position_move(const Step& step, std::string* error, bool* precheck_rejected = nullptr,
-                           bool strict_position = false);
+                           bool strict_position = false, double position_pass_tolerance = 0.0);
 
     /**
      * @brief 执行 box_move：读取视觉目标面 TF，移动到箱体位姿
      *
      * 目标来源为 @c frame（默认 target_face）在基座系下的 TF，并同时检查
-     * TargetFace 消息的 valid 与时间戳新鲜度。5 维模式（位置 + 工具 z 轴）优先：
+     * TargetFace 消息的 valid 与时间戳新鲜度。5 维模式（位置 + 工具 z 轴）：
      * link6 原点 = 面心 - tool_offset * 面 z，使工具尖端落在面心。
-     * 若控制器预检在未运动时拒绝，则自动回退为 position-only（目标仍为同一
-     * link6 位置，姿态不约束）；回退成功时步骤成功并上报告警。
+     *
+     * 可达性只有一档：控制器按 1 mm 收敛，追不上时停在最近可达位姿，
+     * 位置误差 ≤ @c step.tolerance（box_move 默认 5 cm）即算成功（控制器打 WARN，
+     * 任务层按同一值验收）；超过 5 cm 或工具轴误差 > 5° 时直接失败，原地保持，
+     * 不回退到 position-only、不重试。
      */
     bool run_box_move(const Step& step, std::string* error);
 
@@ -222,7 +228,7 @@ private:
     double default_max_drift_deg_{10.0};                   ///< pos_move 默认姿态漂移告警阈值（度）
     /// pos_move / box_move 工具 z 轴角**通过**容差（度）；必须与控制器
     /// pos_move_axis_tolerance_deg 一致。控制器的收敛容差（默认 1°）更严，这里只看最终验收。
-    double default_axis_tolerance_deg_{10.0};
+    double default_axis_tolerance_deg_{5.0};
     /// box_move 的全局默认：视觉目标帧、工具尖端长度、等待与新鲜度阈值
     std::string box_frame_{"target_face"};
     double box_tool_offset_{0.039};

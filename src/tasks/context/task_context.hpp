@@ -173,11 +173,14 @@ public:
      * @param seconds 与 @p points 一一对应的时刻（相对轨迹起点，秒）
      * @param mode    任务空间模式：0 = 完整 6 维位姿（默认），1 = 只约束位置
      *                （见 CartTrajCmd.msg 的 MODE_* 常量）
+     * @param position_pass_tolerance 位置**通过**容差（米）：控制器收敛判据不变，
+     *                跑完未收敛时停在最近可达位姿，位置误差在该值以内仍执行。
+     *                0 = 沿用控制器参数（严格）。只对位置约束模式有效。
      * @return true 发布成功；false 参数非法
      * @note 速度/加速度前馈留空，控制器按 0 处理。
      */
     bool publish_cart_traj(const std::vector<std::vector<float>>& points, const std::vector<float>& seconds,
-                           std::uint8_t mode = 0) const;
+                           std::uint8_t mode = 0, double position_pass_tolerance = 0.0) const;
 
     /**
      * @brief 发布关节空间轨迹指令

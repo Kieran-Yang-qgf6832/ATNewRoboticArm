@@ -331,8 +331,12 @@ private:
     PoseMode pose_mode_{PoseMode::kFullPose};
     /// 位置约束类轨迹的容差：纯位置容差（米）、工具 z 轴角容差（弧度）、零空间偏好权重
     double position_tolerance_{1e-3};
+    /// 位置**通过**容差（米）：由 CartTrajCmd.position_pass_tolerance 按轨迹下发。
+    /// 迭代收敛判据仍是 position_tolerance_；跑完未收敛时，停在最近可达位姿上，
+    /// 位置误差在该值以内仍算成功。0 = 与收敛判据相同（严格）。
+    double position_pass_tolerance_{0.0};
     /// 工具 z 轴的**通过**容差（弧度）；仅 position-and-axis 模式使用，与任务层验收同值
-    double axis_tolerance_{1.7453292519943296e-1}; ///< 10°
+    double axis_tolerance_{8.726646259971648e-2}; ///< 5°
     /// 工具 z 轴的**收敛**容差（弧度）：迭代一进入就停，保证能对齐的目标精确对齐
     double axis_converge_tolerance_{1.7453292519943296e-2}; ///< 1°
     double nullspace_weight_{0.0};

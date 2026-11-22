@@ -38,6 +38,11 @@ constexpr double kDefaultJointTolerance = 0.01;
 /// cart_move 默认到位容差（米）。
 constexpr double kDefaultCartTolerance = 0.005;
 
+/// box_move 默认的「允许停在离目标多远」（米）。与 cart_move 的 5 mm 不同：
+/// 5D 目标贴到可达边界时控制器会停在最近可达位姿，这个值同时作为控制器的
+/// 位置通过容差与任务层验收，超过它才判失败（见 task_executor.hpp 的 run_box_move）。
+constexpr double kDefaultBoxTolerance = 0.05;
+
 /// 多路点轨迹允许的最大路点数（与控制器侧约定一致）。
 constexpr std::size_t kMaxWaypoints = 8;
 
@@ -887,7 +892,7 @@ bool TaskExecutor::validate_step(Step* step, std::string* error) const {
             step->tool_offset = box_tool_offset_;
         }
         if (!(step->tolerance > 0.0)) {
-            step->tolerance = kDefaultCartTolerance;
+            step->tolerance = kDefaultBoxTolerance;
         }
         return true;
     }
@@ -1696,7 +1701,8 @@ bool TaskExecutor::run_task_space_move(const Step& step, const std::string& stat
     return true;
 }
 
-bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool* precheck_rejected, bool strict_position) {
+bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool* precheck_rejected, bool strict_position,
+                                     double position_pass_tolerance) {
     const auto fail = [error](const std::string& message) {
         if (error != nullptr) {
             *error = message;
@@ -1754,7 +1760,9 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool*
         constrain_tool_axis ? robot_msgs::msg::CartTrajCmd::MODE_POSITION_AND_TOOL_AXIS : robot_msgs::msg::CartTrajCmd::MODE_POSITION_ONLY;
     const std::vector<std::vector<float>> points{to_float(start_pose), to_float(target_pose)};
     const std::vector<float> seconds{0.0f, static_cast<float>(step.duration)};
-    if (!ctx_->publish_cart_traj(points, seconds, mode)) {
+    // 位置通过容差随轨迹下发：控制器收敛判据不变，追不上时停在最近可达位姿，
+    // 误差在该值以内仍执行。0 = 严格（与控制器 pos_move_tolerance 相同）。
+    if (!ctx_->publish_cart_traj(points, seconds, mode, position_pass_tolerance)) {
         return fail("failed to publish the position-constrained trajectory");
     }
 
@@ -1766,25 +1774,38 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool*
         RCLCPP_INFO(
             node_->get_logger(),
             "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], tool axis [%.3f %.3f %.3f] -> "
-            "[%.3f %.3f %.3f] (%.2f deg), moving in %.2f s",
+            "[%.3f %.3f %.3f] (%.2f deg), moving in %.2f s (may stop up to %.3f m short)",
             step.type.c_str(), start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2],
             start_axis.x(), start_axis.y(), start_axis.z(), target_axis.x(), target_axis.y(), target_axis.z(), axis_change_deg,
-            step.duration);
+            step.duration, position_pass_tolerance);
     } else {
         RCLCPP_INFO(
             node_->get_logger(),
             "%s: start [%.3f %.3f %.3f], target [%.3f %.3f %.3f], moving in %.2f s "
-            "(orientation unconstrained)",
+            "(orientation unconstrained, may stop up to %.3f m short)",
             step.type.c_str(), start_pose[0], start_pose[1], start_pose[2], target_pose[0], target_pose[1], target_pose[2],
-            step.duration);
+            step.duration, position_pass_tolerance);
     }
 
-    sleep_with_spin(node_, step.duration);
+    // 边等边查状态：预检拒绝在几毫秒内就发生（状态参数 500 ms 刷新），
+    // 没必要等满 duration 才发现。成功路径行为不变：控制器在轨迹跑完后仍停在 cart_traj。
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(step.duration);
+        rclcpp::WallRate rate(20.0);
+        while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+            ctx_->spin_some();
+            const std::string state_now = ctx_->controller_state(0.5);
+            if (!state_now.empty() && state_now != state_name) {
+                break; // 预检拒绝或中途失败：立刻收尾，交给下面的失败分类
+            }
+            rate.sleep();
+        }
+    }
 
     const std::string state = ctx_->controller_state(2.0);
     if (state != state_name) {
-        // 区分「预检拒绝、完全没动」与「运动中途失败」：前者允许 box_move 回退到
-        // position-only；后者可能已经有部分运动，绝不能自动重试。
+        // 区分「预检拒绝、完全没动」与「运动中途失败」：前者是目标超出 5 cm / 轴 5°
+        // 的允许范围，后者可能已经有部分运动。两种情况都不重试、不回退，只报出差异。
         double moved_m   = 0.0;
         double angle_deg = 180.0;
         std::vector<double> pose_after_failure;
@@ -1804,7 +1825,9 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool*
         return fail(
             "arm_controller left " + state_name + " (now '" + (state.empty() ? std::string("<unknown>") : state)
             + "') after moving " + format_number(moved_m, 4) + " m / " + format_number(angle_deg, 2) + " deg; "
-            + (no_motion ? "treated as a pre-check rejection before motion"
+            + (no_motion ? "treated as a pre-check rejection before motion (target exceeds the "
+                               + format_number(position_pass_tolerance, 3) + " m / "
+                               + format_number(default_axis_tolerance_deg_, 2) + " deg allowance; see the controller log)"
                          : "motion had already started, no automatic fallback"));
     }
 
@@ -1865,8 +1888,8 @@ bool TaskExecutor::run_position_move(const Step& step, std::string* error, bool*
         }
         if (step.type == "box_move") {
             // 尖端偏移只读：位置判据看 link6 原点，而工具尖端随轴角倾斜偏移
-            // 2·tool_offset·sin(θ/2)。默认容差下 10° / 0.039 m 约 6.8 mm，已大于 5 mm
-            // 的位置容差，所以必须打出来，避免「位置达标就等于贴面」的误读。
+            // 2·tool_offset·sin(θ/2)。默认容差下 5° / 0.039 m 约 3.4 mm，与 5 mm
+            // 的位置容差同量级，所以必须打出来，避免「位置达标就等于贴面」的误读。
             const double tip_offset_mm = 2.0 * step.tool_offset * std::sin(0.5 * error_deg * kDegToRad) * 1000.0;
             RCLCPP_INFO(
                 node_->get_logger(),
@@ -1986,33 +2009,14 @@ bool TaskExecutor::run_box_move(const Step& step, std::string* error) {
         frame.c_str(), target_age, face_pose[0], face_pose[1], face_pose[2], face_axis.x(), face_axis.y(), face_axis.z(),
         tool_offset, resolved.position[0], resolved.position[1], resolved.position[2]);
 
-    bool precheck_rejected = false;
-    std::string first_error;
-    if (run_position_move(resolved, &first_error, &precheck_rejected, true)) {
-        return true;
+    // 可达性只有一档：step.tolerance（默认 5 cm）同时是控制器的位置通过容差和
+    // 任务层验收。控制器按 1 mm 收敛，追不上时停在最近可达位姿；超过 5 cm 或
+    // 工具轴误差 > 5° 时预检拒绝、原地保持。不再回退到 position-only——
+    // 「丢姿态换位置」会让工具尖端的落点失去定义，宁可明确失败。
+    std::string move_error;
+    if (!run_position_move(resolved, &move_error, nullptr, true, step.tolerance)) {
+        return fail(move_error);
     }
-    if (!precheck_rejected) {
-        return fail(first_error);
-    }
-
-    // 5 维预检拒绝且没有产生运动：放宽为只到位置。目标仍是同一个 link6 位置
-    // （面心 - tool_offset * 面 z），姿态不约束；工具尖端位置不再有定义。
-    RCLCPP_WARN(
-        node_->get_logger(),
-        "box_move: tool-axis target is unreachable before motion; falling back to position-only "
-        "(orientation unconstrained): %s",
-        first_error.c_str());
-    if (status_sink_) {
-        status_sink_("sequence:warning: box_move fell back to position-only (tool-axis target unreachable)");
-    }
-
-    resolved.orientation.clear();
-    resolved.max_drift_deg = default_max_drift_deg_;
-    std::string fallback_error;
-    if (!run_position_move(resolved, &fallback_error, nullptr, true)) {
-        return fail("position-only fallback failed: " + fallback_error);
-    }
-    RCLCPP_WARN(node_->get_logger(), "box_move finished with position-only fallback; orientation is unconstrained");
     return true;
 }
 

@@ -199,7 +199,7 @@ controller_interface::CallbackReturn ArmController::on_init() {
     //   nullspace_weight：零空间「就近」偏好权重，0 = 关闭；
     //   precheck_samples：终点之外再等分采样的中间点数，受实时预算限制（见 arm_fsm.cpp）。
     auto_declare<double>("pos_move_tolerance", 1e-3);
-    auto_declare<double>("pos_move_axis_tolerance_deg", 10.0);
+    auto_declare<double>("pos_move_axis_tolerance_deg", 5.0);
     auto_declare<double>("pos_move_axis_converge_tolerance_deg", 1.0);
     auto_declare<double>("pos_move_nullspace_weight", 0.005);
     auto_declare<int>("pos_move_precheck_samples", 2);

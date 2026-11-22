@@ -29,6 +29,10 @@ constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
 /// 控制周期 2 ms，含终点在内最多 4 次（约 1.54 ms），再多就可能被实时周期卡住。
 constexpr int kMaxPrecheckSamples = 3;
 
+/// 消息里位置通过容差的上限（米）：超过它等于「不要求到位」，属于配置错误，
+/// clamp 并告警，避免一个手滑的 5.0 让整条轨迹在任何地方都算成功。
+constexpr double kMaxPositionPassTolerance = 0.5;
+
 /// 轨迹边界偏差告警阈值（rad，O19）。段末 |终点 − 实测| 或段首 |首点 − 上一帧命令|
 /// 超过它，说明这一段根本没跟上目标；只告警、不改变行为。
 constexpr double kTrajectoryBoundaryDeviationWarn = 0.1;
@@ -674,10 +678,10 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
     if (!(nullspace_weight_ > 0.0)) {
         nullspace_weight_ = 0.0;
     }
-    // 工具 z 轴角容差：配置单位是度，内部统一用弧度。非法值退回 10°（通过）/ 1°（收敛）。
+    // 工具 z 轴角容差：配置单位是度，内部统一用弧度。非法值退回 5°（通过）/ 1°（收敛）。
     // 两档的语义：迭代先按收敛容差走，进入即停；跑完仍未达到时再用通过容差裁决。
     const double axis_tolerance_deg = factory->node_->get_parameter("pos_move_axis_tolerance_deg").as_double();
-    axis_tolerance_                 = axis_tolerance_deg > 0.0 ? axis_tolerance_deg * kDegToRad : 10.0 * kDegToRad;
+    axis_tolerance_                 = axis_tolerance_deg > 0.0 ? axis_tolerance_deg * kDegToRad : 5.0 * kDegToRad;
     const double axis_converge_deg  = factory->node_->get_parameter("pos_move_axis_converge_tolerance_deg").as_double();
     axis_converge_tolerance_        = axis_converge_deg > 0.0 ? axis_converge_deg * kDegToRad : kDegToRad;
     if (axis_converge_tolerance_ > axis_tolerance_) {
@@ -740,11 +744,26 @@ CartTrajState::CartTrajState(const std::string& name, std::any ctx)
                 pose_mode_ = PoseMode::kFullPose;
             }
             factory->task_map_->set_pose_mode(pose_mode_);
-            // 分离判据只在 5 维模式启用；纯位置仍用单一位置范数，6 维位姿用默认混合范数。
-            // 第 2 个参数是迭代停止用的收敛容差，第 4 个是跑完后的放宽通过容差，别写反。
+
+            // 位置**通过**容差由消息按轨迹下发：收敛判据仍是 pos_move_tolerance，
+            // 跑完未收敛时用它裁决「停在最近可达位姿算不算成功」。0 / 非法值 = 严格。
+            double position_pass = msg.position_pass_tolerance;
+            if (!std::isfinite(position_pass) || position_pass < 0.0) {
+                position_pass = 0.0;
+            } else if (position_pass > kMaxPositionPassTolerance) {
+                RCLCPP_WARN(
+                    factory->node_->get_logger(),
+                    "CartTrajCmd.position_pass_tolerance=%.3f m exceeds the %.1f m limit; clamped", position_pass,
+                    kMaxPositionPassTolerance);
+                position_pass = kMaxPositionPassTolerance;
+            }
+            position_pass_tolerance_ = constrained ? position_pass : 0.0;
+
+            // 分离判据只在位置约束类轨迹启用；6 维位姿用默认混合范数。
+            // 第 2 个参数是迭代停止用的收敛容差，第 4/5 个是跑完后的放宽通过容差，别写反。
             factory->arm_solve_->set_solve_options(
                 constrained ? position_tolerance_ : 0.0, tool_axis_only ? axis_converge_tolerance_ : 0.0,
-                constrained ? nullspace_weight_ : 0.0, tool_axis_only ? axis_tolerance_ : 0.0);
+                constrained ? nullspace_weight_ : 0.0, tool_axis_only ? axis_tolerance_ : 0.0, position_pass_tolerance_);
 
             // 终点沿用 6 维消息契约；投影由映射层按当前模式完成。
             const auto& final_waypoint = msg.position.back().pos;
@@ -1138,8 +1157,12 @@ bool CartTrajState::run(const rclcpp::Time& time) {
         bool reachable  = check_target_reachable(precheck_target_, &residual);
         // 只记录**终点**的解算状态：中间采样点的结果会在循环里覆盖 last_ik_*，
         // 用它们判断「是否靠放宽容差通过」会拿到最后一个采样点的结论。
-        const bool relaxed_accept = factory->arm_solve_->last_ik_used_relaxed_axis();
-        const double relaxed_axis_deg = factory->arm_solve_->last_ik_axis_error_norm() / kDegToRad;
+        const bool relaxed_axis     = factory->arm_solve_->last_ik_used_relaxed_axis();
+        const bool relaxed_position = factory->arm_solve_->last_ik_used_relaxed_position();
+        const double relaxed_axis_deg    = factory->arm_solve_->last_ik_axis_error_norm() / kDegToRad;
+        const double relaxed_position_m  = factory->arm_solve_->last_ik_position_error_norm();
+        // 位置通过容差 0 表示「与收敛判据相同」，日志里统一打印实际生效值。
+        const double position_pass_m = position_pass_tolerance_ > position_tolerance_ ? position_pass_tolerance_ : position_tolerance_;
         for (int i = 0; reachable && i < precheck_count_; ++i) {
             reachable = check_target_reachable(precheck_samples_[static_cast<std::size_t>(i)], &residual);
         }
@@ -1163,9 +1186,10 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                         factory->node_->get_logger(),
                         "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest "
                         "reachable pose is still %.6f m away in position and %.3f deg away in tool-axis direction "
-                        "(IK tolerances are %.1e m and %.3g deg, with a %.3g deg convergence target). Fix the target, not the solver.",
-                        position_residual, axis_residual_deg, position_tolerance_, axis_tolerance_ / kDegToRad,
-                        axis_converge_tolerance_ / kDegToRad);
+                        "(position converge %.1e m / pass %.1e m, axis converge %.3g deg / pass %.3g deg). "
+                        "Fix the target, not the solver.",
+                        position_residual, axis_residual_deg, position_tolerance_, position_pass_m,
+                        axis_converge_tolerance_ / kDegToRad, axis_tolerance_ / kDegToRad);
                 } else {
                     RCLCPP_ERROR(
                         factory->node_->get_logger(),
@@ -1179,12 +1203,22 @@ bool CartTrajState::run(const rclcpp::Time& time) {
                 if (unreachable) {
                     // 这是「目标不可达」，不是「求解器坏了」：报出最近可达位姿离终点还有多远，
                     // 让操作者知道该改目标，而不是去查逆解器。
-                    RCLCPP_ERROR(
-                        factory->node_->get_logger(),
-                        "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
-                        "pose is still %.6f %s away from it (IK tolerance is %.1e %s). Without this pre-check the arm would "
-                        "have walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
-                        residual, unit, tolerance, unit);
+                    if (position_only) {
+                        RCLCPP_ERROR(
+                            factory->node_->get_logger(),
+                            "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest "
+                            "reachable pose is still %.6f m away from it (position converge %.1e m / pass %.1e m). "
+                            "Without this pre-check the arm would have walked to the edge of its workspace and only then "
+                            "aborted. Fix the target, not the solver.",
+                            residual, tolerance, position_pass_m);
+                    } else {
+                        RCLCPP_ERROR(
+                            factory->node_->get_logger(),
+                            "Cartesian trajectory REJECTED before any motion: the target is UNREACHABLE — the nearest reachable "
+                            "pose is still %.6f %s away from it (IK tolerance is %.1e %s). Without this pre-check the arm would "
+                            "have walked to the edge of its workspace and only then aborted. Fix the target, not the solver.",
+                            residual, unit, tolerance, unit);
+                    }
                 } else {
                     RCLCPP_ERROR(
                         factory->node_->get_logger(),
@@ -1195,7 +1229,16 @@ bool CartTrajState::run(const rclcpp::Time& time) {
             }
             return false;
         }
-        if (pose_mode_ == PoseMode::kPositionAndToolAxis && relaxed_accept) {
+        if (relaxed_position) {
+            // 预检通过，但终点只是靠位置通过容差成立：收敛判据其实达不到，臂会停在
+            // 最近可达位姿。必须打出来，否则「预检没报错」会被误读成「精确到位」。
+            RCLCPP_WARN(
+                factory->node_->get_logger(),
+                "target accepted with the relaxed position pass tolerance: nearest reachable pose is %.4f m away "
+                "(converge %.1e m, pass %.1e m); the arm will stop short",
+                relaxed_position_m, position_tolerance_, position_pass_m);
+        }
+        if (pose_mode_ == PoseMode::kPositionAndToolAxis && relaxed_axis) {
             // 预检通过，但终点只是靠放宽的通过容差成立：1° 收敛判据其实达不到。
             // 必须打出来，否则「预检没报错」会被误读成「工具轴精确对齐」。
             RCLCPP_WARN(

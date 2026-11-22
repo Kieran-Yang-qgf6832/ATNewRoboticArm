@@ -9,8 +9,9 @@
 #   cart_move       笛卡尔轨迹；offset 为相对当前末端位姿的位移（3 维），严格保持姿态
 #   pos_move        把末端移动到基座系绝对位置（to / position）；可选 orientation
 #                   约束 link6 的 z 轴方向，缺省则姿态完全不参与收敛
-#   box_move        读取视觉目标面 TF，移动到箱体位姿；工具 z 对齐面 z，
-#                   5D 预检不可达时自动回退到只到位置
+#   box_move        读取视觉目标面 TF，移动到箱体位姿；工具 z 对齐面 z。
+#                   追不上时停在最近可达位姿，位置误差 ≤ tolerance（默认 5 cm）
+#                   仍算成功；超过 5 cm 或工具轴误差 > 5° 直接失败、原地保持
 #   admittance_move 导纳控制下的期望轨迹；同样用 offset
 #   tool            末端执行器开关量；action 取下面 tool 段定义的语义名
 #   teach           示教；需 duration
@@ -57,7 +58,7 @@ points:
   # 直接从 ready 走一条 1.2 m 的长直线会撞关节限位/不可达区；先粗定位再回退。
   box_low_pregrasp: [0.0, 0.872665, -2.268928, -0.698132, 0.0, 0.0]
   # joint5 压到 URDF 上限（±0.4 rad）的探针位形，与 axis_limit_pos 配合，
-  # 用来验证「收敛 1° / 通过 10°」的放宽分支（见 pos_axis_relaxed）。
+  # 用来验证「收敛 1° / 通过 5°」的放宽分支（见 pos_axis_relaxed）。
   axis_limit_ready: [0.0, 0.3, -0.3, 0.0, 0.4, 0.0]
 
 # 基座系绝对目标点（pos_move 专用，单位：米）。只存 [x, y, z]，与上面 points 的
@@ -70,7 +71,7 @@ positions:
   below_ready_5cm: [-0.147874, -0.015725, 1.182796]
   # 5D 放宽分支的验收目标：axis_limit_ready（joint5=0.4 rad）实测 link6 位置。
   # 配合一条比限位允许方向多 4° 的工具轴目标使用：IK 只能对齐到约 3.5°，
-  # 位置残余约 0.7 mm，正好落在「收敛 1° / 通过 10°」之间。
+  # 位置残余约 0.7 mm，正好落在「收敛 1° / 通过 5°」之间。
   axis_limit_pos: [-0.519350, -0.004953, 1.131781]
 
 # pos_move / box_move 的默认参数。
@@ -79,19 +80,25 @@ positions:
 # axis_tolerance_deg：写了 orientation 时工具 z 轴角误差的**通过判据**（度）。
 #   必须与控制器 ros2_controller.yaml 的 pos_move_axis_tolerance_deg 保持一致。
 #   控制器是两档的：pos_move_axis_converge_tolerance_deg（默认 1°）控制迭代在哪停，
-#   本值（10°）只决定「跑完仍未对齐时算不算通过」；能对齐的目标仍会精确对齐。
-#   注意工具尖端会随倾斜偏移 2·tool_offset·sin(θ/2)（10° 约 6.8 mm），
+#   本值（5°）只决定「跑完仍未对齐时算不算通过」；能对齐的目标仍会精确对齐。
+#   注意工具尖端会随倾斜偏移 2·tool_offset·sin(θ/2)（5° 约 3.4 mm），
 #   位置判据看的是 link6 原点，尖端偏移只在 box_move 的日志里打印、不参与判据。
 position_move:
   max_drift_deg: 10.0
-  axis_tolerance_deg: 10.0
+  axis_tolerance_deg: 5.0
 
 # box_move 的全局默认。
 # frame：视觉目标帧名，必须与 /target_face 消息的 child_frame_id 一致；
 # tool_offset：link6 +z 到工具尖端的距离（米）。5D 目标位置 = 面心 - tool_offset * 面 z，
-#   即工具尖端落在面心；回退到 position-only 时仍用同一个 link6 位置。
+#   即工具尖端落在面心。
 # target_timeout：等待 valid 目标的最长时间（秒）。
 # max_age：TargetFace 与 TF 时间戳允许的最大年龄（秒）；防止视觉节点卡住时用旧目标。
+#
+# 可达性只有一档：步骤的 tolerance（默认 5 cm，见 task_executor.cpp 的
+# kDefaultBoxTolerance）同时作为 CartTrajCmd.position_pass_tolerance 和任务层验收。
+# 控制器仍按 1 mm 收敛；追不上时停在最近可达位姿，留 WARN，位置误差 ≤ 5 cm 算成功。
+# 超过 5 cm 或工具轴误差 > 5°（pos_move_axis_tolerance_deg）时预检直接拒绝、
+# 臂原地保持，任务以退出码 1 结束；不再回退到只约束位置。
 box_move:
   frame: target_face
   tool_offset: 0.039
@@ -276,7 +283,7 @@ sequences:
   #      cart constraint: ... axis_tolerance=10 deg (converge 1 deg)
   #   2) 5D 目标能正常下发、预检不报错、任务层验收通过。
   # 放宽分支本身的确定性证明用 ik_solve 的 A/B（同一目标、同一初值：
-  # --accept-axis 1 → Unreachable，默认 10 → Converged），见 docs/execute/07。
+  # --accept-axis 1 → Unreachable，默认 5 → Converged），见 docs/execute/07。
   pos_axis_limit_probe:
     steps:
       - {type: reset}
@@ -294,15 +301,14 @@ sequences:
       - {type: box_move, duration: 2.0}
       - {type: idel}
 
-  # 低处回退验证：原 scene_vision.xml（箱体/相机 z≈0.175）。
-  # 5D 预检会拒绝，box_move 自动回退到 position-only；低处目标已接近该臂
-  # 的实际可达边界，实测残差约 1.2 cm，所以这里把位置容差放宽到 2 cm。
-  # 若位置也超出容差，步骤会失败（退出码 1），日志里能看到回退原因和残差。
+  # **预期失败**：原 scene_vision.xml（箱体/相机 z≈0.175）在当前模型下预检会拒绝
+  # （O18：模型换代后目标点未重测），且不再有 position-only 回退，所以臂一步不动。
+  # 用来确认「不可达 → 放弃」这条边界；若这条意外通过，说明容差或预检被改坏了。
   box_move_low:
     steps:
       - {type: reset}
       - {type: joint_move, to: box_low_pregrasp, duration: 6.0}
-      - {type: box_move, duration: 4.0, tolerance: 0.02}
+      - {type: box_move, duration: 4.0}
       - {type: idel}
 
   # ==========================================================================
