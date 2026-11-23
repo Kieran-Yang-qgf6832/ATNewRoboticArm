@@ -24,6 +24,8 @@ setup(
     entry_points={
         'console_scripts': [
             'servo_track_demo = arm_servo_demo.servo_track_demo:main',
+            'servo_track_test = arm_servo_demo.servo_track_test:main',
+            'ball_keyboard = arm_servo_demo.ball_keyboard:main',
         ],
     },
 )
