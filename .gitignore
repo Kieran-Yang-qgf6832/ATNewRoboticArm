@@ -26,3 +26,5 @@ __pycache__/
 # rosbag 出图产物（docs/rosbags 由 launch_pack/tools/plot_rosbag.py 生成，不属于文档）
 /docs/rosbags/
 /.codebuddy/
+/.arts/
+/.codeartsdoer/
