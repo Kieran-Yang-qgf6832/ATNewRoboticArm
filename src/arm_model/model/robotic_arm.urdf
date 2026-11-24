@@ -30,6 +30,11 @@
        视觉验证时由 launch 传 scene_vision.xml（多一台相机和一个红色目标箱）。
        只影响仿真硬件块，实机与 pinocchio 解析都不读它。 -->
   <xacro:arg name="mujoco_model" default="$(find arm_model)/model/scene.xml"/>
+  <!-- floating_base：去掉虚拟根链接 world，让 base_link 成为 TF 树的根。
+       仅用于「基座运动补偿」仿真：基座在 MuJoCo 里是 mocap 运动学体，world→base_link
+       由 arm_base_motion 的 TF 节点按基座状态话题动态发布。默认为 false（现有链路不变）。
+       注意控制器自己加载的是**未展开的原始 URDF**，因此它的 Pinocchio 模型始终是固定基座。 -->
+  <xacro:arg name="floating_base" default="false"/>
 
   <xacro:if value="${'$(arg hardware)' == 'mujoco'}">
   <ros2_control name="arm_hw" type="system">
@@ -221,13 +226,18 @@
 
   </ros2_control>
   </xacro:unless>
-  <!-- 虚拟根链接，解决KDL根链接惯量问题 -->
+  <!-- 虚拟根链接，解决KDL根链接惯量问题。
+       floating_base:=true 时整块去掉：基座在仿真里是自由体，world→base_link 由
+       arm_base_motion 的 TF 节点动态发布；否则 robot_state_publisher 会再发一遍
+       静态的 world→base_link，两个发布者互相打架。 -->
+  <xacro:unless value="${'$(arg floating_base)' == 'true'}">
   <link name="world"/>
   <joint name="world_to_base" type="fixed">
     <parent link="world"/>
     <child link="base_link"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
+  </xacro:unless>
   <link
     name="base_link">
     <inertial>

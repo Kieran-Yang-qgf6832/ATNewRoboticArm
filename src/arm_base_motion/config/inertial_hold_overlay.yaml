@@ -1,0 +1,66 @@
+# 叠加到 launch_pack/config/ros2_controller.yaml 之上（ParameterFile 后一个覆盖前一个）。
+#
+# 与 real-compat 叠加文件同一套用法：只写本次实验需要覆盖的键，其余沿用基础配置。
+
+arm_controller:
+  ros__parameters:
+    # 上电（激活）后先复位到 reset_joint_pos；launch 里的定时器再把它切到
+    # inertial_hold。这样目标快照一定发生在「已复位、已稳定」之后。
+    exp_state: reset
+
+    # 复位位形必须**不是全零**：零位姿下手臂几乎完全伸展（末端 z ≈ 1.30 m），
+    # 处于奇异位形，基座一动世界目标在 base 系里就落到可达域边界外，逆解必然失败。
+    # 这里取离线扫出来的折叠位形：末端 (0.46, 0.04, 0.28) m、雅可比可操作度 0.54，
+    # 与各关节限位都留有余量。
+    reset_joint_pos: [0.0, 0.0, 2.0, -1.0, 0.0, 0.0]
+
+    # 惯性保持专用增益：缺省回落 default_kp/kd。末端三个关节的全局增益（10/10/1）
+    # 是给「静止保持 + 重力静差」调的，基座一跑就会明显滞后，所以这里单独加压。
+    # joint6 必须比全局值硬得多：MJCF 里 joint6 带 damping="2.0"，准静态下位置误差
+    # ≈ 2·v/kp（kp=8 时基座 yaw ±15° 留下约 0.08 rad / 末端 38 mm，姿态峰值 0.52 deg）。
+    # 220 是实测能过门槛的值（姿态峰值 0.37 deg）；上限在 220~400 之间：joint6 惯量约
+    # 7.6e-5 kg·m²，kp=400 时 kp·dt²/I 越过 500 Hz 离散稳定边界，腕部直接抖飞（89 deg）。
+    # joint5 只有 ±0.4 rad 行程，kp 抬到 60 时会在限位上硬顶（实测被顶到 1.24 rad），
+    # 这里保守保持 40。
+    # joint1~3 的惯量都在 0.1 kg·m² 以上，kp 抬到 600 仍远在 500 Hz 离散稳定边界内；
+    # 末端姿态误差是各关节跟踪误差的叠加，抬这几路的刚度比继续抬 joint6 更安全。
+    inertial_hold_kp: [600.0, 600.0, 600.0, 80.0, 40.0, 220.0]
+    inertial_hold_kd: [20.0, 20.0, 20.0, 2.0, 1.0, 0.7]
+
+    # 必须写成绝对话题：插件发布在 mujoco_ros2_control_node 的子节点命名空间下
+    # （相对名会变成 /base_motion_plugin/base_motion_state），控制器与 TF 节点在根命名空间。
+    base_motion_topic: /base_motion_state
+    # 基座状态超过 100 ms 未更新即冻结指令（不切状态）
+    base_state_timeout: 0.1
+    # 用 v/a 按时间戳外推的最大时长：500 Hz 下正常只有 1~2 ms，50 ms 是断流保护上限
+    inertial_hold_max_extrapolation: 0.05
+    # 热启动下 1~3 次就收敛；默认 200 次在极端位形下会吃满 2 ms 控制周期
+    inertial_hold_ik_iterations: 10
+
+# 插件参数必须落在 mujoco_ros2_control_node 这个节点上：mujoco_ros2_control 在
+# controller_manager 进程内另外建了一个同名节点承载插件，按 controller_manager 键
+# 写的参数到不了它（详见 launch_pack/config/ros2_controller.yaml 的说明）。
+mujoco_ros2_control_node:
+  ros__parameters:
+    mujoco_plugins:
+      base_motion_plugin:
+        type: arm_base_motion/BaseMotionPlugin
+        body: base_link
+        # 绝对名，与控制器 / TF 节点对齐（见上面 base_motion_topic 的说明）
+        topic: /base_motion_state
+        # 给「复位 → 切 inertial_hold → 快照目标」留出时间，之后基座才开始动
+        start_delay: 12.0
+        # 平面复合正弦：x 0.15 m @ 0.2 Hz、y 0.10 m @ 0.32 Hz（相位差 90°）、
+        # yaw ±15° @ 0.15 Hz。幅值按下式限定在可达域内（见 docs/execute 文档）。
+        x_amplitude: 0.15
+        x_frequency: 0.20
+        x_phase: 0.0
+        y_amplitude: 0.10
+        y_frequency: 0.32
+        # 相位保持 0：插件会把 sin(φ) 减掉保证连续起步，非零相位会让轨迹变成单侧偏移
+        y_phase: 0.0
+        yaw_amplitude_deg: 15.0
+        # 0.10 Hz 而不是 0.15：joint6 的阻尼决定了姿态误差 ≈ 2·ω_yaw/kp，扫频太高就压不住；
+        # 15° 幅值保持不变（演示观感不变，只是摆得慢一点）。
+        yaw_frequency: 0.10
+        yaw_phase: 0.0

@@ -29,6 +29,10 @@ public:
     void set_posture_reference(const Eigen::VectorXd& reference);
     void clear_posture_reference();
 
+    /// 限制单次 inverse_kinamic() 的迭代上限（<= 0 恢复默认 200）
+    /// @note 实例状态：仅 inertial_hold 这类「每拍热启动」的调用方改它，离开时须恢复 0
+    void set_iteration_limit(int limit);
+
     // 关节空间状态到用户定义的任务空间状态。
     bool forward_kinamic(const Eigen::VectorXd& joint_pos, Eigen::VectorXd* task_pos);
 

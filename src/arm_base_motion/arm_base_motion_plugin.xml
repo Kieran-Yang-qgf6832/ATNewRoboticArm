@@ -1,0 +1,11 @@
+<library path="arm_base_motion_plugin">
+  <class name="arm_base_motion/BaseMotionPlugin"
+         type="arm_base_motion::BaseMotionPlugin"
+         base_class_type="mujoco_ros2_control_plugins::MuJoCoROS2ControlPluginBase">
+    <description>
+      按参数化复合正弦（x/y 平移 + yaw）驱动 mocap 基座的位姿，并发布
+      robot_msgs/BaseMotionState（world 系位姿 + 线/角速度 + 线/角加速度）。
+      用于「基座运动补偿 / 末端惯性空间保持」的仿真验证。
+    </description>
+  </class>
+</library>

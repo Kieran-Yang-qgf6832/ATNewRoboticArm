@@ -44,7 +44,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 
-# 前三个是「命令 ↔ 状态」对比的必需项，后三个是任务层的关节空间意图。
+# 前三个是「命令 ↔ 状态」对比的必需项，后三个是任务层的关节空间意图；
+# 末尾两个只在使用基座运动补偿（inertial_hold）时才有数据，其它场景订阅后等不到消息也不报错。
 BAG_TOPICS = [
     "/joint_states",
     "/arm_controller/joint_command",
@@ -52,6 +53,8 @@ BAG_TOPICS = [
     "/arm_joint_traj",
     "/arm_joint_waypoints",
     "/arm_servo",
+    "/base_motion_state",
+    "/arm_controller/inertial_hold_status",
 ]
 
 # record_bag 的真值写法（launch 参数是字符串，不能用 bool()）。

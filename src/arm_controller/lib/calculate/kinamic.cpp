@@ -26,6 +26,10 @@ void IKSolver::set_solve_options(double tolerance, double axis_tolerance, double
     position_accept_tolerance_   = position_accept_tolerance;
 }
 
+void IKSolver::set_iteration_limit(int limit) {
+    iteration_limit_override_ = limit > 0 ? limit : 0;
+}
+
 void IKSolver::record_error(const Eigen::VectorXd& error) {
     last_error_norm_          = error.norm();
     last_position_error_norm_ = error.size() >= 6 ? error.head<3>().norm() : last_error_norm_;
@@ -226,7 +230,9 @@ IKSolver::SolveResult IKSolver::solve(const Eigen::VectorXd& target, Eigen::Vect
     double trust_radius        = config.trust_initial;
     int consecutive_rejections = 0;
 
-    for (int iteration = 0; iteration < config.max_iterations; ++iteration) {
+    // 热启动场景（inertial_hold）可以用调用方给的更紧的迭代预算，见 set_iteration_limit()。
+    const int iteration_limit = iteration_limit_override_ > 0 ? iteration_limit_override_ : config.max_iterations;
+    for (int iteration = 0; iteration < iteration_limit; ++iteration) {
         last_iterations_ = iteration + 1;
 
         if (!jacobian(workspace_.solution, workspace_.error, &workspace_.task_jacobian)) {

@@ -61,6 +61,12 @@ void ArmSolve::clear_posture_reference() {
     }
 }
 
+void ArmSolve::set_iteration_limit(int limit) {
+    if (ik_solver_ != nullptr) {
+        ik_solver_->set_iteration_limit(limit);
+    }
+}
+
 IKSolver::SolveResult ArmSolve::last_ik_result() const {
     return ik_solver_ != nullptr ? ik_solver_->last_result() : IKSolver::SolveResult::Failed;
 }

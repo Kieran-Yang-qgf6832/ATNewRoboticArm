@@ -78,9 +78,10 @@ constexpr double kJointLimitFaultSlack = 0.05;
 namespace {
 
 /// 实机模式下不可用的状态：teach 依赖「kp = 0 + 纯阻尼」，而 MCU 只跑自己的位置环；
-/// measure 需要关节加速度与 joint6 激励，而 MCU 既不上报加速度、joint6 也没有电机。
+/// measure 需要关节加速度与 joint6 激励，而 MCU 既不上报加速度、joint6 也没有电机；
+/// inertial_hold 的全部输入来自仿真侧基座驱动插件发出的基座状态话题，实机上不存在。
 bool state_unavailable_on_real(const std::string& state_name) {
-    return state_name == "teach_pendant" || state_name == "measure";
+    return state_name == "teach_pendant" || state_name == "measure" || state_name == "inertial_hold";
 }
 
 /// 自己产生力矩前馈、不能被斜率限制改写的状态（O19）：
@@ -195,6 +196,22 @@ controller_interface::CallbackReturn ArmController::on_init() {
     // on_init 里 auto_declare，否则 YAML 里写了也会被静默忽略。
     auto_declare<double>("measure_traj_collision_safe_distance", 0.0);
     auto_declare<double>("measure_traj_ground_clearance", 0.0);
+    // 惯性空间保持（inertial_hold）：基座运动补偿状态的配置。
+    // 增益单独一组：为空时逐项回落 default_kp/kd。末端三个关节的全局增益很软
+    // （10/10/1），基座一跑就会明显滞后，而改全局值会让 reset/重力静差等已验证行为重做。
+    auto_declare<std::vector<double>>("inertial_hold_kp", {});
+    auto_declare<std::vector<double>>("inertial_hold_kd", {});
+    // 基座状态话题（robot_msgs/msg/BaseMotionState），由仿真侧基座驱动插件发布。
+    auto_declare<std::string>("base_motion_topic", "base_motion_state");
+    // 基座状态超过该时长未更新即冻结关节指令（秒）。
+    auto_declare<double>("base_state_timeout", 0.1);
+    // 用 v/a 按时间戳外推的最大时长（秒）：超过它不再外推，避免断流时无声发散。
+    auto_declare<double>("inertial_hold_max_extrapolation", 0.05);
+    // 该状态内单次逆解的迭代上限：热启动下 1~3 次即可收敛，默认 200 次的极端情况会吃满
+    // 整个 2 ms 控制周期。
+    auto_declare<int>("inertial_hold_ik_iterations", 10);
+    // 速度前馈缩放：1 = 正常，0 = 关闭（A/B 用），负值 = 反向（验证符号）。
+    auto_declare<double>("inertial_hold_velocity_ff", 1.0);
     // 任务空间维度：6 = 完整位姿（仿真）；5 = 位置 3 + 工具指向 2，绕工具轴的滚转不控
     // （实机 joint6 无电机、机械锁死，实际只有 5 个自由度）。
     auto_declare<int>("task_dim", 6);
@@ -392,11 +409,41 @@ controller_interface::CallbackReturn ArmController::on_init() {
                 result.successful = false;
                 result.reason     = name + " cannot be changed after initialization";
                 return result;
-            } else if (name == "default_kp" || name == "default_kd" || name == "reset_joint_pos") {
+            } else if (name == "default_kp" || name == "default_kd" || name == "reset_joint_pos"
+                       || name == "inertial_hold_kp" || name == "inertial_hold_kd") {
                 // 数组长度不得超过关节数，避免运行时重新分配内存。
                 if (param.as_double_array().size() > joints_name.size()) {
                     result.successful = false;
                     result.reason     = name + " size must be less than or equal to joints size";
+                    return result;
+                }
+            } else if (name == "base_motion_topic") {
+                // 空话题名会让订阅落到一个无意义的默认名上，属于配置错误。
+                if (param.as_string().empty()) {
+                    result.successful = false;
+                    result.reason     = "base_motion_topic must not be empty";
+                    return result;
+                }
+            } else if (name == "base_state_timeout" || name == "inertial_hold_max_extrapolation") {
+                // 0 = 立即判超时 / 不外推；负值没有物理意义。
+                const double value = param.as_double();
+                if (!std::isfinite(value) || value < 0.0) {
+                    result.successful = false;
+                    result.reason     = name + " must be non-negative";
+                    return result;
+                }
+            } else if (name == "inertial_hold_ik_iterations") {
+                // 0 会让逆解一次都不迭代，直接退化成「永远失败」。
+                if (param.as_int() <= 0) {
+                    result.successful = false;
+                    result.reason     = "inertial_hold_ik_iterations must be positive";
+                    return result;
+                }
+            } else if (name == "inertial_hold_velocity_ff") {
+                // 允许 0（关闭）与负值（验证符号），但不能是 NaN/Inf。
+                if (!std::isfinite(param.as_double())) {
+                    result.successful = false;
+                    result.reason     = "inertial_hold_velocity_ff must be finite";
                     return result;
                 }
             } else if (name == "admittance_mass" || name == "admittance_damping" || name == "admittance_stiffness") {

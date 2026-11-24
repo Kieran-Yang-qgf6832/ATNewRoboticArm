@@ -2491,3 +2491,456 @@ bool ParamterMeasureState::run(const rclcpp::Time& time) {
 
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// InertialHoldState：基座运动补偿 / 末端惯性空间保持
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/**
+ * @brief 把 Isometry 位姿转成 6 维任务坐标（位置 + 旋转向量）
+ *
+ * 与 @ref Default6DofTaskSpaceMapping::position_map 的约定保持一致：旋转向量取
+ * @c AngleAxisd 的 @c angle·axis，小角度时直接置零，避免除零。
+ */
+bool isometry_to_task_position(const Eigen::Isometry3d& pose, Eigen::VectorXd* task_position) {
+    if (task_position == nullptr || task_position->size() != 6 || !pose.matrix().allFinite()) {
+        return false;
+    }
+    task_position->head<3>() = pose.translation();
+    const Eigen::AngleAxisd rotation(pose.linear());
+    if (std::abs(rotation.angle()) < 1e-12) {
+        task_position->tail<3>().setZero();
+    } else {
+        task_position->tail<3>() = rotation.angle() * rotation.axis();
+    }
+    return task_position->allFinite();
+}
+
+/// 由基座位姿构造 T_world_base（位姿无效时返回单位阵）
+Eigen::Isometry3d world_base_transform(const Eigen::Vector3d& position, const Eigen::Quaterniond& orientation) {
+    Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+    const Eigen::Quaterniond normalized = orientation.normalized();
+    if (position.allFinite() && normalized.coeffs().allFinite() && normalized.norm() > 1e-9) {
+        transform.linear()     = normalized.toRotationMatrix();
+        transform.translation() = position;
+    }
+    return transform;
+}
+
+} // namespace
+
+InertialHoldState::InertialHoldState(const std::string& name, std::any ctx)
+    : FSM(name, ctx)
+    , factory(std::any_cast<FSMArmControlFactory*>(ctx)) {
+    if (factory == nullptr || factory->node_ == nullptr) {
+        return;
+    }
+
+    auto node = factory->node_;
+    std::vector<std::string> joints;
+    node->get_parameter("joints", joints);
+    joint_count_ = joints.size();
+    node->get_parameter("real_mode", real_mode_);
+
+    // 增益：inertial_hold_kp/kd 为空时逐项回落 default_kp/kd（见 ADR：不改全局增益，
+    // 否则 reset/重力静差等已验证行为要重做一遍）。
+    std::vector<double> default_kp;
+    std::vector<double> default_kd;
+    node->get_parameter("default_kp", default_kp);
+    node->get_parameter("default_kd", default_kd);
+    node->get_parameter("inertial_hold_kp", kp_param_);
+    node->get_parameter("inertial_hold_kd", kd_param_);
+
+    kp_.resize(joint_count_);
+    kd_.resize(joint_count_);
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        const float fallback_kp    = i < default_kp.size() ? static_cast<float>(default_kp[i]) : 0.0f;
+        const float fallback_kd    = i < default_kd.size() ? static_cast<float>(default_kd[i]) : 0.0f;
+        kp_[i]                     = i < kp_param_.size() ? static_cast<float>(kp_param_[i]) : fallback_kp;
+        kd_[i]                     = i < kd_param_.size() ? static_cast<float>(kd_param_[i]) : fallback_kd;
+    }
+
+    // 基座状态接口与时序参数（构造期读一次；改 YAML 必须重启控制器）。
+    double timeout_seconds       = 0.1;
+    double max_extrapolation     = 0.05;
+    node->get_parameter("base_motion_topic", base_topic_);
+    node->get_parameter("base_state_timeout", timeout_seconds);
+    node->get_parameter("inertial_hold_max_extrapolation", max_extrapolation);
+    node->get_parameter("inertial_hold_ik_iterations", ik_iterations_);
+    node->get_parameter("inertial_hold_velocity_ff", velocity_ff_scale_);
+    timeout_ns_           = static_cast<int64_t>(std::llround(std::max(0.0, timeout_seconds) * 1e9));
+    max_extrapolation_ns_ = static_cast<int64_t>(std::llround(std::max(0.0, max_extrapolation) * 1e9));
+    if (ik_iterations_ <= 0) {
+        ik_iterations_ = 10;
+    }
+
+    // 实时路径的 buffer 全部在构造期分配。
+    measured_.setZero(joint_count_);
+    seed_.setZero(joint_count_);
+    joint_vel_cmd_.setZero(joint_count_);
+    zero_.setZero(joint_count_);
+    task_target_.setZero(6);
+    task_velocity_.setZero(6);
+    hold_position_.assign(joint_count_, 0.0f);
+
+    gravity_.initialize(factory, joint_count_, name.c_str());
+
+    base_sub_ = node->create_subscription<robot_msgs::msg::BaseMotionState>(
+        base_topic_, rclcpp::QoS(rclcpp::KeepLast(5)),
+        [this](const robot_msgs::msg::BaseMotionState::SharedPtr msg) { on_base_motion_state(*msg); });
+
+    // 诊断话题按 200 Hz 发布（控制周期 500 Hz 的 5 倍降采样），避免在实时线程做 ROS 通信。
+    status_pub_ = node->create_publisher<robot_msgs::msg::InertialHoldStatus>("~/inertial_hold_status", rclcpp::QoS(10));
+    status_timer_ = node->create_wall_timer(std::chrono::milliseconds(5), [this]() { publish_status(); });
+
+    std::string kp_text;
+    std::string kd_text;
+    for (std::size_t i = 0; i < kp_.size(); ++i) {
+        kp_text += (i == 0 ? "" : ", ") + std::to_string(kp_[i]);
+        kd_text += (i == 0 ? "" : ", ") + std::to_string(kd_[i]);
+    }
+    RCLCPP_INFO(
+        node->get_logger(),
+        "inertial_hold: base topic '%s', timeout %.0f ms, extrapolation limit %.0f ms, IK iteration limit %d, "
+        "kp=[%s], kd=[%s]",
+        base_topic_.c_str(), static_cast<double>(timeout_ns_) / 1e6, static_cast<double>(max_extrapolation_ns_) / 1e6,
+        ik_iterations_, kp_text.c_str(), kd_text.c_str());
+}
+
+bool InertialHoldState::enter(const std::string& last_state, const rclcpp::Time& time) {
+    (void)last_state;
+    (void)time;
+
+    if (factory == nullptr || factory->node_ == nullptr) {
+        return false;
+    }
+    if (real_mode_) {
+        // 实机没有基座状态话题，进入只会靠「超时 -> 冻结」拦住，日志里会像运行期故障；
+        // 这里按配置错误直接拒绝（与 teach_pendant / measure 的处理一致）。
+        RCLCPP_ERROR(factory->node_->get_logger(), "inertial_hold 在 real_mode 下不可用：实机没有基座状态话题");
+        return false;
+    }
+    if (factory->model_ == nullptr || factory->arm_solve_ == nullptr || factory->state_.size() != joint_count_
+        || factory->command_.size() != joint_count_ || kp_.size() != joint_count_) {
+        RCLCPP_ERROR(factory->node_->get_logger(), "inertial_hold: 模型/求解器/关节缓存未就绪，拒绝进入");
+        return false;
+    }
+
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        measured_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+    }
+    if (!measured_.allFinite()) {
+        RCLCPP_ERROR(factory->node_->get_logger(), "inertial_hold: 实测关节角含非有限值，拒绝进入");
+        return false;
+    }
+
+    // 目标快照：world 系 = T_world_base × 当前末端位姿。没有基座状态时退化为单位基座位姿
+    // （等于「按 base 系保持」），并明确告警——这不是正常路径。
+    Eigen::Isometry3d world_base = Eigen::Isometry3d::Identity();
+    BaseSample sample;
+    if (read_latest_base_sample(&sample) && sample.stamp_ns > 0) {
+        world_base = world_base_transform(sample.position, sample.orientation);
+    } else {
+        RCLCPP_WARN(
+            factory->node_->get_logger(),
+            "inertial_hold: 进入时尚未收到基座状态（话题 '%s'），目标暂以单位基座位姿快照；"
+            "收到后目标不会重算，请在基座插件已发布后再切入",
+            base_topic_.c_str());
+    }
+
+    world_target_ = world_base * factory->model_->forward_kinematics(measured_);
+    if (!world_target_.matrix().allFinite()) {
+        RCLCPP_ERROR(factory->node_->get_logger(), "inertial_hold: 末端位姿正解含非有限值，拒绝进入");
+        return false;
+    }
+
+    // 参考连续性：第一拍就是当前实测关节角，速度前馈从零开始。
+    seed_ = measured_;
+    joint_vel_cmd_.setZero();
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        hold_position_[i] = static_cast<float>(measured_(static_cast<Eigen::Index>(i)));
+    }
+
+    // 逆解按「热启动 + 紧迭代预算」配置；离开时在 exit() 里恢复默认 200 次。
+    factory->arm_solve_->set_iteration_limit(ik_iterations_);
+    factory->arm_solve_->set_solve_options(0.0, 0.0, 0.0);
+    factory->arm_solve_->clear_posture_reference();
+
+    write_command(true);
+
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_snapshot_                    = StatusSample{};
+        status_snapshot_.target             = world_target_;
+        status_snapshot_.actual             = world_target_;
+        status_snapshot_.base_state_valid   = true;
+        status_snapshot_.ik_converged       = true;
+        status_snapshot_.valid              = true;
+    }
+
+    RCLCPP_INFO(
+        factory->node_->get_logger(),
+        "inertial_hold: 目标已锁存 world=(%.3f, %.3f, %.3f) m，进入时基座=(%.3f, %.3f) m / yaw=%.2f deg",
+        world_target_.translation().x(), world_target_.translation().y(), world_target_.translation().z(),
+        world_base.translation().x(), world_base.translation().y(),
+        std::atan2(world_base.linear()(1, 0), world_base.linear()(0, 0)) / kDegToRad);
+    return true;
+}
+
+bool InertialHoldState::exit(const std::string& next_state) {
+    (void)next_state;
+    if (factory != nullptr && factory->arm_solve_ != nullptr) {
+        // 迭代上限是求解器实例状态：不恢复会把 cart_traj 的预检/执行也压到 10 次。
+        factory->arm_solve_->set_iteration_limit(0);
+    }
+    return true;
+}
+
+const std::string& InertialHoldState::check_switch() const {
+    if (factory == nullptr || factory->exp_state_name.empty() || factory->exp_state_name == fsm_name_) {
+        return fsm_name_;
+    }
+    // 与 idel 一致：任何 exp_state 都可以随时切走（安全出口只有一个方向）。
+    return factory->exp_state_name;
+}
+
+bool InertialHoldState::run(const rclcpp::Time& time) {
+    if (factory == nullptr || factory->node_ == nullptr || factory->model_ == nullptr || factory->arm_solve_ == nullptr
+        || factory->state_.size() != joint_count_ || factory->command_.size() != joint_count_) {
+        return false;
+    }
+
+    const int64_t now_ns = time.nanoseconds();
+
+    BaseSample sample;
+    if (!read_latest_base_sample(&sample) || sample.stamp_ns <= 0) {
+        write_command(true);
+        cache_status(world_target_, world_target_, 0.0, 0.0, false, false, now_ns);
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "inertial_hold: 尚未收到基座状态（话题 '%s'），指令冻结", base_topic_.c_str());
+        return true;
+    }
+
+    const int64_t age_ns = now_ns - sample.stamp_ns;
+    if (age_ns > timeout_ns_ || age_ns < -timeout_ns_) {
+        // 失去世界系参照：只有冻结不会产生突跳。不切状态——切回 idel 会引入一次
+        // 状态切换与力矩斜率，而继续外推会让误差无声发散。
+        write_command(true);
+        cache_status(world_target_, world_target_, 0.0, 0.0, false, false, now_ns);
+        RCLCPP_ERROR_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
+            "inertial_hold: 基座状态已 %.1f ms 未更新（超时 %.0f ms），关节指令冻结并等待话题恢复",
+            static_cast<double>(age_ns) / 1e6, static_cast<double>(timeout_ns_) / 1e6);
+        return true;
+    }
+
+    BaseSample state = sample;
+    extrapolate_base_sample(sample, now_ns, &state);
+    const Eigen::Isometry3d world_base = world_base_transform(state.position, state.orientation);
+
+    // world 目标 → base 系目标（固定基座模型：base 系就是 Pinocchio 模型的「world」）。
+    const Eigen::Isometry3d base_target = world_base.inverse() * world_target_;
+    if (!isometry_to_task_position(base_target, &task_target_)) {
+        write_command(true);
+        cache_status(world_target_, world_target_, 0.0, 0.0, true, false, now_ns);
+        RCLCPP_ERROR_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "inertial_hold: base 系目标位姿含非有限值，指令冻结");
+        return true;
+    }
+
+    // 逆解：种子是上一拍解。基座动得慢，相邻两拍目标只差毫米级，热启动通常 1~3 次收敛。
+    const bool ik_ok = factory->arm_solve_->inverse_kinamic(task_target_, &seed_);
+    if (!ik_ok) {
+        // 沿用上一拍指令：目标已不可达时，宁可停在原地等人看，也不把怪解发出去。
+        write_command(true);
+        cache_status(world_target_, world_target_, 0.0, 0.0, true, false, now_ns);
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 1000,
+            "inertial_hold: 逆解未收敛（目标可能已超出可达集，残余 %.4f m），沿用上一拍指令；"
+            "检查基座轨迹幅值或起始位形",
+            factory->arm_solve_->last_ik_position_error_norm());
+        return true;
+    }
+
+    // 速度前馈：world 系目标固定时，它在 base 系里的速度 = -(Rᵀ·v_base + ω_base × p_base)。
+    const Eigen::Matrix3d rotation_base_to_world = world_base.linear();
+    const Eigen::Vector3d p_base                 = base_target.translation();
+    const Eigen::Vector3d omega_base             = rotation_base_to_world.transpose() * state.angular_velocity;
+    const Eigen::Vector3d v_base                 = rotation_base_to_world.transpose() * state.linear_velocity;
+    task_velocity_.head<3>()                     = -v_base - omega_base.cross(p_base);
+    task_velocity_.tail<3>()                     = -omega_base;
+    // 0 = 关闭前馈：关掉后若误差显著变小，说明前馈符号/幅值有问题，而不是刚度不够。
+    task_velocity_ *= velocity_ff_scale_;
+    if (!factory->arm_solve_->inverse_velocity(seed_, task_velocity_, &joint_vel_cmd_)) {
+        joint_vel_cmd_.setZero();
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "inertial_hold: 速度前馈求解失败，本周期速度前馈置零");
+    }
+
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        hold_position_[i] = static_cast<float>(seed_(static_cast<Eigen::Index>(i)));
+        measured_(static_cast<Eigen::Index>(i)) = factory->state_[i].position;
+    }
+    write_command(false);
+
+    // 误差用**实测**关节角算（不用解算结果），否则量到的只是自己的参考。
+    const Eigen::Isometry3d actual = world_base * factory->model_->forward_kinematics(measured_);
+    const double position_error    = (actual.translation() - world_target_.translation()).norm();
+    const double orientation_error = Eigen::AngleAxisd(world_target_.linear() * actual.linear().transpose()).angle();
+    cache_status(world_target_, actual, position_error, orientation_error, true, true, now_ns);
+
+    return true;
+}
+
+void InertialHoldState::on_base_motion_state(const robot_msgs::msg::BaseMotionState& msg) {
+    BaseSample sample;
+    sample.stamp_ns = rclcpp::Time(msg.header.stamp).nanoseconds();
+    sample.position = Eigen::Vector3d(msg.pose.position.x, msg.pose.position.y, msg.pose.position.z);
+    sample.orientation =
+        Eigen::Quaterniond(msg.pose.orientation.w, msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z);
+    sample.linear_velocity =
+        Eigen::Vector3d(msg.twist.linear.x, msg.twist.linear.y, msg.twist.linear.z);
+    sample.angular_velocity =
+        Eigen::Vector3d(msg.twist.angular.x, msg.twist.angular.y, msg.twist.angular.z);
+    sample.linear_acceleration =
+        Eigen::Vector3d(msg.accel.linear.x, msg.accel.linear.y, msg.accel.linear.z);
+    sample.angular_acceleration =
+        Eigen::Vector3d(msg.accel.angular.x, msg.accel.angular.y, msg.accel.angular.z);
+    sample.motion_active = msg.motion_active;
+
+    if (!sample.position.allFinite() || !sample.orientation.coeffs().allFinite() || !sample.linear_velocity.allFinite()
+        || !sample.angular_velocity.allFinite() || !sample.linear_acceleration.allFinite()
+        || !sample.angular_acceleration.allFinite() || sample.orientation.norm() < 1e-9) {
+        RCLCPP_WARN_THROTTLE(
+            factory->node_->get_logger(), *factory->node_->get_clock(), 2000,
+            "inertial_hold: 收到非法的基座状态消息（非有限值或零四元数），已丢弃");
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(base_mutex_);
+    latest_base_ = sample;
+    has_base_.store(true, std::memory_order_relaxed);
+}
+
+bool InertialHoldState::read_latest_base_sample(BaseSample* sample) {
+    if (sample == nullptr) {
+        return false;
+    }
+    // 实时线程只 try_lock：拿不到锁就沿用上一次成功读到的拷贝（时间戳会自然老化，
+    // 若真的断流，超时分支会接管）。
+    std::unique_lock<std::mutex> lock(base_mutex_, std::try_to_lock);
+    if (lock.owns_lock()) {
+        if (!has_base_.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        last_base_ = latest_base_;
+    } else if (!has_base_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    *sample = last_base_;
+    return true;
+}
+
+void InertialHoldState::extrapolate_base_sample(const BaseSample& sample, int64_t now_ns, BaseSample* out) const {
+    if (out == nullptr) {
+        return;
+    }
+    *out = sample;
+
+    int64_t dt_ns = now_ns - sample.stamp_ns;
+    if (dt_ns < 0) {
+        dt_ns = 0;
+    }
+    if (max_extrapolation_ns_ > 0 && dt_ns > max_extrapolation_ns_) {
+        dt_ns = max_extrapolation_ns_;
+    }
+    const double dt = static_cast<double>(dt_ns) * 1e-9;
+
+    out->position = sample.position + sample.linear_velocity * dt + 0.5 * sample.linear_acceleration * dt * dt;
+
+    // 角速度在世界系表达 -> 左乘增量旋转；平面基座下只剩 yaw 分量。
+    const Eigen::Vector3d dtheta = sample.angular_velocity * dt + 0.5 * sample.angular_acceleration * dt * dt;
+    const double angle           = dtheta.norm();
+    if (angle > 1e-12) {
+        const Eigen::Quaterniond delta(Eigen::AngleAxisd(angle, dtheta / angle));
+        out->orientation = (delta * sample.orientation).normalized();
+    }
+    out->stamp_ns = now_ns;
+}
+
+void InertialHoldState::write_command(bool frozen) {
+    if (factory == nullptr || factory->command_.size() != joint_count_ || hold_position_.size() != joint_count_
+        || kp_.size() != joint_count_ || kd_.size() != joint_count_) {
+        return;
+    }
+
+    const bool gravity_ok = gravity_.refresh(factory, joint_count_, fsm_name_.c_str());
+    for (std::size_t i = 0; i < joint_count_; ++i) {
+        auto& command    = factory->command_[i];
+        command.position = hold_position_[i];
+        // 冻结时速度前馈必须置零：留着上一拍的 v_ref 会让 kd·(v_ref − v) 继续推着臂走。
+        command.velocity = frozen ? 0.0f : static_cast<float>(joint_vel_cmd_(static_cast<Eigen::Index>(i)));
+        command.torque   = gravity_ok ? gravity_.torque(i) : 0.0f;
+        command.kp       = kp_[i];
+        command.kd       = kd_[i];
+        command.ki       = 0.0f;
+    }
+}
+
+void InertialHoldState::cache_status(
+    const Eigen::Isometry3d& target, const Eigen::Isometry3d& actual, double position_error, double orientation_error,
+    bool base_state_valid, bool ik_converged, int64_t stamp_ns) {
+    std::unique_lock<std::mutex> lock(status_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        return;
+    }
+    status_snapshot_.target            = target;
+    status_snapshot_.actual            = actual;
+    status_snapshot_.position_error    = position_error;
+    status_snapshot_.orientation_error = orientation_error;
+    status_snapshot_.base_state_valid  = base_state_valid;
+    status_snapshot_.ik_converged      = ik_converged;
+    status_snapshot_.stamp_ns          = stamp_ns;
+    status_snapshot_.valid             = true;
+}
+
+void InertialHoldState::publish_status() {
+    if (status_pub_ == nullptr || factory == nullptr || factory->node_ == nullptr) {
+        return;
+    }
+
+    StatusSample snapshot;
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        if (!status_snapshot_.valid) {
+            return;
+        }
+        snapshot = status_snapshot_;
+    }
+
+    const auto fill_pose = [](geometry_msgs::msg::Pose* pose, const Eigen::Isometry3d& transform) {
+        pose->position.x = transform.translation().x();
+        pose->position.y = transform.translation().y();
+        pose->position.z = transform.translation().z();
+        const Eigen::Quaterniond orientation(transform.linear());
+        pose->orientation.w = orientation.w();
+        pose->orientation.x = orientation.x();
+        pose->orientation.y = orientation.y();
+        pose->orientation.z = orientation.z();
+    };
+
+    status_msg_.header.stamp    = rclcpp::Time(snapshot.stamp_ns);
+    status_msg_.header.frame_id = "world";
+    fill_pose(&status_msg_.target_pose, snapshot.target);
+    fill_pose(&status_msg_.actual_pose, snapshot.actual);
+    status_msg_.position_error    = snapshot.position_error;
+    status_msg_.orientation_error = snapshot.orientation_error;
+    status_msg_.base_state_valid  = snapshot.base_state_valid;
+    status_msg_.ik_converged      = snapshot.ik_converged;
+    status_pub_->publish(status_msg_);
+}

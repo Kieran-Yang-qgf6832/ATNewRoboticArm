@@ -15,7 +15,12 @@
   - 仿真：`ArmController → SimPidController → mujoco_ros2_control`
   - 实机：`ArmController → ArmRealInterfaces → USB CDC → MCU`
 - **控制器侧 FSM**：`idel` / `reset` / `cart_traj` / `joint_traj` / `servo` /
-  `admittance` / `teach_pendant` / `measure`，通过 `exp_state` 切换。
+  `admittance` / `teach_pendant` / `measure` / `inertial_hold`，通过 `exp_state` 切换。
+- **基座运动补偿**：`inertial_hold` 状态让末端在 world 系保持固定位姿，同时基座按
+  x/y 平移 + yaw 运动；基座位姿/速度/加速度由仿真插件以 500 Hz 发布
+  （`robot_msgs/BaseMotionState`），控制器按时间戳外推后做运动学补偿。
+  仿真基线：位置 RMS 0.42 mm、姿态峰值 0.36°。见
+  [docs/execute/10-基座运动补偿.md](docs/execute/10-基座运动补偿.md)。
 - **配置驱动任务层**：任务写在 `src/tasks/config/tasks.yaml`，新增任务不需要改 C++；
   步骤类型是封闭集合，集中在 `src/tasks/executor/step_types.cpp`。
 - **模型无关的计算分层**：`ArmSolve → IKSolver → ModelBase + TaskMapping`。
@@ -62,6 +67,10 @@ ros2 launch launch_pack arm_task_sim.launch.py task_sequence:=pos_move_demo
 
 # 带视觉的抬高场景 + box_move
 ros2 launch launch_pack arm_task_vision_sim.launch.py
+
+# 基座运动补偿 / 末端惯性空间保持（mocap 基座 + 动态 TF）
+ros2 launch arm_base_motion inertial_hold_sim.launch.py
+ros2 run arm_base_motion evaluate_inertial_hold.py --duration 30
 ```
 
 ### 实机
@@ -117,7 +126,8 @@ ros2 run parameter_identify identify_arm \
 | `mujoco_ros2_control` | ament_cmake | MuJoCo 的 ros2_control 插件（第三方） |
 | `parameter_identify` | ament_python | 离线参数辨识 CLI（`identify_arm`） |
 | `view` | ament_python | 红色目标检测、仿真相机 TF、数值验收 |
-| `robot_msgs` | ament_cmake | `CartTrajCmd` / `JointTrajCmd` / `AdmittanceCmd` / `ServoCtrlCmd` / `WaypointTrajCmd` 等 |
+| `robot_msgs` | ament_cmake | `CartTrajCmd` / `JointTrajCmd` / `AdmittanceCmd` / `ServoCtrlCmd` / `WaypointTrajCmd` / `BaseMotionState` / `InertialHoldStatus` 等 |
+| `arm_base_motion` | ament_cmake | 基座运动补偿仿真支撑：mocap 基座驱动插件、`world→base_link` TF 节点、MJCF 生成与误差统计脚本、一键 launch |
 
 ## 第三方库
 

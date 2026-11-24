@@ -110,6 +110,17 @@ public:
                            double axis_accept_tolerance = 0.0, double position_accept_tolerance = 0.0);
 
     /**
+     * @brief 限制单次 solve() 的迭代上限（<= 0 表示沿用 @ref Tuning::max_iterations）
+     *
+     * 默认 200 次是给「离目标较远、需要大范围收敛」的调用方准备的；像 inertial_hold
+     * 这种每拍热启动（初值就是上一拍的解）的场合，相邻两拍的目标只差毫米级，1~3 次
+     * 就能收敛，而 200 次的上限在极端位形下会吃满整个 2 ms 控制周期。
+     *
+     * @note 这是求解器实例状态，由调用方负责在离开该使用场景时恢复为 0。
+     */
+    void set_iteration_limit(int limit);
+
+    /**
      * @brief 设置零空间偏好的参考位形（轨迹起点关节角）
      *
      * 控制器每个周期都会用「当前实测关节角」重新调用 solve()，若偏好参考也跟着
@@ -220,6 +231,7 @@ private:
     double axis_accept_tolerance_{0.0};         ///< >0 时工具轴的通过容差（>= 收敛容差）；迭代结束后的放宽判定
     double position_accept_tolerance_{0.0};     ///< >0 时位置的通过容差（米，>= 收敛容差）；迭代结束后的放宽判定
     double nullspace_weight_{0.0};          ///< 0 = 关闭零空间就近偏好
+    int iteration_limit_override_{0};       ///< > 0 时替代 Tuning::max_iterations（单次 solve 生效）
     Eigen::VectorXd posture_reference_;     ///< 轨迹起点关节角（构造期分配）
     bool has_posture_reference_{false};
 };

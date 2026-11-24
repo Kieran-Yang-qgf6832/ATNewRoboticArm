@@ -23,11 +23,14 @@
 #include <any>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <Eigen/Dense>
+#include <Eigen/Geometry>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/time.hpp>
 
@@ -38,7 +41,9 @@
 #include "waypoint_trajectory.hpp"
 
 #include <robot_msgs/msg/admittance_cmd.hpp>
+#include <robot_msgs/msg/base_motion_state.hpp>
 #include <robot_msgs/msg/cart_traj_cmd.hpp>
+#include <robot_msgs/msg/inertial_hold_status.hpp>
 #include <robot_msgs/msg/joint_traj_cmd.hpp>
 #include <robot_msgs/msg/servo_ctrl_cmd.hpp>
 #include <robot_msgs/msg/waypoint_traj_cmd.hpp>
@@ -846,4 +851,138 @@ private:
     bool csv_save_requested_{false};
     bool record_full_warned_{false}; ///< 记录缓冲区写满只告警一次
     MeasurePhase measure_phase_{MeasurePhase::HoldingEnd};
+};
+
+/**
+ * @brief 基座运动补偿 / 末端惯性空间保持状态
+ *
+ * 语义：机械臂基座在 world 系里按 x/y 平移 + yaw 转向运动，末端（link6）在 world 系
+ * 里保持进入状态那一刻的位姿不变。
+ *
+ * 控制律（运动学补偿）：
+ * -# 每拍把 world 系目标左乘 @c T_world_base⁻¹ 变到 base 系，得到 base 系目标；
+ * -# 用上一拍解作种子做一次阻尼最小二乘逆解，得到关节位置指令；
+ * -# 用基座旋量算期望关节速度 @c J⁻¹·(-v_base - ω_base × p_target) 作为速度前馈；
+ * -# 力矩仍走现有的重力前馈（RNEA，@c dq = ddq = 0），刚度取 @c inertial_hold_kp/kd。
+ *
+ * 坐标与时序：
+ * - 基座位姿/速度/加速度来自话题 @c base_motion_topic（默认 @c base_motion_state，
+ *   消息 @c robot_msgs/msg/BaseMotionState），订阅在构造期建立、实时路径只做定长拷贝；
+ * - 消息按时间戳用 v/a 外推到当前控制周期时刻（外推量受 @c inertial_hold_max_extrapolation
+ *   限幅），补偿运输与调度延迟；
+ * - 基座只有 x/y/yaw，基座始终水平，所以 base 系下重力方向恒定，现有 FK/Jacobian/RNEA
+ *   全部可以直接复用，不需要浮动基座模型。
+ *
+ * 失效安全（与本仓库其他状态的约定一致：状态只报告，不自己改期望状态）：
+ * - 基座话题超过 @c base_state_timeout 未更新：**冻结**关节指令（沿用上一拍位置、
+ *   速度前馈置零）并限流 ERROR，不切状态——失去世界系参照时只有冻结不会产生突跳；
+ * - 逆解不收敛（基座跑远、目标超出可达集）：同样沿用上一拍指令并限流 WARN；
+ * - @c real_mode 下拒绝进入（实机没有基座话题，属于配置错误而不是运行期故障）。
+ *
+ * @note 进入时快照「当前实测末端位姿」作为 world 目标，全程不变。
+ * @warning 实时路径（run）不做参数查询与动态内存分配；话题内容只在锁内做定长拷贝。
+ */
+class InertialHoldState : public FSM {
+public:
+    /**
+     * @brief 构造函数：读取参数、分配 buffer、建立基座话题订阅与状态发布器
+     * @param name 状态名称（"inertial_hold"）
+     * @param ctx  上下文指针，实际类型为 FSMArmControlFactory*
+     */
+    InertialHoldState(const std::string& name, std::any ctx);
+
+    /// 快照当前实测末端位姿作为 world 目标，并把指令初始化成当前位置保持
+    bool enter(const std::string& last_state, const rclcpp::Time& time) override;
+
+    /// 恢复被本状态改写的求解器迭代上限
+    bool exit(const std::string& next_state) override;
+
+    /// 允许被任意 exp_state 切走（与 idel 一致）
+    const std::string& check_switch() const override;
+
+    /// 每拍：取基座状态 → 外推 → 逆解 → 速度前馈 → 写指令 → 记录误差
+    bool run(const rclcpp::Time& time) override;
+
+private:
+    /// 基座状态的一帧快照（话题内容在回调用锁写、在 run 中用 try_lock 读）
+    struct BaseSample {
+        int64_t stamp_ns{0};                                         ///< 消息时间戳（ns，仿真/系统时钟）
+        Eigen::Vector3d position{Eigen::Vector3d::Zero()};            ///< world 系平移
+        Eigen::Quaterniond orientation{Eigen::Quaterniond::Identity()}; ///< base → world
+        Eigen::Vector3d linear_velocity{Eigen::Vector3d::Zero()};     ///< world 系线速度
+        Eigen::Vector3d angular_velocity{Eigen::Vector3d::Zero()};    ///< world 系角速度
+        Eigen::Vector3d linear_acceleration{Eigen::Vector3d::Zero()}; ///< world 系线加速度
+        Eigen::Vector3d angular_acceleration{Eigen::Vector3d::Zero()};///< world 系角加速度
+        bool motion_active{false};                                    ///< 基座轨迹是否已启动
+    };
+
+    /// 发布给外部诊断用的快照（实时线程写、定时器读）
+    struct StatusSample {
+        Eigen::Isometry3d target{Eigen::Isometry3d::Identity()};
+        Eigen::Isometry3d actual{Eigen::Isometry3d::Identity()};
+        double position_error{0.0};
+        double orientation_error{0.0};
+        bool base_state_valid{false};
+        bool ik_converged{false};
+        int64_t stamp_ns{0};
+        bool valid{false};
+    };
+
+    /// 基座话题回调（非实时线程）：校验后写入 latest_base_
+    void on_base_motion_state(const robot_msgs::msg::BaseMotionState& msg);
+
+    /// 取最新一帧基座状态；没有收到过返回 false（实时线程用 try_lock，拿不到锁沿用上次）
+    bool read_latest_base_sample(BaseSample* sample);
+
+    /// 按时间戳用 v/a 外推到 now_ns（外推量限幅），结果写进 out
+    void extrapolate_base_sample(const BaseSample& sample, int64_t now_ns, BaseSample* out) const;
+
+    /// 写指令：position = hold_position_，velocity = frozen ? 0 : joint_vel_cmd_，力矩 = 重力前馈
+    void write_command(bool frozen);
+
+    /// 记录一帧诊断快照（实时线程 try_lock，拿不到就丢弃本周期）
+    void cache_status(const Eigen::Isometry3d& target, const Eigen::Isometry3d& actual, double position_error,
+                      double orientation_error, bool base_state_valid, bool ik_converged, int64_t stamp_ns);
+
+    /// 定时器回调（非实时线程）：把 StatusSample 发布成 ~/inertial_hold_status
+    void publish_status();
+
+    FSMArmControlFactory* factory{nullptr}; ///< 状态机工厂指针
+    std::size_t joint_count_{0};            ///< 关节数量
+    bool real_mode_{false};                 ///< 实机模式（本状态不可用）
+
+    std::vector<float> kp_;                 ///< 本状态位置增益
+    std::vector<float> kd_;                 ///< 本状态速度增益
+    std::vector<double> kp_param_;          ///< 位置增益参数原始值
+    std::vector<double> kd_param_;          ///< 速度增益参数原始值
+    std::vector<float> hold_position_;      ///< 冻结/保持时下发的关节位置
+
+    Eigen::VectorXd measured_;              ///< 实测关节角（run 内缓存）
+    Eigen::VectorXd seed_;                  ///< 逆解种子 = 上一拍解
+    Eigen::VectorXd joint_vel_cmd_;         ///< 关节速度前馈
+    Eigen::VectorXd task_target_;           ///< base 系 6 维目标
+    Eigen::VectorXd task_velocity_;         ///< base 系 6 维期望速度
+    Eigen::VectorXd zero_;                  ///< 重力前馈用的零向量
+    Eigen::Isometry3d world_target_;        ///< world 系保持目标（进入时快照）
+
+    HoldGravityFeedforward gravity_;        ///< 保持路径共用的重力前馈
+
+    BaseSample latest_base_;                ///< 回调写、run 读的基座状态（受 base_mutex_ 保护）
+    BaseSample last_base_;                  ///< run 侧上一次成功读到的基座状态（锁竞争时沿用）
+    std::mutex base_mutex_;                 ///< 保护 latest_base_
+    std::atomic<bool> has_base_{false};     ///< 是否收到过基座状态（原子：锁竞争时也要能读）
+    std::string base_topic_;                ///< 基座话题名（仅用于日志）
+
+    StatusSample status_snapshot_;          ///< 状态快照（实时线程写）
+    std::mutex status_mutex_;               ///< 保护 status_snapshot_（实时线程只 try_lock）
+
+    int64_t timeout_ns_{100'000'000};       ///< 基座话题超时（ns），参数 base_state_timeout
+    int64_t max_extrapolation_ns_{50'000'000}; ///< 外推上限（ns），参数 inertial_hold_max_extrapolation
+    int ik_iterations_{10};                 ///< 单次逆解迭代上限，参数 inertial_hold_ik_iterations
+    double velocity_ff_scale_{1.0};         ///< 速度前馈缩放，参数 inertial_hold_velocity_ff（0 = 关闭，用于 A/B）
+
+    rclcpp::Subscription<robot_msgs::msg::BaseMotionState>::SharedPtr base_sub_; ///< 基座状态订阅
+    rclcpp::Publisher<robot_msgs::msg::InertialHoldStatus>::SharedPtr status_pub_; ///< 诊断发布器
+    rclcpp::TimerBase::SharedPtr status_timer_; ///< 诊断发布定时器（200 Hz，非实时线程）
+    robot_msgs::msg::InertialHoldStatus status_msg_; ///< 预分配的发布消息
 };

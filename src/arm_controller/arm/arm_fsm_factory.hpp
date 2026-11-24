@@ -92,6 +92,7 @@ public:
         register_fsm(std::make_unique<AdmittanceState>("admittance", this));      // 导纳控制
         register_fsm(std::make_unique<TeachPendantState>("teach_pendant", this)); // 示教器，可外力拖动，可配置带阻尼，重力补偿
         register_fsm(std::make_unique<ParamterMeasureState>("measure", this));    // 系统参数辨识
+        register_fsm(std::make_unique<InertialHoldState>("inertial_hold", this)); // 基座运动补偿：末端在 world 系保持不动
 
         set_init_state("idel");
     }

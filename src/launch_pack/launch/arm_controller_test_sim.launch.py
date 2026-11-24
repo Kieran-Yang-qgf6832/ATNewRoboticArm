@@ -79,6 +79,8 @@ def generate_launch_description():
             LaunchConfiguration("headless"),
             " mujoco_model:=",
             LaunchConfiguration("mujoco_model"),
+            " floating_base:=",
+            LaunchConfiguration("floating_base"),
         ]
     )
     robot_description = {
@@ -118,6 +120,14 @@ def generate_launch_description():
     # 可选控制器参数叠加文件：默认是一个空映射，传 real-compat 文件即可覆盖
     # real_mode / task_dim / allow_constrained_traj。沿用 arm_real.launch.py 的
     # 「后一个 ParameterFile 覆盖前一个」语义。
+    # 浮动基座分支：true 时 URDF 去掉 world 固定关节，base_link 成为 TF 根，
+    # world→base_link 由 arm_base_motion 的 TF 节点动态发布（基座运动补偿仿真）。
+    floating_base_arg = DeclareLaunchArgument(
+        "floating_base",
+        default_value="false",
+        description="URDF 是否去掉 world 固定关节（基座运动补偿仿真用，配 arm_base_motion）",
+    )
+
     controller_overlay_arg = DeclareLaunchArgument(
         "controller_overlay",
         default_value=os.path.join(
@@ -293,6 +303,7 @@ def generate_launch_description():
         [
             headless_arg,
             mujoco_model_arg,
+            floating_base_arg,
             controller_overlay_arg,
             show_rviz_arg,
             use_sim_time_arg,
